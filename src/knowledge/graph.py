@@ -483,8 +483,11 @@ class KnowledgeGraph:
         import matplotlib.font_manager as fm
 
         # 中文字体
+        wqy_path = "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
+        if Path(wqy_path).exists():
+            fm.fontManager.addfont(wqy_path)
         available = {f.name for f in fm.fontManager.ttflist}
-        for font in ["SimHei", "WenQuanYi Micro Hei", "Noto Sans CJK SC", "DejaVu Sans"]:
+        for font in ["WenQuanYi Micro Hei", "WenQuanYi Zen Hei", "SimHei", "Noto Sans CJK SC", "DejaVu Sans"]:
             if font in available:
                 plt.rcParams["font.sans-serif"] = [font]
                 break
