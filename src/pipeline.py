@@ -335,13 +335,16 @@ class Pipeline:
         """将电表/抄表记录写入数据库。"""
         log.info("写入 %d 条电表/抄表记录...", len(records))
         for rec in records:
+            meter_number = rec.get("meter_number", "").strip()
+            if not meter_number:
+                continue
             try:
                 meter_id = self.db.upsert_meter(
-                    meter_number=rec.get("meter_number", ""),
-                    user_id=rec.get("user_id", ""),
+                    meter_number=meter_number,
+                    user_id=rec.get("user_id"),
                     meter_type=rec.get("meter_type", "未知"),
                     asset_number=rec.get("asset_number"),
-                    multiplier=rec.get("multiplier", 1.0),
+                    multiplier=rec.get("multiplier"),
                     project_name=rec.get("project_name"),
                 )
                 month = rec.get("reading_month")

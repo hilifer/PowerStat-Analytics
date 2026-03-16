@@ -63,14 +63,14 @@ def _email_fingerprint(subject: str, sender: str, date_str: str, filename: str) 
 
 
 def _init_processed_table(db: Database):
-    """确保 processed_emails 表存在。"""
+    """确保 processed_emails 表存在（兼容旧数据库）。"""
     with db.connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS processed_emails (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 fingerprint TEXT UNIQUE NOT NULL,
                 filename    TEXT,
-                email_subject TEXT,
+                subject     TEXT,
                 email_date  TEXT,
                 processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -90,7 +90,7 @@ def _mark_processed(db: Database, fingerprint: str, filename: str,
     with db.connection() as conn:
         conn.execute(
             """INSERT OR IGNORE INTO processed_emails
-               (fingerprint, filename, email_subject, email_date)
+               (fingerprint, filename, subject, email_date)
                VALUES (?, ?, ?, ?)""",
             (fingerprint, filename, subject, date_str),
         )
@@ -197,13 +197,16 @@ def _register_routes(app: Flask, db: Database):
 
                         # 入库电表记录
                         for rec in result["records"]:
+                            meter_number = rec.get("meter_number", "").strip()
+                            if not meter_number:
+                                continue
                             try:
                                 meter_id = db.upsert_meter(
-                                    meter_number=rec.get("meter_number", ""),
-                                    user_id=rec.get("user_id", ""),
+                                    meter_number=meter_number,
+                                    user_id=rec.get("user_id"),
                                     meter_type=rec.get("meter_type", "未知"),
                                     asset_number=rec.get("asset_number"),
-                                    multiplier=rec.get("multiplier", 1.0),
+                                    multiplier=rec.get("multiplier"),
                                     project_name=rec.get("project_name"),
                                 )
                                 month = rec.get("reading_month")

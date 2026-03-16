@@ -21,6 +21,11 @@ class ExcelParser:
     # 需要过滤的汇总/无效行关键词
     SKIP_KEYWORDS = {"合计", "总计", "小计", "总合计", "汇总", "合 计", "总 计"}
 
+    # 常见项目名关键词（从文件名中提取项目名）
+    PROJECT_PATTERNS = [
+        r'([\u4e00-\u9fff]{2,}(?:光伏|工业园|产业园|项目|电站)[\u4e00-\u9fff]*)',
+    ]
+
     def __init__(self):
         self.field_mapping = config.get("field_mapping") or {}
         self.meter_type_rules = config.get("meter_type_rules") or {}
@@ -134,14 +139,16 @@ class ExcelParser:
         results = []
         col_map = self._map_columns(df.columns.tolist())
 
-        if not col_map.get("meter_number") and not col_map.get("user_id"):
-            log.debug("  Sheet '%s' 缺少电表号和用户编号列，跳过", sheet_name)
+        if not col_map.get("meter_number"):
+            log.debug("  Sheet '%s' 缺少电表号列，跳过", sheet_name)
             return []
+
+        log.debug("  列映射: %s", col_map)
 
         for idx, row in df.iterrows():
             try:
                 record = self._extract_record(row, col_map, sheet_name, filepath, source_info)
-                if record and (record.get("meter_number") or record.get("user_id")):
+                if record and record.get("meter_number"):
                     results.append(record)
             except Exception as e:
                 log.debug("  行 %d 提取失败: %s", idx, e)
@@ -209,17 +216,17 @@ class ExcelParser:
         if self._is_summary_row(meter_number, user_id, row):
             return None
 
-        # 跳过包含中文项目名的无效电表号（电表号应只含数字和字母）
-        if meter_number and not re.match(r'^[\d\w\-\.]+$', meter_number):
+        # 电表号必须存在且有效（纯数字/字母，长度≥6）
+        if not meter_number or len(meter_number) < 6:
+            return None
+        if not re.match(r'^[0-9A-Za-z\-\.]+$', meter_number):
             log.debug("  跳过无效电表号: %s", meter_number)
             return None
 
-        # 跳过明显不是编号的值（纯中文、太短等）
-        if meter_number and len(meter_number) < 4 and not user_id:
-            return None
-        if user_id and not re.match(r'^[\d\w\-\.]+$', user_id):
-            log.debug("  跳过无效用户编号: %s", user_id)
-            return None
+        # 用户编号可为空，但如果有值则须有效
+        if user_id and not re.match(r'^[0-9A-Za-z\-\.]+$', user_id):
+            log.debug("  跳过无效用户编号: %s，清空", user_id)
+            user_id = ""
 
         # 判断电表类型
         meter_type = self._detect_meter_type(sheet_name, filepath.name, col_map)
@@ -255,19 +262,32 @@ class ExcelParser:
         # 推断月份
         reading_month = self._infer_month(source_info, filepath.name, sheet_name)
 
+        # 项目名：优先从数据列获取，其次从文件名推断
+        project_name = str(get_val("project_name") or "").strip() or None
+        if not project_name:
+            project_name = self._infer_project(filepath.name, sheet_name)
+
+        # 资产编号清理
+        asset_number = self._clean_id_value(str(get_val("asset_number") or "").strip())
+        if asset_number and not re.match(r'^[0-9A-Za-z\-\.]+$', asset_number):
+            asset_number = None
+
+        # 倍率
+        multiplier = get_float("multiplier")
+
         record = {
             "meter_number": meter_number,
-            "asset_number": str(get_val("asset_number") or "").strip() or None,
-            "user_id": user_id,
+            "asset_number": asset_number or None,
+            "user_id": user_id or None,
             "meter_type": meter_type,
-            "multiplier": get_float("multiplier") or 1.0,
-            "project_name": str(get_val("project_name") or "").strip() or None,
+            "multiplier": multiplier,
+            "project_name": project_name,
             "reading_month": reading_month,
             "sharp_peak": sharp_peak,
             "peak": peak_val,
             "flat": flat_val,
             "valley": valley_val,
-            "total_kwh": None,  # 由 DB 层计算
+            "total_kwh": None,
             "source_file": filepath.name,
             "source_sheet": sheet_name,
         }
@@ -297,6 +317,19 @@ class ExcelParser:
             if isinstance(val, str) and val.strip() in self.SKIP_KEYWORDS:
                 return True
         return False
+
+    def _infer_project(self, filename: str, sheet_name: str) -> Optional[str]:
+        """从文件名或 Sheet 名推断项目名称。"""
+        for text in [filename, sheet_name]:
+            for pattern in self.PROJECT_PATTERNS:
+                match = re.search(pattern, text)
+                if match:
+                    proj = match.group(1)
+                    # 去掉尾部的"统计表"、"分配表"等
+                    proj = re.sub(r'(?:统计表|分配表|汇总表|电费表|明细表)$', '', proj)
+                    if len(proj) >= 2:
+                        return proj
+        return None
 
     def _detect_meter_type(self, sheet_name: str, filename: str, col_map: dict) -> str:
         """根据文件名、Sheet 名、列名判断电表类型。"""

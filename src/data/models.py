@@ -1,6 +1,7 @@
 """核心数据模型：以电表为中心的数据结构。
 
-所有数据围绕电表展开，每条记录可追溯到具体电表。
+电表号是唯一主键。每次从不同文件提取到同一电表号的信息时，
+补全其关联数据（用户号、资产编号、倍率、项目名、电表类型等）。
 """
 
 import sqlite3
@@ -17,18 +18,17 @@ from src.logger import log
 # ============================================================
 
 SCHEMA_SQL = """
--- 电表主表：固定属性，写入一次
+-- 电表主表：电表号唯一，关联属性可逐步补全
 CREATE TABLE IF NOT EXISTS meters (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    meter_number    TEXT NOT NULL,               -- 电表号
-    asset_number    TEXT,                        -- 资产编号
-    user_id         TEXT NOT NULL,               -- 用户编号（核心关联键）
-    meter_type      TEXT NOT NULL DEFAULT '未知', -- 上网表 / 发电表
-    multiplier      REAL DEFAULT 1.0,            -- 倍率
-    project_name    TEXT,                        -- 所属项目
+    meter_number    TEXT NOT NULL UNIQUE,            -- 电表号（唯一主键）
+    asset_number    TEXT,                            -- 资产编号
+    user_id         TEXT,                            -- 用户编号
+    meter_type      TEXT NOT NULL DEFAULT '未知',     -- 上网表 / 发电表
+    multiplier      REAL DEFAULT 1.0,                -- 倍率
+    project_name    TEXT,                            -- 所属项目
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(meter_number, user_id)
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 月度抄表数据：每月追加
@@ -36,35 +36,43 @@ CREATE TABLE IF NOT EXISTS monthly_readings (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     meter_id        INTEGER NOT NULL REFERENCES meters(id),
     reading_month   TEXT NOT NULL,               -- 格式: YYYY-MM
-    -- 表码数据（根据电表类型填对应方向）
-    sharp_peak      REAL,  -- 尖峰（上网表: 反向尖峰 / 发电表: 正向尖）
+    sharp_peak      REAL,  -- 尖峰
     peak            REAL,  -- 峰
     flat            REAL,  -- 平
     valley          REAL,  -- 谷
-    total_kwh       REAL,  -- 总电量（自动计算或从源取）
-    -- 来源信息
-    source_file     TEXT,  -- 数据来源文件
-    source_sheet    TEXT,  -- 来源 Sheet 名
+    total_kwh       REAL,  -- 总电量
+    source_file     TEXT,
+    source_sheet    TEXT,
     email_date      TIMESTAMP,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(meter_id, reading_month)
 );
 
--- 单价数据（从图片 OCR 提取，通过 user_id 关联）
+-- 单价数据（通过 user_id 关联）
 CREATE TABLE IF NOT EXISTS price_records (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id             TEXT NOT NULL,
-    reading_month       TEXT NOT NULL,               -- 格式: YYYY-MM
-    sharp_peak_price    REAL,  -- 尖峰单价
-    peak_price          REAL,  -- 峰单价
-    flat_price          REAL,  -- 平单价
-    valley_price        REAL,  -- 谷单价
-    source_file         TEXT,  -- 图片来源
+    reading_month       TEXT NOT NULL,
+    sharp_peak_price    REAL,
+    peak_price          REAL,
+    flat_price          REAL,
+    valley_price        REAL,
+    source_file         TEXT,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, reading_month)
 );
 
--- 月度账单汇总视图（电量 × 单价 = 金额）
+-- 已处理邮件记录（防重复）
+CREATE TABLE IF NOT EXISTS processed_emails (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT UNIQUE NOT NULL,
+    filename    TEXT,
+    subject     TEXT,
+    email_date  TEXT,
+    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 月度账单汇总视图
 CREATE VIEW IF NOT EXISTS v_monthly_bill AS
 SELECT
     m.meter_number,
@@ -83,7 +91,6 @@ SELECT
     p.peak_price,
     p.flat_price,
     p.valley_price,
-    -- 金额计算 = 电量 × 倍率 × 单价
     ROUND(COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0), 2) AS sharp_peak_amount,
     ROUND(COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0), 2)             AS peak_amount,
     ROUND(COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0), 2)              AS flat_amount,
@@ -140,33 +147,56 @@ class Database:
 
     # ---- 电表操作 ----
 
-    def upsert_meter(self, meter_number: str, user_id: str,
+    def upsert_meter(self, meter_number: str, user_id: str = None,
                      meter_type: str = "未知", asset_number: str = None,
-                     multiplier: float = 1.0, project_name: str = None) -> int:
-        """插入或更新电表信息，返回电表 ID。"""
+                     multiplier: float = None, project_name: str = None) -> int:
+        """插入或更新电表信息，返回电表 ID。
+
+        电表号是唯一标识。user_id、asset_number 等是关联属性，
+        只在当前值为空时才用新值补全（不覆盖已有数据）。
+        meter_type 只在新值不是"未知"时更新。
+        multiplier 只在新值不是 None 且不是 1.0（默认值）时更新已有的 1.0。
+        """
         with self.connection() as conn:
-            cursor = conn.execute(
+            conn.execute(
                 """INSERT INTO meters (meter_number, user_id, meter_type, asset_number, multiplier, project_name)
                    VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(meter_number, user_id) DO UPDATE SET
+                   ON CONFLICT(meter_number) DO UPDATE SET
+                       user_id = CASE
+                           WHEN meters.user_id IS NULL OR meters.user_id = ''
+                           THEN COALESCE(excluded.user_id, meters.user_id)
+                           ELSE meters.user_id
+                       END,
                        meter_type = CASE
                            WHEN excluded.meter_type != '未知' THEN excluded.meter_type
                            ELSE meters.meter_type
                        END,
-                       asset_number = COALESCE(excluded.asset_number, meters.asset_number),
-                       multiplier = COALESCE(excluded.multiplier, meters.multiplier),
-                       project_name = COALESCE(excluded.project_name, meters.project_name),
+                       asset_number = CASE
+                           WHEN meters.asset_number IS NULL OR meters.asset_number = ''
+                           THEN COALESCE(excluded.asset_number, meters.asset_number)
+                           ELSE meters.asset_number
+                       END,
+                       multiplier = CASE
+                           WHEN excluded.multiplier IS NOT NULL AND excluded.multiplier != 1.0
+                           THEN excluded.multiplier
+                           ELSE meters.multiplier
+                       END,
+                       project_name = CASE
+                           WHEN meters.project_name IS NULL OR meters.project_name = ''
+                           THEN COALESCE(excluded.project_name, meters.project_name)
+                           ELSE meters.project_name
+                       END,
                        updated_at = CURRENT_TIMESTAMP
                 """,
-                (meter_number, user_id, meter_type, asset_number, multiplier, project_name),
+                (meter_number, user_id or '', meter_type, asset_number,
+                 multiplier if multiplier is not None else 1.0, project_name),
             )
-            # 获取 ID
             row = conn.execute(
-                "SELECT id FROM meters WHERE meter_number = ? AND user_id = ?",
-                (meter_number, user_id),
+                "SELECT id FROM meters WHERE meter_number = ?",
+                (meter_number,),
             ).fetchone()
             meter_id = row["id"]
-            log.debug("电表 upsert: %s (user=%s) -> id=%d", meter_number, user_id, meter_id)
+            log.debug("电表 upsert: %s -> id=%d", meter_number, meter_id)
             return meter_id
 
     def upsert_reading(self, meter_id: int, reading_month: str,
@@ -175,7 +205,6 @@ class Database:
                        total_kwh: float = None, source_file: str = None,
                        source_sheet: str = None, email_date: datetime = None):
         """插入或更新月度抄表数据。"""
-        # 如果未提供 total_kwh，自动累加
         if total_kwh is None:
             total_kwh = sum(v for v in [sharp_peak, peak, flat, valley] if v is not None)
 
@@ -223,7 +252,7 @@ class Database:
     # ---- 查询 ----
 
     def get_meters(self, project_name: str = None, user_id: str = None) -> list[dict]:
-        """查询电表列表，可按项目或用户编号过滤。"""
+        """查询电表列表。"""
         query = "SELECT * FROM meters WHERE 1=1"
         params = []
         if project_name:
@@ -232,7 +261,7 @@ class Database:
         if user_id:
             query += " AND user_id = ?"
             params.append(user_id)
-        query += " ORDER BY project_name, user_id, meter_number"
+        query += " ORDER BY project_name, meter_number"
 
         with self.connection() as conn:
             rows = conn.execute(query, params).fetchall()
@@ -241,7 +270,7 @@ class Database:
     def get_monthly_bill(self, project_name: str = None, user_id: str = None,
                          meter_number: str = None, month_from: str = None,
                          month_to: str = None) -> list[dict]:
-        """查询月度账单汇总，支持多维度过滤。"""
+        """查询月度账单汇总。"""
         query = "SELECT * FROM v_monthly_bill WHERE 1=1"
         params = []
         if project_name:
@@ -269,13 +298,13 @@ class Database:
         """获取所有项目名称。"""
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT DISTINCT project_name FROM meters WHERE project_name IS NOT NULL ORDER BY project_name"
+                "SELECT DISTINCT project_name FROM meters WHERE project_name IS NOT NULL AND project_name != '' ORDER BY project_name"
             ).fetchall()
             return [r["project_name"] for r in rows]
 
     def get_user_ids(self, project_name: str = None) -> list[str]:
-        """获取所有用户编号，可按项目过滤。"""
-        query = "SELECT DISTINCT user_id FROM meters WHERE 1=1"
+        """获取所有用户编号。"""
+        query = "SELECT DISTINCT user_id FROM meters WHERE user_id IS NOT NULL AND user_id != ''"
         params = []
         if project_name:
             query += " AND project_name = ?"
