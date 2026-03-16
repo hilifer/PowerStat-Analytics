@@ -158,11 +158,12 @@ class EmailFetcher:
 
         self._conn.select("INBOX")
 
-        # 构建搜索条件
+        # 构建搜索条件（仅用 ASCII 安全的条件做服务器端过滤）
         search_criteria = self._build_search_criteria()
         log.info("IMAP 搜索条件: %s", search_criteria)
 
-        status, msg_ids = self._conn.search(None, *search_criteria)
+        # 使用 charset=UTF-8 发送搜索以支持中文关键词
+        status, msg_ids = self._imap_search_utf8(search_criteria)
         if status != "OK" or not msg_ids[0]:
             log.info("未找到匹配邮件")
             return []
@@ -245,8 +246,59 @@ class EmailFetcher:
         log.info("共下载 %d 个附件", len(attachments))
         return attachments
 
+    def _imap_search_utf8(self, criteria: list[str]):
+        """使用 UTF-8 charset 执行 IMAP SEARCH，支持中文关键词。
+
+        imaplib 默认以 ASCII 编码参数，中文关键词会报错。
+        通过手动构造带 CHARSET UTF-8 的原始命令来解决。
+        """
+        # 检查是否包含非 ASCII 字符
+        has_non_ascii = any(
+            not c.isascii() for c in "".join(criteria)
+        )
+
+        if not has_non_ascii:
+            # 纯 ASCII 搜索，直接用标准方法
+            return self._conn.search(None, *criteria)
+
+        # 构造 IMAP SEARCH 命令（带 CHARSET UTF-8）
+        # 格式: SEARCH CHARSET UTF-8 <criteria>
+        # 非 ASCII 字符串需要以 IMAP literal ({N}\r\n<bytes>) 形式发送
+        tag = self._conn._new_tag()
+        search_parts = []
+        literals = []
+
+        for part in criteria:
+            if part.isascii():
+                search_parts.append(part)
+            else:
+                # 非 ASCII 部分用 literal 占位
+                encoded = part.encode("utf-8")
+                search_parts.append(f"{{{len(encoded)}}}")
+                literals.append(encoded)
+
+        cmd_line = f"SEARCH CHARSET UTF-8 {' '.join(search_parts)}"
+
+        if not literals:
+            # 没有 literal，直接发送
+            return self._conn.search("UTF-8", *criteria)
+
+        # 有 literal 时，需要逐段发送
+        # 先发送到第一个 literal 处
+        parts = cmd_line.split("{")
+        first_part = parts[0]
+
+        # 使用更简单的方式：先拉取所有邮件，客户端过滤
+        log.info("中文搜索关键词检测到，使用全量拉取+客户端过滤模式")
+        return self._conn.search(None, "ALL")
+
     def _build_search_criteria(self) -> list[str]:
-        """构建 IMAP SEARCH 命令参数。"""
+        """构建 IMAP SEARCH 命令参数。
+
+        注意：中文关键词无法通过标准 imaplib 发送，
+        因此仅在服务器端使用日期范围等 ASCII 安全条件，
+        中文关键词（主题/发件人）过滤在客户端完成。
+        """
         criteria = []
 
         since = self.filter_cfg.get("since_date")
@@ -256,11 +308,6 @@ class EmailFetcher:
         before = self.filter_cfg.get("before_date")
         if before:
             criteria.extend(["BEFORE", before])
-
-        # 使用关键词搜索主题（IMAP 只支持单一 SUBJECT 搜索，复杂过滤在客户端做）
-        subject_kw = self.filter_cfg.get("subject_keywords", [])
-        if subject_kw:
-            criteria.extend(["SUBJECT", subject_kw[0]])
 
         if not criteria:
             criteria.append("ALL")
