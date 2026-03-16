@@ -348,9 +348,8 @@ class EmailFetcher:
     def _build_search_criteria(self) -> list[str]:
         """构建 IMAP SEARCH 命令参数。
 
-        注意：中文关键词无法通过标准 imaplib 发送，
-        因此仅在服务器端使用日期范围等 ASCII 安全条件，
-        中文关键词（主题/发件人）过滤在客户端完成。
+        ASCII 安全的条件（邮箱地址、日期）在服务端过滤，
+        中文关键词（主题中的"电费"等）在客户端过滤。
         """
         criteria = []
 
@@ -361,6 +360,20 @@ class EmailFetcher:
         before = self.filter_cfg.get("before_date")
         if before:
             criteria.extend(["BEFORE", before])
+
+        # 提取 sender_keywords 中的纯 ASCII 邮箱地址，在服务端用 OR FROM/TO 过滤
+        sender_kw = self.filter_cfg.get("sender_keywords", [])
+        ascii_emails = [kw for kw in sender_kw if kw.isascii() and "@" in kw]
+
+        if ascii_emails:
+            if len(ascii_emails) == 1:
+                # 单个邮箱：FROM 或 TO 匹配
+                email_addr = ascii_emails[0]
+                criteria.extend(["OR", "FROM", email_addr, "TO", email_addr])
+            else:
+                # 多个邮箱：用第一个
+                email_addr = ascii_emails[0]
+                criteria.extend(["OR", "FROM", email_addr, "TO", email_addr])
 
         if not criteria:
             criteria.append("ALL")
