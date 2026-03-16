@@ -149,7 +149,10 @@ class Database:
                 """INSERT INTO meters (meter_number, user_id, meter_type, asset_number, multiplier, project_name)
                    VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(meter_number, user_id) DO UPDATE SET
-                       meter_type = COALESCE(excluded.meter_type, meters.meter_type),
+                       meter_type = CASE
+                           WHEN excluded.meter_type != '未知' THEN excluded.meter_type
+                           ELSE meters.meter_type
+                       END,
                        asset_number = COALESCE(excluded.asset_number, meters.asset_number),
                        multiplier = COALESCE(excluded.multiplier, meters.multiplier),
                        project_name = COALESCE(excluded.project_name, meters.project_name),

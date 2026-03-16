@@ -18,6 +18,9 @@ from src.logger import log
 class ExcelParser:
     """Excel 附件解析器。"""
 
+    # 需要过滤的汇总/无效行关键词
+    SKIP_KEYWORDS = {"合计", "总计", "小计", "总合计", "汇总", "合 计", "总 计"}
+
     def __init__(self):
         self.field_mapping = config.get("field_mapping") or {}
         self.meter_type_rules = config.get("meter_type_rules") or {}
@@ -123,7 +126,7 @@ class ExcelParser:
                 best_score = score
                 best_idx = i
 
-        return best_idx if best_score >= 1 else None
+        return best_idx if best_score >= 2 else None
 
     def _parse_dataframe(self, df: pd.DataFrame, sheet_name: str,
                          filepath: Path, source_info: dict) -> list[dict]:
@@ -199,8 +202,24 @@ class ExcelParser:
         if not meter_number and not user_id:
             return None
 
-        meter_number = str(meter_number).strip() if meter_number else ""
-        user_id = str(user_id).strip() if user_id else ""
+        meter_number = self._clean_id_value(str(meter_number).strip()) if meter_number else ""
+        user_id = self._clean_id_value(str(user_id).strip()) if user_id else ""
+
+        # 跳过汇总行（合计/总计/小计等）
+        if self._is_summary_row(meter_number, user_id, row):
+            return None
+
+        # 跳过包含中文项目名的无效电表号（电表号应只含数字和字母）
+        if meter_number and not re.match(r'^[\d\w\-\.]+$', meter_number):
+            log.debug("  跳过无效电表号: %s", meter_number)
+            return None
+
+        # 跳过明显不是编号的值（纯中文、太短等）
+        if meter_number and len(meter_number) < 4 and not user_id:
+            return None
+        if user_id and not re.match(r'^[\d\w\-\.]+$', user_id):
+            log.debug("  跳过无效用户编号: %s", user_id)
+            return None
 
         # 判断电表类型
         meter_type = self._detect_meter_type(sheet_name, filepath.name, col_map)
@@ -253,6 +272,31 @@ class ExcelParser:
             "source_sheet": sheet_name,
         }
         return record
+
+    @staticmethod
+    def _clean_id_value(val: str) -> str:
+        """清理电表号/用户编号中的前缀和多余字符。"""
+        if not val:
+            return val
+        # 去除常见前缀如 "用户号：", "用户编号:", "资产编号" 等
+        val = re.sub(r'^(?:用户编号|用户号|户号|客户编号|电表号|表号|资产编号)\s*[:：]?\s*', '', val)
+        # 去除引号
+        val = val.strip("'\"''""")
+        # 去除浮点数的 .0 后缀（Excel 数字列导出常见）
+        val = re.sub(r'\.0+$', '', val)
+        return val.strip()
+
+    def _is_summary_row(self, meter_number: str, user_id: str, row) -> bool:
+        """判断是否为汇总行。"""
+        # 检查电表号和用户编号是否包含汇总关键词
+        for val in [meter_number, user_id]:
+            if val and any(kw in val for kw in self.SKIP_KEYWORDS):
+                return True
+        # 检查整行所有字符串值
+        for val in row:
+            if isinstance(val, str) and val.strip() in self.SKIP_KEYWORDS:
+                return True
+        return False
 
     def _detect_meter_type(self, sheet_name: str, filename: str, col_map: dict) -> str:
         """根据文件名、Sheet 名、列名判断电表类型。"""
