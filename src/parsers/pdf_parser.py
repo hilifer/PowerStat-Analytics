@@ -200,7 +200,7 @@ class PDFParser:
             "total_kwh": None,
             "source_file": filepath.name,
             "source_sheet": source_sheet,
-        }
+        })
 
     def _infer_month(self, source_info: dict, filename: str, context: str) -> str:
         """推断月份。"""
