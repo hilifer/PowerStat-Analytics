@@ -148,13 +148,8 @@ def _register_routes(app: Flask, db: Database):
         def _do_refresh():
             try:
                 from src.email_fetcher.fetcher import EmailFetcher
-                from src.parsers.excel_parser import ExcelParser
-                from src.parsers.pdf_parser import PDFParser
-                from src.ocr.ocr_engine import OCREngine
-
-                IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
-                EXCEL_EXTS = {".xlsx", ".xls"}
-                PDF_EXTS = {".pdf"}
+                from src.pipeline import SmartDispatcher
+                import re, shutil
 
                 status["progress"] = "正在连接邮箱并搜索邮件…"
                 with EmailFetcher() as fetcher:
@@ -170,9 +165,7 @@ def _register_routes(app: Flask, db: Database):
                 skipped = 0
                 meters_added = 0
 
-                excel_parser = ExcelParser()
-                pdf_parser = PDFParser()
-                ocr_engine = OCREngine()
+                dispatcher = SmartDispatcher()
 
                 for i, att in enumerate(attachments, 1):
                     date_str = att.email_date.strftime("%Y-%m-%d %H:%M") if att.email_date else ""
@@ -183,78 +176,91 @@ def _register_routes(app: Flask, db: Database):
                         skipped += 1
                         continue
 
-                    status["progress"] = f"处理附件 {i}/{len(attachments)}: {att.filename}"
-                    ext = Path(att.filepath).suffix.lower()
+                    status["progress"] = f"处理 {i}/{len(attachments)}: {att.filename}"
                     source_info = {
                         "email_date": att.email_date,
                         "email_subject": att.email_subject,
                         "filename": att.filename,
                     }
 
-                    records = []
-                    if ext in EXCEL_EXTS:
-                        records = excel_parser.parse(att.filepath, source_info)
-                    elif ext in PDF_EXTS:
-                        records = pdf_parser.parse(att.filepath, source_info)
-                    elif ext in IMAGE_EXTS:
-                        ocr_result = ocr_engine.extract_from_image(att.filepath, source_info)
-                        if ocr_result.user_id and ocr_result.reading_month:
-                            db.upsert_price(
-                                user_id=ocr_result.user_id,
-                                reading_month=ocr_result.reading_month,
-                                sharp_peak_price=ocr_result.sharp_peak_price,
-                                peak_price=ocr_result.peak_price,
-                                flat_price=ocr_result.flat_price,
-                                valley_price=ocr_result.valley_price,
-                                source_file=ocr_result.source_file,
-                            )
+                    # 智能处理：自动检测文件类型，递归解压
+                    queue = [(att.filepath, source_info)]
+                    processed_paths = set()
 
-                    for rec in records:
-                        try:
-                            meter_id = db.upsert_meter(
-                                meter_number=rec.get("meter_number", ""),
-                                user_id=rec.get("user_id", ""),
-                                meter_type=rec.get("meter_type", "未知"),
-                                asset_number=rec.get("asset_number"),
-                                multiplier=rec.get("multiplier", 1.0),
-                                project_name=rec.get("project_name"),
-                            )
-                            month = rec.get("reading_month")
-                            if month and month != "unknown":
-                                db.upsert_reading(
-                                    meter_id=meter_id,
-                                    reading_month=month,
-                                    sharp_peak=rec.get("sharp_peak"),
-                                    peak=rec.get("peak"),
-                                    flat=rec.get("flat"),
-                                    valley=rec.get("valley"),
-                                    total_kwh=rec.get("total_kwh"),
-                                    source_file=rec.get("source_file"),
-                                    source_sheet=rec.get("source_sheet"),
+                    while queue:
+                        fpath, sinfo = queue.pop(0)
+                        if fpath in processed_paths:
+                            continue
+                        processed_paths.add(fpath)
+
+                        result = dispatcher.process(fpath, sinfo)
+
+                        # 入库电表记录
+                        for rec in result["records"]:
+                            try:
+                                meter_id = db.upsert_meter(
+                                    meter_number=rec.get("meter_number", ""),
+                                    user_id=rec.get("user_id", ""),
+                                    meter_type=rec.get("meter_type", "未知"),
+                                    asset_number=rec.get("asset_number"),
+                                    multiplier=rec.get("multiplier", 1.0),
+                                    project_name=rec.get("project_name"),
                                 )
-                            meters_added += 1
-                        except Exception as e:
-                            log.error("入库失败: %s", e)
+                                month = rec.get("reading_month")
+                                if month and month != "unknown":
+                                    db.upsert_reading(
+                                        meter_id=meter_id,
+                                        reading_month=month,
+                                        sharp_peak=rec.get("sharp_peak"),
+                                        peak=rec.get("peak"),
+                                        flat=rec.get("flat"),
+                                        valley=rec.get("valley"),
+                                        total_kwh=rec.get("total_kwh"),
+                                        source_file=rec.get("source_file"),
+                                        source_sheet=rec.get("source_sheet"),
+                                    )
+                                meters_added += 1
+                            except Exception as e:
+                                log.error("入库失败: %s", e)
+
+                        # 入库 OCR 单价
+                        for ocr in result["ocr_results"]:
+                            if ocr.user_id and ocr.reading_month:
+                                db.upsert_price(
+                                    user_id=ocr.user_id,
+                                    reading_month=ocr.reading_month,
+                                    sharp_peak_price=ocr.sharp_peak_price,
+                                    peak_price=ocr.peak_price,
+                                    flat_price=ocr.flat_price,
+                                    valley_price=ocr.valley_price,
+                                    source_file=ocr.source_file,
+                                )
+
+                        # 子文件加入队列
+                        for sub in result["sub_files"]:
+                            queue.append((sub, sinfo))
 
                     # 归档到月份目录
-                    import re, shutil
-                    month_match = re.search(r'(\d{4})[-_年]?(\d{1,2})', att.filename)
-                    reading_month = f"{month_match.group(1)}-{month_match.group(2).zfill(2)}" if month_match else (
-                        att.email_date.strftime("%Y-%m") if att.email_date else "unknown"
-                    )
-                    archive_root = Path(config.get("storage", "archive_root",
-                                                   default="output/archive"))
-                    dest_dir = archive_root / reading_month
-                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    if not att.is_body:
+                        month_match = re.search(r'(\d{4})[-_年]?(\d{1,2})', att.filename)
+                        reading_month = (
+                            f"{month_match.group(1)}-{month_match.group(2).zfill(2)}"
+                            if month_match else
+                            (att.email_date.strftime("%Y-%m") if att.email_date else "unknown")
+                        )
+                        archive_root = Path(config.get("storage", "archive_root",
+                                                       default="output/archive"))
+                        dest_dir = archive_root / reading_month
+                        dest_dir.mkdir(parents=True, exist_ok=True)
 
-                    src_path = Path(att.filepath)
-                    if src_path.exists():
-                        dest_path = dest_dir / src_path.name
-                        counter = 1
-                        while dest_path.exists():
-                            dest_path = dest_dir / f"{src_path.stem}_{counter}{src_path.suffix}"
-                            counter += 1
-                        shutil.copy2(str(src_path), str(dest_path))
+                        src_path = Path(att.filepath)
+                        if src_path.exists():
+                            dest_path = dest_dir / src_path.name
+                            counter = 1
+                            while dest_path.exists():
+                                dest_path = dest_dir / f"{src_path.stem}_{counter}{src_path.suffix}"
+                                counter += 1
+                            shutil.copy2(str(src_path), str(dest_path))
 
                     _mark_processed(db, fp, att.filename, att.email_subject, date_str)
                     new_count += 1

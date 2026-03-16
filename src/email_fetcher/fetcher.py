@@ -21,20 +21,22 @@ from src.logger import log
 
 
 class EmailAttachment:
-    """表示一个邮件附件的元信息。"""
+    """表示一个邮件附件或邮件正文的元信息。"""
 
     def __init__(self, filename: str, filepath: str, content_type: str,
                  email_date: Optional[datetime], email_subject: str,
-                 email_sender: str):
+                 email_sender: str, is_body: bool = False):
         self.filename = filename
         self.filepath = filepath
         self.content_type = content_type
         self.email_date = email_date
         self.email_subject = email_subject
         self.email_sender = email_sender
+        self.is_body = is_body  # 是否为邮件正文（而非附件）
 
     def __repr__(self):
-        return f"<Attachment {self.filename} from '{self.email_subject}' @ {self.email_date}>"
+        tag = "Body" if self.is_body else "Attachment"
+        return f"<{tag} {self.filename} from '{self.email_subject}' @ {self.email_date}>"
 
 
 def _decode_header_value(value: str) -> str:
@@ -210,70 +212,71 @@ class EmailFetcher:
 
                 log.info("处理邮件: [%s] %s", mail_date, subject)
 
-                # 诊断：列出邮件中所有 MIME 部件
-                part_list = list(msg.walk())
-                log.info("  邮件共 %d 个 MIME 部件:", len(part_list))
-                for pi, p in enumerate(part_list):
-                    ct = p.get_content_type()
-                    cd = p.get("Content-Disposition", "")
-                    fn = p.get_filename()
-                    fn2 = p.get_param("name")  # 有些附件用 name 而非 filename
-                    log.info("    [%d] type=%s, disposition=%s, filename=%s, name=%s",
-                             pi, ct, cd[:60] if cd else "无", fn, fn2)
+                date_prefix = mail_date.strftime("%Y%m%d") if mail_date else "unknown"
+                body_html = ""
+                body_text = ""
+                has_real_attachment = False
 
                 for part in msg.walk():
                     if part.get_content_maintype() == "multipart":
                         continue
 
-                    # 获取文件名：优先 get_filename()，备选 Content-Type 的 name 参数
+                    content_type = part.get_content_type()
+                    disposition = str(part.get("Content-Disposition", ""))
+
+                    # ---- 收集邮件正文 ----
+                    if content_type == "text/html" and "attachment" not in disposition:
+                        try:
+                            charset = part.get_content_charset() or "utf-8"
+                            body_html += part.get_payload(decode=True).decode(charset, errors="replace")
+                        except Exception:
+                            pass
+                        continue
+                    if content_type == "text/plain" and "attachment" not in disposition:
+                        try:
+                            charset = part.get_content_charset() or "utf-8"
+                            body_text += part.get_payload(decode=True).decode(charset, errors="replace")
+                        except Exception:
+                            pass
+                        continue
+
+                    # ---- 获取附件（不限格式，全部下载） ----
                     filename = part.get_filename()
                     if not filename:
                         filename = part.get_param("name")
                     if not filename:
-                        # 对于 application/octet-stream 等，尝试从 Content-ID 生成名字
-                        content_type = part.get_content_type()
-                        if content_type not in ("text/plain", "text/html", "multipart/mixed",
-                                                "multipart/alternative", "multipart/related"):
-                            content_id = part.get("Content-ID", "")
-                            if content_id:
-                                # 内嵌资源，用 Content-ID 作文件名
-                                cid = content_id.strip("<>").split("@")[0]
-                                ext_guess = {
-                                    "image/png": ".png", "image/jpeg": ".jpg",
-                                    "image/gif": ".gif", "image/bmp": ".bmp",
-                                    "application/pdf": ".pdf",
-                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-                                    "application/vnd.ms-excel": ".xls",
-                                    "application/octet-stream": "",
-                                }.get(content_type, "")
-                                filename = f"{cid}{ext_guess}" if cid else None
-                            elif content_type.startswith("image/") or content_type == "application/pdf":
-                                # 无名附件，按类型给个默认名
-                                ext_guess = content_type.split("/")[-1].split(";")[0]
-                                filename = f"unnamed_attachment.{ext_guess}"
+                        # 无名附件按 content-type 命名
+                        content_id = part.get("Content-ID", "")
+                        cid = content_id.strip("<>").split("@")[0] if content_id else ""
+                        ext_map = {
+                            "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+                            "image/bmp": ".bmp", "application/pdf": ".pdf",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                            "application/vnd.ms-excel": ".xls",
+                        }
+                        ext_guess = ext_map.get(content_type, "")
+                        if cid:
+                            filename = f"{cid}{ext_guess}"
+                        elif ext_guess:
+                            filename = f"unnamed{ext_guess}"
+                        else:
+                            # 完全未知的附件也下载
+                            sub_type = content_type.split("/")[-1].split(";")[0]
+                            filename = f"unnamed.{sub_type}" if sub_type != "octet-stream" else None
+
                     if not filename:
                         continue
 
                     filename = _decode_header_value(filename)
-                    ext = os.path.splitext(filename)[1].lower()
-
-                    if self.supported_formats and ext not in self.supported_formats:
-                        log.debug("跳过不支持的附件格式: %s", filename)
-                        continue
-
                     payload = part.get_payload(decode=True)
                     if not payload:
                         continue
                     if len(payload) > self.max_size:
-                        log.warning("附件过大，跳过: %s (%d MB)", filename, len(payload) // (1024 * 1024))
+                        log.warning("  附件过大跳过: %s (%d MB)", filename, len(payload) // (1024 * 1024))
                         continue
 
-                    # 用日期前缀避免重名
-                    date_prefix = mail_date.strftime("%Y%m%d") if mail_date else "unknown"
                     safe_name = f"{date_prefix}_{_safe_filename(filename)}"
                     filepath = self.temp_dir / safe_name
-
-                    # 处理重名
                     counter = 1
                     orig_stem = filepath.stem
                     while filepath.exists():
@@ -286,13 +289,40 @@ class EmailFetcher:
                     att = EmailAttachment(
                         filename=filename,
                         filepath=str(filepath),
-                        content_type=part.get_content_type(),
+                        content_type=content_type,
                         email_date=mail_date,
                         email_subject=subject,
                         email_sender=sender,
                     )
                     attachments.append(att)
+                    has_real_attachment = True
                     log.info("  已下载附件: %s -> %s", filename, filepath.name)
+
+                # ---- 保存邮件正文为 HTML/TXT（也作为可解析内容） ----
+                body_content = body_html or body_text
+                if body_content:
+                    ext = ".html" if body_html else ".txt"
+                    body_name = f"{date_prefix}_邮件正文_{_safe_filename(subject)}{ext}"
+                    body_path = self.temp_dir / body_name
+                    counter = 1
+                    orig_stem = body_path.stem
+                    while body_path.exists():
+                        body_path = body_path.with_name(f"{orig_stem}_{counter}{body_path.suffix}")
+                        counter += 1
+                    with open(body_path, "w", encoding="utf-8") as f:
+                        f.write(body_content)
+
+                    att = EmailAttachment(
+                        filename=body_name,
+                        filepath=str(body_path),
+                        content_type="text/html" if body_html else "text/plain",
+                        email_date=mail_date,
+                        email_subject=subject,
+                        email_sender=sender,
+                        is_body=True,
+                    )
+                    attachments.append(att)
+                    log.info("  已保存邮件正文: %s", body_name)
 
             except Exception as e:
                 log.error("处理邮件 %s 时出错: %s", mid, e, exc_info=True)

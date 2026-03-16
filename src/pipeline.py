@@ -1,4 +1,7 @@
-"""主处理管线：协调邮件抓取、解析、入库、归档、可视化的完整流程。"""
+"""主处理管线：智能化协调邮件抓取、解析、入库、归档、可视化。
+
+支持任意格式的附件和邮件正文，自动检测文件类型并路由到对应解析器。
+"""
 
 import os
 from pathlib import Path
@@ -9,15 +12,208 @@ from src.data.models import Database
 from src.email_fetcher.fetcher import EmailFetcher, EmailAttachment
 from src.parsers.excel_parser import ExcelParser
 from src.parsers.pdf_parser import PDFParser
+from src.parsers.csv_parser import CSVParser
+from src.parsers.html_parser import HTMLParser
 from src.ocr.ocr_engine import OCREngine, OCRResult
 from src.archive.archiver import Archiver
 from src.visualization.charts import ChartGenerator
 from src.logger import log
 
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
-EXCEL_EXTS = {".xlsx", ".xls"}
-PDF_EXTS = {".pdf"}
+class SmartDispatcher:
+    """智能文件分发器：自动检测文件类型并调用对应解析器。
+
+    处理逻辑：
+    1. 根据扩展名判断文件类型
+    2. 扩展名不可靠时，通过文件头魔数(magic bytes)检测真实类型
+    3. 所有能提取数据的格式都处理，未知格式尝试当文本解析
+    """
+
+    # 文件头魔数 -> 真实类型
+    MAGIC_BYTES = {
+        b"PK\x03\x04": "zip",      # ZIP / XLSX / DOCX
+        b"\xd0\xcf\x11\xe0": "ole", # XLS / DOC (OLE2)
+        b"%PDF": "pdf",
+        b"\x89PNG": "image",
+        b"\xff\xd8\xff": "image",   # JPEG
+        b"GIF8": "image",
+        b"BM": "image",             # BMP
+        b"II\x2a\x00": "image",     # TIFF LE
+        b"MM\x00\x2a": "image",     # TIFF BE
+        b"Rar!": "rar",
+        b"7z\xbc\xaf": "7z",
+    }
+
+    def __init__(self):
+        self.excel_parser = ExcelParser()
+        self.pdf_parser = PDFParser()
+        self.csv_parser = CSVParser()
+        self.html_parser = HTMLParser()
+        self.ocr_engine = OCREngine()
+
+    def detect_type(self, filepath: str) -> str:
+        """检测文件的实际类型，返回类别字符串。"""
+        ext = Path(filepath).suffix.lower()
+
+        # 扩展名直接映射
+        ext_map = {
+            ".xlsx": "excel", ".xls": "excel",
+            ".pdf": "pdf",
+            ".csv": "csv", ".tsv": "csv",
+            ".txt": "text",
+            ".html": "html", ".htm": "html",
+            ".png": "image", ".jpg": "image", ".jpeg": "image",
+            ".bmp": "image", ".tiff": "image", ".tif": "image", ".gif": "image",
+            ".zip": "zip", ".rar": "rar", ".7z": "7z",
+            ".doc": "ole", ".docx": "zip",
+        }
+
+        if ext in ext_map:
+            return ext_map[ext]
+
+        # 扩展名不可靠，用魔数检测
+        try:
+            with open(filepath, "rb") as f:
+                header = f.read(8)
+            for magic, file_type in self.MAGIC_BYTES.items():
+                if header[:len(magic)] == magic:
+                    # ZIP 可能是 XLSX
+                    if file_type == "zip":
+                        return self._check_zip_subtype(filepath)
+                    return file_type
+        except Exception:
+            pass
+
+        # 尝试当文本读
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="strict") as f:
+                sample = f.read(2000)
+            if "<table" in sample.lower() or "<html" in sample.lower():
+                return "html"
+            return "text"
+        except (UnicodeDecodeError, Exception):
+            pass
+
+        return "unknown"
+
+    def _check_zip_subtype(self, filepath: str) -> str:
+        """检查 ZIP 文件是否为 XLSX 等 Office 格式。"""
+        import zipfile
+        try:
+            with zipfile.ZipFile(filepath, "r") as zf:
+                names = zf.namelist()
+                if any("xl/" in n or "xl\\" in n for n in names):
+                    return "excel"
+                if any("word/" in n for n in names):
+                    return "text"  # DOCX 当文本处理
+        except Exception:
+            pass
+        return "zip"
+
+    def process(self, filepath: str, source_info: dict = None) -> dict:
+        """智能处理单个文件，返回提取结果。
+
+        Returns:
+            {
+                "records": list[dict],      # 电表/抄表记录
+                "ocr_results": list[OCRResult],  # OCR 单价结果
+                "sub_files": list[str],     # 解压出的子文件路径
+            }
+        """
+        file_type = self.detect_type(filepath)
+        fname = Path(filepath).name
+        log.info("  [%s] %s", file_type.upper(), fname)
+
+        result = {"records": [], "ocr_results": [], "sub_files": []}
+
+        try:
+            if file_type == "excel":
+                result["records"] = self.excel_parser.parse(filepath, source_info)
+
+            elif file_type == "pdf":
+                result["records"] = self.pdf_parser.parse(filepath, source_info)
+
+            elif file_type == "csv":
+                result["records"] = self.csv_parser.parse(filepath, source_info)
+
+            elif file_type == "image":
+                ocr = self.ocr_engine.extract_from_image(filepath, source_info)
+                if ocr.has_price_data() or ocr.user_id:
+                    result["ocr_results"].append(ocr)
+
+            elif file_type in ("html", "text"):
+                result["records"] = self.html_parser.parse(filepath, source_info)
+
+            elif file_type == "zip":
+                result["sub_files"] = self._extract_zip(filepath)
+
+            elif file_type == "ole":
+                # 旧版 XLS 也走 Excel 解析
+                result["records"] = self.excel_parser.parse(filepath, source_info)
+
+            else:
+                # 未知类型：尝试当文本解析
+                log.info("    未知类型，尝试文本解析: %s", fname)
+                result["records"] = self.html_parser.parse(filepath, source_info)
+
+        except Exception as e:
+            log.error("    解析失败 [%s]: %s", fname, e, exc_info=True)
+
+        rec_count = len(result["records"])
+        ocr_count = len(result["ocr_results"])
+        sub_count = len(result["sub_files"])
+        if rec_count or ocr_count or sub_count:
+            log.info("    结果: %d 条记录, %d 条OCR, %d 个子文件",
+                     rec_count, ocr_count, sub_count)
+
+        return result
+
+    def _extract_zip(self, filepath: str) -> list[str]:
+        """解压 ZIP，返回内部文件路径列表。"""
+        import zipfile
+        if not zipfile.is_zipfile(filepath):
+            return []
+
+        extract_dir = Path(filepath).parent / Path(filepath).stem
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        extracted = []
+
+        try:
+            with zipfile.ZipFile(filepath, "r") as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+
+                    # 中文文件名编码处理
+                    try:
+                        inner_name = info.filename.encode("cp437").decode("gbk")
+                    except (UnicodeDecodeError, UnicodeEncodeError):
+                        try:
+                            inner_name = info.filename.encode("cp437").decode("utf-8")
+                        except (UnicodeDecodeError, UnicodeEncodeError):
+                            inner_name = info.filename
+
+                    import re
+                    safe_name = re.sub(r'[<>:"/\\|?*]', '_', os.path.basename(inner_name))
+                    safe_name = safe_name.strip('. ')[:200] or "unnamed"
+
+                    dest_path = extract_dir / safe_name
+                    counter = 1
+                    orig_stem = dest_path.stem
+                    while dest_path.exists():
+                        dest_path = extract_dir / f"{orig_stem}_{counter}{dest_path.suffix}"
+                        counter += 1
+
+                    with zf.open(info) as src, open(dest_path, "wb") as dst:
+                        dst.write(src.read())
+
+                    extracted.append(str(dest_path))
+                    log.info("    解压: %s", safe_name)
+
+        except Exception as e:
+            log.error("    解压失败: %s", e)
+
+        return extracted
 
 
 class Pipeline:
@@ -25,9 +221,7 @@ class Pipeline:
 
     def __init__(self, db: Database = None):
         self.db = db or Database()
-        self.excel_parser = ExcelParser()
-        self.pdf_parser = PDFParser()
-        self.ocr_engine = OCREngine()
+        self.dispatcher = SmartDispatcher()
         self.archiver = Archiver(self.db)
         self.chart_gen = ChartGenerator(self.db)
 
@@ -47,8 +241,8 @@ class Pipeline:
             log.info("无附件需处理")
             return
 
-        # 2. 解析附件并入库
-        self._process_attachments(attachments)
+        # 2. 智能解析所有内容并入库
+        self._process_all(attachments)
 
         # 3. 归档
         self._archive_all(attachments)
@@ -75,15 +269,14 @@ class Pipeline:
             return []
 
     def _load_local_attachments(self) -> list[EmailAttachment]:
-        """从本地临时目录加载已有附件。"""
+        """从本地临时目录加载已有附件（递归扫描，不限格式）。"""
         temp_dir = Path(config.get("attachments", "temp_dir", default="output/temp_attachments"))
         if not temp_dir.exists():
             return []
 
-        supported = set(config.get("attachments", "supported_formats", default=[]))
         attachments = []
-        for f in temp_dir.iterdir():
-            if f.is_file() and f.suffix.lower() in supported:
+        for f in temp_dir.rglob("*"):
+            if f.is_file():
                 att = EmailAttachment(
                     filename=f.name,
                     filepath=str(f),
@@ -93,43 +286,49 @@ class Pipeline:
                     email_sender="",
                 )
                 attachments.append(att)
-        log.info("从本地加载 %d 个附件", len(attachments))
+        log.info("从本地加载 %d 个文件", len(attachments))
         return attachments
 
-    def _process_attachments(self, attachments: list[EmailAttachment]):
-        """解析所有附件并写入数据库。"""
-        log.info("[阶段2] 解析附件并入库...")
+    def _process_all(self, attachments: list[EmailAttachment]):
+        """智能解析所有附件和邮件正文，递归处理压缩包。"""
+        log.info("[阶段2] 智能解析所有内容...")
 
-        ocr_results: list[OCRResult] = []
-        meter_records: list[dict] = []
+        all_records = []
+        all_ocr = []
 
-        for att in attachments:
-            ext = Path(att.filepath).suffix.lower()
-            source_info = {
-                "email_date": att.email_date,
-                "email_subject": att.email_subject,
-                "filename": att.filename,
-            }
+        # 待处理队列（支持递归解压）
+        queue = [(att.filepath, {
+            "email_date": att.email_date,
+            "email_subject": att.email_subject,
+            "filename": att.filename,
+        }) for att in attachments]
 
-            if ext in EXCEL_EXTS:
-                log.info("解析 Excel: %s", att.filename)
-                records = self.excel_parser.parse(att.filepath, source_info)
-                meter_records.extend(records)
+        processed_paths = set()
 
-            elif ext in PDF_EXTS:
-                log.info("解析 PDF: %s", att.filename)
-                records = self.pdf_parser.parse(att.filepath, source_info)
-                meter_records.extend(records)
+        while queue:
+            filepath, source_info = queue.pop(0)
 
-            elif ext in IMAGE_EXTS:
-                log.info("OCR 图片: %s", att.filename)
-                result = self.ocr_engine.extract_from_image(att.filepath, source_info)
-                if result.has_price_data() or result.user_id:
-                    ocr_results.append(result)
+            if filepath in processed_paths:
+                continue
+            processed_paths.add(filepath)
 
-        # 写入电表和抄表数据
-        log.info("写入 %d 条电表/抄表记录...", len(meter_records))
-        for rec in meter_records:
+            result = self.dispatcher.process(filepath, source_info)
+
+            all_records.extend(result["records"])
+            all_ocr.extend(result["ocr_results"])
+
+            # 如果解压出子文件，加入队列继续处理
+            for sub_file in result["sub_files"]:
+                queue.append((sub_file, source_info))
+
+        # 写入数据库
+        self._save_records(all_records)
+        self._save_prices(all_ocr)
+
+    def _save_records(self, records: list[dict]):
+        """将电表/抄表记录写入数据库。"""
+        log.info("写入 %d 条电表/抄表记录...", len(records))
+        for rec in records:
             try:
                 meter_id = self.db.upsert_meter(
                     meter_number=rec.get("meter_number", ""),
@@ -139,10 +338,11 @@ class Pipeline:
                     multiplier=rec.get("multiplier", 1.0),
                     project_name=rec.get("project_name"),
                 )
-                if rec.get("reading_month") and rec["reading_month"] != "unknown":
+                month = rec.get("reading_month")
+                if month and month != "unknown":
                     self.db.upsert_reading(
                         meter_id=meter_id,
-                        reading_month=rec["reading_month"],
+                        reading_month=month,
                         sharp_peak=rec.get("sharp_peak"),
                         peak=rec.get("peak"),
                         flat=rec.get("flat"),
@@ -154,7 +354,8 @@ class Pipeline:
             except Exception as e:
                 log.error("入库失败: %s - %s", rec.get("meter_number"), e)
 
-        # 写入单价数据
+    def _save_prices(self, ocr_results: list):
+        """将 OCR 提取的单价写入数据库。"""
         log.info("写入 %d 条单价记录...", len(ocr_results))
         for ocr in ocr_results:
             if ocr.user_id and ocr.reading_month:
@@ -175,7 +376,8 @@ class Pipeline:
         """归档所有附件到月份/项目目录。"""
         log.info("[阶段3] 归档附件...")
         for att in attachments:
-            # 从已入库数据推断月份和项目
+            if att.is_body:
+                continue  # 邮件正文不归档
             month = self._infer_month_for_file(att)
             project = self._infer_project_for_file(att)
             self.archiver.archive_attachment(att.filepath, month, project)
@@ -185,9 +387,10 @@ class Pipeline:
     def _infer_month_for_file(self, att: EmailAttachment) -> str:
         """推断文件对应的月份。"""
         import re
-        match = re.search(r'(\d{4})[-_年]?(\d{1,2})', att.filename)
-        if match:
-            return f"{match.group(1)}-{match.group(2).zfill(2)}"
+        for text in [att.filename, att.email_subject]:
+            match = re.search(r'(\d{4})[-_年]?(\d{1,2})', text)
+            if match:
+                return f"{match.group(1)}-{match.group(2).zfill(2)}"
         if att.email_date:
             return att.email_date.strftime("%Y-%m")
         return "unknown"
@@ -198,15 +401,15 @@ class Pipeline:
         for proj in projects:
             if proj in att.filename or proj in att.email_subject:
                 return proj
+        # 用邮件主题作为项目名的兜底
+        if att.email_subject:
+            return att.email_subject
         return None
 
     def _generate_visualizations(self):
         """生成可视化图表。"""
         log.info("[阶段4] 生成图表...")
-        # 全局图表
         self.chart_gen.generate_all()
-
-        # 按项目生成
         for project in self.db.get_projects():
             self.chart_gen.generate_all(project_name=project)
 
