@@ -175,6 +175,29 @@ class SmartDispatcher:
                 except Exception:
                     pass
 
+            else:
+                # 不认识的类型：先试当 HTML 表格解析，再试当 CSV 解析
+                log.warning("  未知类型 [%s] %s，尝试兜底解析", file_type, fname)
+                try:
+                    dfs = pd.read_html(filepath)
+                    for i, df in enumerate(dfs):
+                        df = df.reset_index(drop=True)
+                        df.columns = range(len(df.columns))
+                        sheets.append((df, filepath_obj, f"FALLBACK_t{i+1}", source_info))
+                except Exception:
+                    pass
+                if not sheets:
+                    for enc in ["utf-8", "gbk", "gb2312"]:
+                        try:
+                            df = pd.read_csv(filepath, encoding=enc, header=None)
+                            if len(df.columns) > 1:
+                                sheets.append((df, filepath_obj, "FALLBACK_CSV", source_info))
+                                break
+                        except Exception:
+                            continue
+                if not sheets:
+                    log.warning("  跳过无法解析的文件: %s", fname)
+
         except Exception as e:
             log.error("  文件加载失败 [%s]: %s", fname, e)
 
