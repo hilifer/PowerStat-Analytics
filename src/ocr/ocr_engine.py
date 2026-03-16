@@ -53,10 +53,12 @@ class OCREngine:
         self.tesseract_lang = ocr_cfg.get("tesseract_lang", "chi_sim+eng")
         self.extraction_rules = config.get("ocr_extraction_rules") or {}
         self._engine = None
+        self._unavailable = False  # 标记引擎是否不可用
+        self._warned = False  # 只警告一次
 
     def _init_engine(self):
         """延迟初始化 OCR 引擎。"""
-        if self._engine is not None:
+        if self._engine is not None or self._unavailable:
             return
 
         if self.engine_type == "paddleocr":
@@ -68,19 +70,29 @@ class OCREngine:
                 log.warning("PaddleOCR 未安装，回退到 Tesseract")
                 self.engine_type = "tesseract"
                 self._init_engine()
-        elif self.engine_type == "tesseract":
+                return
+
+        if self.engine_type == "tesseract":
             try:
                 import pytesseract
                 pytesseract.get_tesseract_version()
                 self._engine = pytesseract
                 log.info("Tesseract OCR 引擎初始化成功")
             except Exception as e:
-                log.error("Tesseract 不可用: %s", e)
-                raise RuntimeError("无可用 OCR 引擎") from e
+                log.warning("Tesseract 不可用: %s。图片 OCR 功能将被跳过。", e)
+                self._unavailable = True
 
     def extract_from_image(self, filepath: str, source_info: dict = None) -> OCRResult:
         """从单张图片提取单价和用户编号。"""
         self._init_engine()
+
+        if self._unavailable:
+            if not self._warned:
+                log.warning("无可用 OCR 引擎（PaddleOCR/Tesseract 均未安装），跳过所有图片处理")
+                self._warned = True
+            result = OCRResult()
+            result.source_file = Path(filepath).name
+            return result
 
         filepath = Path(filepath)
         result = OCRResult()
@@ -214,9 +226,10 @@ class OCREngine:
                 return f"{match.group(1)}-{match.group(2).zfill(2)}"
 
         # 从文件名推断
-        match = re.search(r'(\d{4})[-_年]?(\d{1,2})', filename)
-        if match:
-            return f"{match.group(1)}-{match.group(2).zfill(2)}"
+        for match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})', filename):
+            year, month = int(match.group(1)), int(match.group(2))
+            if 2015 <= year <= 2030 and 1 <= month <= 12:
+                return f"{year}-{str(month).zfill(2)}"
 
         # 从邮件日期
         if source_info and source_info.get("email_date"):

@@ -280,10 +280,10 @@ class ExcelParser:
         """从文件名、Sheet 名或邮件日期推断数据所属月份。"""
         # 尝试从文件名/Sheet 名提取 YYYY-MM 或 YYYYMM
         for text in [filename, sheet_name]:
-            match = re.search(r'(\d{4})[-_年]?(\d{1,2})(?:月?)', text)
-            if match:
-                year, month = match.group(1), match.group(2).zfill(2)
-                return f"{year}-{month}"
+            for match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})(?:月?)', text):
+                year, month = int(match.group(1)), int(match.group(2))
+                if 2015 <= year <= 2030 and 1 <= month <= 12:
+                    return f"{year}-{str(month).zfill(2)}"
 
         # 从邮件日期推断
         if source_info and source_info.get("email_date"):

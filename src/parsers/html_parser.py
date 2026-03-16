@@ -237,9 +237,10 @@ class HTMLParser:
     def _infer_month(self, source_info: dict, filename: str) -> str:
         """推断月份。"""
         for text in [filename, (source_info or {}).get("email_subject", "")]:
-            match = re.search(r'(\d{4})[-_年]?(\d{1,2})(?:月?)', text)
-            if match:
-                return f"{match.group(1)}-{match.group(2).zfill(2)}"
+            for match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})(?:月?)', text):
+                year, month = int(match.group(1)), int(match.group(2))
+                if 2015 <= year <= 2030 and 1 <= month <= 12:
+                    return f"{year}-{str(month).zfill(2)}"
         if source_info and source_info.get("email_date"):
             d = source_info["email_date"]
             if hasattr(d, "strftime"):

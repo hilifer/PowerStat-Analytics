@@ -242,12 +242,16 @@ def _register_routes(app: Flask, db: Database):
 
                     # 归档到月份目录
                     if not att.is_body:
-                        month_match = re.search(r'(\d{4})[-_年]?(\d{1,2})', att.filename)
-                        reading_month = (
-                            f"{month_match.group(1)}-{month_match.group(2).zfill(2)}"
-                            if month_match else
-                            (att.email_date.strftime("%Y-%m") if att.email_date else "unknown")
-                        )
+                        reading_month = None
+                        for month_match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})', att.filename):
+                            y, m = int(month_match.group(1)), int(month_match.group(2))
+                            if 2015 <= y <= 2030 and 1 <= m <= 12:
+                                reading_month = f"{y}-{str(m).zfill(2)}"
+                                break
+                        if not reading_month:
+                            reading_month = (
+                                att.email_date.strftime("%Y-%m") if att.email_date else "unknown"
+                            )
                         archive_root = Path(config.get("storage", "archive_root",
                                                        default="output/archive"))
                         dest_dir = archive_root / reading_month

@@ -120,8 +120,14 @@ class SmartDispatcher:
                 "sub_files": list[str],     # 解压出的子文件路径
             }
         """
-        file_type = self.detect_type(filepath)
         fname = Path(filepath).name
+
+        # 跳过 Office 临时锁文件（~$ 开头）
+        if fname.startswith("~$"):
+            log.debug("  跳过 Office 临时文件: %s", fname)
+            return {"records": [], "ocr_results": [], "sub_files": []}
+
+        file_type = self.detect_type(filepath)
         log.info("  [%s] %s", file_type.upper(), fname)
 
         result = {"records": [], "ocr_results": [], "sub_files": []}
@@ -388,9 +394,10 @@ class Pipeline:
         """推断文件对应的月份。"""
         import re
         for text in [att.filename, att.email_subject]:
-            match = re.search(r'(\d{4})[-_年]?(\d{1,2})', text)
-            if match:
-                return f"{match.group(1)}-{match.group(2).zfill(2)}"
+            for match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})', text):
+                year, month = int(match.group(1)), int(match.group(2))
+                if 2015 <= year <= 2030 and 1 <= month <= 12:
+                    return f"{year}-{str(month).zfill(2)}"
         if att.email_date:
             return att.email_date.strftime("%Y-%m")
         return "unknown"

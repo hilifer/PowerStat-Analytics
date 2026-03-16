@@ -26,9 +26,13 @@ def _setup_chinese_font():
     font_family = viz_cfg.get("font_family", "SimHei")
     fallback = viz_cfg.get("fallback_fonts", [])
 
+    # 刷新字体缓存以发现新安装的字体
+    fm.fontManager.addfont("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc") if Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc").exists() else None
+
     # 尝试查找可用的中文字体
     available = {f.name for f in fm.fontManager.ttflist}
-    for font in [font_family] + fallback:
+    candidates = [font_family] + fallback + ["WenQuanYi Micro Hei", "WenQuanYi Zen Hei", "Noto Sans CJK SC", "Noto Sans SC"]
+    for font in candidates:
         if font in available:
             plt.rcParams["font.sans-serif"] = [font]
             plt.rcParams["axes.unicode_minus"] = False
