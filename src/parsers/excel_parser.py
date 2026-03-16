@@ -348,22 +348,54 @@ class ExcelParser:
         return results
 
     def _map_columns(self, columns: list[str]) -> dict:
-        """将 DataFrame 列名映射到标准字段名。"""
-        col_map = {}
+        """将 DataFrame 列名映射到标准字段名。
 
-        simple_fields = ["meter_number", "asset_number", "user_id", "multiplier",
-                         "project_name", "discount", "unit_price", "amount",
-                         "grid_meter_number", "gen_meter_number", "usage",
-                         "reading_date", "user_name", "address",
-                         "forward_total", "reverse_total"]
-        for field in simple_fields:
+        优先级：精确匹配 > 子串匹配。
+        特殊处理：gen_meter_number 和 grid_meter_number 先映射，
+        已被映射的列不会再被 meter_number 抢占。
+        """
+        col_map = {}
+        used_cols = set()  # 已占用的列名
+
+        # 第一轮：先映射特定字段（gen/grid meter），防止被 meter_number 抢占
+        specific_first = ["gen_meter_number", "grid_meter_number"]
+        for field in specific_first:
             aliases = self.field_mapping.get(field, [])
             if isinstance(aliases, list):
                 for col in columns:
                     col_clean = str(col).strip()
                     if col_clean in aliases or any(a in col_clean for a in aliases):
                         col_map[field] = col
+                        used_cols.add(col)
                         break
+
+        # 第二轮：映射其他字段（排除已被特定字段占用的列）
+        general_fields = ["meter_number", "asset_number", "user_id", "multiplier",
+                          "project_name", "discount", "unit_price", "amount",
+                          "usage", "reading_date", "user_name", "address",
+                          "forward_total", "reverse_total"]
+        for field in general_fields:
+            aliases = self.field_mapping.get(field, [])
+            if isinstance(aliases, list):
+                # 精确匹配优先
+                for col in columns:
+                    col_clean = str(col).strip()
+                    if field == "meter_number" and col in used_cols:
+                        continue  # 不抢占已映射的 gen/grid 列
+                    if col_clean in aliases:
+                        col_map[field] = col
+                        used_cols.add(col)
+                        break
+                else:
+                    # 子串匹配兜底
+                    for col in columns:
+                        col_clean = str(col).strip()
+                        if field == "meter_number" and col in used_cols:
+                            continue
+                        if any(a in col_clean for a in aliases):
+                            col_map[field] = col
+                            used_cols.add(col)
+                            break
 
         # 表码数据映射
         for direction in ("reverse_readings", "forward_readings"):

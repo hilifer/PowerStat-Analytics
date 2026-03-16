@@ -12,6 +12,13 @@
             {% if refresh_status.running %}刷新中…{% else %}刷新邮件{% endif %}
         </button>
     </form>
+    <form method="POST" action="{{ url_for('force_refresh') }}" style="display:inline; margin-left:0.5rem;"
+          onsubmit="return confirm('确定要清除所有数据并重新解析？此操作不可撤销。');">
+        <button type="submit" class="btn btn-danger"
+                {% if refresh_status.running %}disabled{% endif %}>
+            强制刷新（重新解析全部）
+        </button>
+    </form>
     <div class="refresh-info">
         {% if refresh_status.last_run %}
             上次刷新: <strong>{{ refresh_status.last_run }}</strong>

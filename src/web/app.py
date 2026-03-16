@@ -131,6 +131,19 @@ def _register_routes(app: Flask, db: Database):
                                processed_count=processed_count,
                                refresh_status=refresh_status)
 
+    # ---- 强制刷新（清除历史，重新处理所有邮件） ----
+    @app.route("/force-refresh", methods=["POST"])
+    def force_refresh():
+        """清除已处理记录和所有数据，重新从邮箱抓取并解析。"""
+        with db.connection() as conn:
+            conn.execute("DELETE FROM processed_emails")
+            conn.execute("DELETE FROM monthly_readings")
+            conn.execute("DELETE FROM price_records")
+            conn.execute("DELETE FROM meters")
+            log.info("强制刷新：已清除所有数据")
+        flash("已清除历史数据，正在重新抓取并解析所有邮件…", "info")
+        return redirect(url_for("refresh_emails"))
+
     # ---- 刷新邮件（带防重复） ----
     @app.route("/refresh", methods=["POST"])
     def refresh_emails():
