@@ -342,6 +342,10 @@ class Pipeline:
         # 数据关联补齐
         self._reconcile_data(all_records)
 
+        # 推理补全缺失数据（如从汇总推算缺失月份）
+        log.info("[阶段2.6] 推理补全缺失数据...")
+        self.db.infer_missing_data()
+
     def _save_records(self, records: list[dict]):
         """将电表/抄表记录写入数据库。"""
         log.info("写入 %d 条电表/抄表记录...", len(records))

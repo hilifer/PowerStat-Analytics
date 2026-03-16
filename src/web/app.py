@@ -318,6 +318,10 @@ def _register_routes(app: Flask, db: Database):
                     _mark_processed(db, fp, att.filename, att.email_subject, date_str)
                     new_count += 1
 
+                # 推理补全缺失数据
+                status["progress"] = "推理补全缺失数据…"
+                db.infer_missing_data()
+
                 status["result"] = {
                     "new": new_count,
                     "skipped": skipped,

@@ -80,25 +80,44 @@ class ExcelParser:
 
     def _parse_dataframe_smart(self, df: pd.DataFrame, sheet_name: str,
                                 filepath: Path, source_info: dict) -> list[dict]:
-        """智能解析 DataFrame：先扫描全表提取元信息，再解析数据行。"""
+        """智能解析 DataFrame：自动检测格式，选择最佳解析策略。
+
+        支持的格式：
+        1. 转置表（行=尖峰平谷，右侧卡片区有电表号）
+        2. 标准横向表（含多月分段子表）
+        3. 纵向卡片格式（标签-值配对）
+        """
         if df.empty:
             return []
 
-        # 第一遍：全表扫描提取元信息
+        # 第一遍：全表扫描提取元信息（用户号、配对关系、项目名等）
         meta = self._scan_meta_info(df, sheet_name, filepath)
         log.debug("  元信息: %s", {k: v for k, v in meta.items() if v})
 
-        # 尝试纵向卡片格式（标签-值配对，如"用户表码"）
+        # 策略1：检测转置表（行=正有功尖峰/峰/平/谷，如发电统计表）
+        transposed = self._try_parse_transposed_table(df, sheet_name, filepath, source_info, meta)
+        if transposed:
+            return transposed
+
+        # 策略2：标准横向表（找到表头行后解析数据行）
+        header_row_idx = self._find_header_row(df)
+        if header_row_idx is not None:
+            results = self._parse_standard_table(df, header_row_idx, sheet_name, filepath, source_info, meta)
+            if results:
+                return results
+
+        # 策略3：纵向卡片格式（标签-值配对）
         card_records = self._try_parse_card_layout(df, sheet_name, filepath, source_info, meta)
         if card_records:
             return card_records
 
-        # 找表头行
-        header_row_idx = self._find_header_row(df)
-        if header_row_idx is None:
-            log.debug("  Sheet '%s' 未找到有效表头，跳过", sheet_name)
-            return []
+        log.debug("  Sheet '%s' 未能提取有效数据", sheet_name)
+        return []
 
+    def _parse_standard_table(self, df: pd.DataFrame, header_row_idx: int,
+                               sheet_name: str, filepath: Path,
+                               source_info: dict, meta: dict) -> list[dict]:
+        """解析标准横向表格，支持多月分段子表。"""
         # 用表头行作为列名 — 处理重复列名（位置感知消歧）
         raw_headers = [str(h).strip() if h is not None else "" for h in df.iloc[header_row_idx]]
         headers = self._disambiguate_headers(raw_headers)
@@ -107,283 +126,689 @@ class ExcelParser:
         data_df = df.iloc[header_row_idx + 1:].copy()
         data_df.columns = headers
 
+        # 检测多月分段（同 Sheet 包含多个月份子表）
+        sections = self._split_sections(data_df, sheet_name, filepath)
+        if sections:
+            all_results = []
+            for section_month, section_df in sections:
+                section_meta = dict(meta)
+                if section_month:
+                    section_meta["reading_dates"] = [section_month]
+                results = self._parse_dataframe(section_df, sheet_name, filepath, source_info, section_meta)
+                all_results.extend(results)
+                if results:
+                    log.info("  分段 [%s] %s: %d 条记录", sheet_name, section_month or "默认", len(results))
+            return all_results
+
         return self._parse_dataframe(data_df, sheet_name, filepath, source_info, meta)
+
+    def _split_sections(self, df: pd.DataFrame, sheet_name: str, filepath: Path) -> list:
+        """检测并分割多月子表。
+
+        识别标志：数据行中出现包含 "YYYY年N月" 的标题行（通常只有第一列有值，
+        其余列为空或合并单元格），标题行之后是相同结构的数据行。
+
+        返回 [(month_str, sub_df), ...] 或 空列表（不是多月格式）
+        """
+        sections = []
+        month_pattern = re.compile(r'(\d{4})\s*年\s*(\d{1,2})\s*月')
+        title_rows = []
+
+        for idx in range(len(df)):
+            row = df.iloc[idx]
+            row_strs = [str(c).strip() for c in row if c is not None and not pd.isna(c)]
+            row_text = " ".join(row_strs)
+
+            # 标题行特征：包含"年月"，且非空值少（大部分是合并单元格）
+            if month_pattern.search(row_text):
+                non_empty = sum(1 for c in row if c is not None and not pd.isna(c)
+                                and str(c).strip())
+                if non_empty <= 3:
+                    m = month_pattern.search(row_text)
+                    y, mo = int(m.group(1)), int(m.group(2))
+                    if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                        month_str = f"{y}-{str(mo).zfill(2)}"
+                        title_rows.append((idx, month_str))
+
+        # 至少2个月才算多月分段
+        if len(title_rows) < 2:
+            return []
+
+        log.info("  检测到多月分段 [%s]: %d 个月份", sheet_name, len(title_rows))
+
+        for i, (title_idx, month_str) in enumerate(title_rows):
+            start = title_idx + 1  # 标题行之后
+            end = title_rows[i + 1][0] if i + 1 < len(title_rows) else len(df)
+            if start < end:
+                sub_df = df.iloc[start:end].copy()
+                sub_df.columns = df.columns
+                # 过滤掉合计行和空行
+                sub_df = sub_df[sub_df.apply(
+                    lambda r: any(str(c).strip() not in ("", "nan", "None", "合计", "总计", "小计")
+                                  for c in r if c is not None), axis=1
+                )]
+                if not sub_df.empty:
+                    sections.append((month_str, sub_df))
+
+        return sections
+
+    def _try_parse_transposed_table(self, df: pd.DataFrame, sheet_name: str,
+                                     filepath: Path, source_info: dict,
+                                     meta: dict) -> list[dict]:
+        """解析转置表格（行=时段如尖峰/峰/平/谷，列=数据指标）。
+
+        典型布局：
+        | 类别      | 上月表数 | 本月表数 | 电表用理 | 倍率  | 发电量   | ... | 用户号      |
+        | 正有功尖峰| 68.92   | 118.77  | 49.85   | 60.00 | 2991.00 | ... | 094803...   |
+        | 正有功峰  | 113.40  | 682.36  | 47.01   | 60.00 | 2820.60 | ... | 发电表号    |
+        | 正有功平  | 119.44  | ...     | 78.58   | ...   | ...     | ... | 094803...   |
+        | 正有功谷  | 3.6     | ...     | 1.35    | ...   | 81.00   | ... | 上网表号    |
+        | 正有功总  | 258.37  | ...     | 176.78  | ...   | 10606.8 | ... | 094803...   |
+
+        右侧列包含卡片式电表信息（用户号/发电表号/上网表号等标签+值交替排列）。
+        """
+        # 时段关键词（行标识）
+        period_keywords = {
+            "尖峰": "sharp_peak", "尖": "sharp_peak",
+            "正有功尖峰": "sharp_peak", "正有功尖": "sharp_peak",
+            "峰": "peak", "正有功峰": "peak",
+            "平": "flat", "正有功平": "flat",
+            "谷": "valley", "正有功谷": "valley",
+            "总": "total", "正有功总": "total", "合计": "total",
+        }
+
+        # 扫描第一列，检测是否为转置格式
+        first_col_periods = {}  # {row_idx: period_key}
+        category_col = None
+
+        for col_idx in range(min(3, len(df.columns))):
+            period_count = 0
+            temp_periods = {}
+            for row_idx in range(min(len(df), 30)):
+                cell = df.iloc[row_idx, col_idx]
+                if cell is None or pd.isna(cell):
+                    continue
+                cell_str = str(cell).strip()
+                for kw, pkey in period_keywords.items():
+                    if cell_str == kw or cell_str.startswith(kw):
+                        temp_periods[row_idx] = pkey
+                        period_count += 1
+                        break
+            if period_count >= 3:
+                first_col_periods = temp_periods
+                category_col = col_idx
+                break
+
+        if len(first_col_periods) < 3:
+            return []
+
+        log.info("  检测到转置表格 [%s]: %d 个时段行", sheet_name, len(first_col_periods))
+
+        # 从右侧列提取卡片信息（用户号/发电表号/上网表号等）
+        card_info = self._extract_card_from_side_columns(df, meta)
+
+        # 找到数据列组：正向数据和反向数据
+        # 扫描表头区域确定列分组
+        col_groups = self._identify_transposed_column_groups(df, category_col)
+
+        # 提取各时段读数
+        forward_readings = {"sharp_peak": None, "peak": None, "flat": None, "valley": None}
+        reverse_readings = {"sharp_peak": None, "peak": None, "flat": None, "valley": None}
+        forward_total = None
+        reverse_total = None
+        multiplier = None
+
+        for row_idx, period in first_col_periods.items():
+            row = df.iloc[row_idx]
+            # 从正向数据组取值
+            fwd_val = self._get_transposed_value(row, col_groups.get("forward_usage"))
+            rev_val = self._get_transposed_value(row, col_groups.get("reverse_usage"))
+            # 备选：电表用理列
+            fwd_meter_usage = self._get_transposed_value(row, col_groups.get("forward_meter_usage"))
+            rev_meter_usage = self._get_transposed_value(row, col_groups.get("reverse_meter_usage"))
+
+            fwd = fwd_val or fwd_meter_usage
+            rev = rev_val or rev_meter_usage
+
+            if period == "total":
+                forward_total = fwd
+                reverse_total = rev
+            elif period in forward_readings:
+                forward_readings[period] = fwd
+                reverse_readings[period] = rev
+
+            # 提取倍率（通常每行相同）
+            if multiplier is None:
+                mult_val = self._get_transposed_value(row, col_groups.get("multiplier"))
+                if mult_val and mult_val > 1:
+                    multiplier = mult_val
+
+        # 推断月份
+        reading_month = self._infer_month(source_info, filepath.name, sheet_name)
+        if reading_month == "unknown" and meta.get("reading_dates"):
+            reading_month = meta["reading_dates"][0]
+
+        # 从标题行提取月份
+        for row_idx in range(min(5, len(df))):
+            for col_idx in range(min(len(df.columns), 5)):
+                cell = df.iloc[row_idx, col_idx]
+                if cell is None or pd.isna(cell):
+                    continue
+                cell_str = str(cell).strip()
+                m = re.search(r'(\d{4})\s*年\s*(\d{1,2})\s*月', cell_str)
+                if m:
+                    y, mo = int(m.group(1)), int(m.group(2))
+                    if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                        reading_month = f"{y}-{str(mo).zfill(2)}"
+                        break
+
+        project_name = meta.get("project_name") or card_info.get("project_name")
+        user_id = card_info.get("user_id")
+        if not user_id and meta.get("user_ids"):
+            user_id = meta["user_ids"][0]
+
+        results = []
+        from src.parsers.validators import validate_record
+
+        base = {
+            "user_id": user_id,
+            "multiplier": multiplier or card_info.get("multiplier"),
+            "discount": card_info.get("discount"),
+            "project_name": project_name,
+            "reading_month": reading_month,
+            "source_file": filepath.name,
+            "source_sheet": sheet_name,
+        }
+
+        # 发电表记录（正向数据）
+        gen_meter = card_info.get("gen_meter")
+        if gen_meter and any(v is not None for v in forward_readings.values()):
+            rec = {**base,
+                   "meter_number": gen_meter,
+                   "asset_number": card_info.get("gen_asset"),
+                   "meter_type": "发电表",
+                   "sharp_peak": forward_readings["sharp_peak"],
+                   "peak": forward_readings["peak"],
+                   "flat": forward_readings["flat"],
+                   "valley": forward_readings["valley"],
+                   "total_kwh": forward_total}
+            validated = validate_record(rec)
+            if validated:
+                results.append(validated)
+
+        # 上网表记录（反向数据）
+        grid_meter = card_info.get("grid_meter")
+        if grid_meter and any(v is not None for v in reverse_readings.values()):
+            rec = {**base,
+                   "meter_number": grid_meter,
+                   "asset_number": card_info.get("grid_asset"),
+                   "meter_type": "上网表",
+                   "sharp_peak": reverse_readings["sharp_peak"],
+                   "peak": reverse_readings["peak"],
+                   "flat": reverse_readings["flat"],
+                   "valley": reverse_readings["valley"],
+                   "total_kwh": reverse_total}
+            validated = validate_record(rec)
+            if validated:
+                results.append(validated)
+
+        # 如果没有从卡片获取到分离的电表号，但有主电表号
+        if not results and (card_info.get("meter_number") or meta.get("gen_meters")):
+            mn = card_info.get("meter_number")
+            if not mn and meta.get("gen_meters"):
+                mn = list(meta["gen_meters"].keys())[0]
+            if mn:
+                rec = {**base,
+                       "meter_number": mn,
+                       "asset_number": card_info.get("asset_number"),
+                       "meter_type": "未知",
+                       "sharp_peak": forward_readings["sharp_peak"],
+                       "peak": forward_readings["peak"],
+                       "flat": forward_readings["flat"],
+                       "valley": forward_readings["valley"],
+                       "total_kwh": forward_total}
+                validated = validate_record(rec)
+                if validated:
+                    results.append(validated)
+
+        # 提取单价信息（如果有）
+        prices = card_info.get("prices", {})
+        if prices:
+            for rec in results:
+                if not rec.get("unit_price"):
+                    rec["prices"] = prices
+
+        if results:
+            log.info("  转置表提取 [%s]: %d 条记录", sheet_name, len(results))
+
+        return results
+
+    def _extract_card_from_side_columns(self, df: pd.DataFrame, meta: dict) -> dict:
+        """从表格右侧列提取卡片式电表信息。
+
+        扫描所有单元格，查找标签-值配对（横向或纵向）。
+        """
+        from src.parsers.validators import clean_id
+
+        card_labels = {
+            "用户号": "user_id", "用户编号": "user_id", "户号": "user_id",
+            "发电表号": "gen_meter", "发电表": "gen_meter",
+            "上网表号": "grid_meter", "上网表": "grid_meter",
+            "发电表资产编号": "gen_asset", "发电表资产号": "gen_asset",
+            "发电资产编号": "gen_asset",
+            "上网表资产编号": "grid_asset", "上网表资产号": "grid_asset",
+            "上网资产号": "grid_asset",
+            "电表号": "meter_number", "表号": "meter_number",
+            "电表资产号": "asset_number", "资产编号": "asset_number",
+            "倍率": "multiplier", "CT倍率": "multiplier",
+            "折扣": "discount",
+            "项目名称": "project_name", "项目": "project_name",
+        }
+
+        info = {}
+        max_rows = min(len(df), 50)
+        max_cols = min(len(df.columns), 30)
+
+        for row_idx in range(max_rows):
+            for col_idx in range(max_cols):
+                cell = df.iloc[row_idx, col_idx]
+                if cell is None or pd.isna(cell):
+                    continue
+                cell_str = str(cell).strip().rstrip("：: ")
+
+                clean_str = cell_str.rstrip("：: ")
+                matched_field = None
+
+                # 精确匹配标签
+                if clean_str in card_labels:
+                    matched_field = card_labels[clean_str]
+                else:
+                    # 内嵌格式 "标签：值" 或 "标签号XXXXX"
+                    for lbl, fld in card_labels.items():
+                        m = re.match(rf'^{re.escape(lbl)}\s*[:：]?\s*([A-Za-z0-9]{{6,}})', cell_str)
+                        if m:
+                            matched_field = fld
+                            val = m.group(1).strip()
+                            if val and fld not in info:
+                                if fld == "multiplier":
+                                    try:
+                                        info[fld] = float(val)
+                                    except ValueError:
+                                        pass
+                                else:
+                                    info[fld] = clean_id(val)
+                            break
+
+                if not matched_field:
+                    continue
+
+                field = matched_field
+                if field in info:
+                    continue
+
+                # 查找值：右侧 → 下方 → 同列各行
+                value = None
+                for nc in range(col_idx + 1, min(max_cols, col_idx + 4)):
+                    v = df.iloc[row_idx, nc]
+                    if v is not None and not pd.isna(v):
+                        vs = str(v).strip()
+                        if vs and vs.rstrip("：: ") not in card_labels and len(vs) >= 2:
+                            value = vs
+                            break
+                if not value:
+                    # 下方同列 → 下方偏右（对角线，常见于合并单元格布局）
+                    for nr in range(row_idx + 1, min(max_rows, row_idx + 4)):
+                        for nc in range(col_idx, min(max_cols, col_idx + 3)):
+                            v = df.iloc[nr, nc]
+                            if v is not None and not pd.isna(v):
+                                vs = str(v).strip()
+                                if vs and vs.rstrip("：: ") not in card_labels and len(vs) >= 2:
+                                    value = vs
+                                    break
+                        if value:
+                            break
+
+                if value:
+                    if field in ("multiplier",):
+                        try:
+                            info[field] = float(value.replace(",", ""))
+                        except ValueError:
+                            pass
+                    elif field == "discount":
+                        dm = re.search(r'(\d+\.?\d*)', value)
+                        if dm:
+                            d = float(dm.group(1))
+                            info[field] = d / 10.0 if d > 1 else d
+                    else:
+                        info[field] = clean_id(value)
+
+        return info
+
+    def _identify_transposed_column_groups(self, df: pd.DataFrame, category_col: int) -> dict:
+        """识别转置表的列分组（正向数据/反向数据/倍率等）。
+
+        通过扫描表头区域的关键词来确定各列的含义。
+        """
+        groups = {}
+        max_cols = min(len(df.columns), 20)
+
+        # 扫描前几行，建立列含义
+        for row_idx in range(min(8, len(df))):
+            for col_idx in range(max_cols):
+                if col_idx == category_col:
+                    continue
+                cell = df.iloc[row_idx, col_idx]
+                if cell is None or pd.isna(cell):
+                    continue
+                cell_str = str(cell).strip()
+
+                # 检测列分组标记
+                if "正向" in cell_str or "发电" in cell_str:
+                    # 这一行是正向数据的分组头
+                    # 下一行的具体列名会更精确
+                    pass
+                if "反向" in cell_str or "上网" in cell_str:
+                    pass
+
+                # 具体列标识
+                if cell_str in ("发电量", "用电量", "正向用电量"):
+                    groups["forward_usage"] = col_idx
+                elif cell_str in ("上网电量", "上网用电量", "反向用电量"):
+                    groups["reverse_usage"] = col_idx
+                elif cell_str in ("电表用理", "电表用量") and "forward_meter_usage" not in groups:
+                    groups["forward_meter_usage"] = col_idx
+                elif cell_str in ("电表用理", "电表用量") and "forward_meter_usage" in groups:
+                    groups["reverse_meter_usage"] = col_idx
+                elif cell_str == "倍率" and "multiplier" not in groups:
+                    groups["multiplier"] = col_idx
+
+        # 如果没找到明确的列标识，尝试通过位置推断
+        # 通常正向数据在左，反向数据在右
+        if not groups.get("forward_usage") and not groups.get("forward_meter_usage"):
+            # 找第一个包含数值的列（跳过类别列）
+            for col_idx in range(category_col + 1, max_cols):
+                for row_idx in range(min(len(df), 15)):
+                    cell = df.iloc[row_idx, col_idx]
+                    if cell is not None and not pd.isna(cell):
+                        cell_str = str(cell).strip()
+                        if cell_str in ("电表用理", "电表用量", "用量"):
+                            groups.setdefault("forward_meter_usage", col_idx)
+                            break
+
+        log.debug("  转置表列分组: %s", groups)
+        return groups
+
+    def _get_transposed_value(self, row, col_idx) -> Optional[float]:
+        """从转置表行中提取数值。"""
+        if col_idx is None:
+            return None
+        try:
+            val = row.iloc[col_idx]
+            if val is None or pd.isna(val):
+                return None
+            return float(str(val).replace(",", "").strip())
+        except (ValueError, TypeError, IndexError):
+            return None
 
     def _try_parse_card_layout(self, df: pd.DataFrame, sheet_name: str,
                                 filepath: Path, source_info: dict,
                                 meta: dict) -> list[dict]:
         """尝试解析纵向卡片格式（标签-值配对）。
 
-        这种格式常见于"用户表码"等Sheet，布局如下：
-            用户号
-            094803002727160
-            发电表号
-            094803004432605
-            发电表资产编号
-            09001SF00000042508942176
-            上网表号
-            094803002727160
+        这种格式常见于"用户表码"等Sheet，支持多组卡片。
+        每遇到"用户号"标签开始一组新的卡片。
 
-        或横向标签-值对：
-            用户号      | 094803002727160
-            发电表号    | 094803004432605
-
-        检测条件：
-        - 至少出现2个纵向标签关键词（发电表号/上网表号/用户号/电表资产号等）
-        - 数据不是标准表格格式（列数少或没有明显表头行）
+        支持两种布局：
+        - 横向: 标签在A列，值在B列（同行）
+        - 纵向: 标签在第N行，值在第N+1行（同列）
+        - 内嵌: 标签：值 在同一单元格内
         """
         # 纵向标签关键词映射
         label_map = {
-            "用户号": "user_id",
-            "用户编号": "user_id",
-            "户号": "user_id",
-            "客户编号": "user_id",
-            "用电户号": "user_id",
-            "用户名称": "user_name",
-            "客户名称": "user_name",
-            "电表号": "meter_number",
-            "表号": "meter_number",
-            "电表编号": "meter_number",
-            "电能表号": "meter_number",
-            "发电表号": "gen_meter",
-            "发电表": "gen_meter",
-            "发电电表号": "gen_meter",
-            "逆变表号": "gen_meter",
-            "上网表号": "grid_meter",
-            "上网表": "grid_meter",
-            "上网电表号": "grid_meter",
-            "并网表号": "grid_meter",
-            "发电表资产编号": "gen_asset",
-            "发电表资产号": "gen_asset",
+            "用户号": "user_id", "用户编号": "user_id", "户号": "user_id",
+            "客户编号": "user_id", "用电户号": "user_id",
+            "用户名称": "user_name", "客户名称": "user_name",
+            "电表号": "meter_number", "表号": "meter_number",
+            "电表编号": "meter_number", "电能表号": "meter_number",
+            "发电表号": "gen_meter", "发电表": "gen_meter",
+            "发电电表号": "gen_meter", "逆变表号": "gen_meter",
+            "上网表号": "grid_meter", "上网表": "grid_meter",
+            "上网电表号": "grid_meter", "并网表号": "grid_meter",
+            "发电表资产编号": "gen_asset", "发电表资产号": "gen_asset",
             "发电资产号": "gen_asset",
-            "上网表资产编号": "grid_asset",
-            "上网表资产号": "grid_asset",
+            "上网表资产编号": "grid_asset", "上网表资产号": "grid_asset",
             "上网资产号": "grid_asset",
-            "电表资产号": "asset_number",
-            "资产编号": "asset_number",
-            "资产号": "asset_number",
-            "核销资产号": "asset_number",
-            "倍率": "multiplier",
-            "CT倍率": "multiplier",
-            "变比": "multiplier",
-            "统计日期": "reading_date",
-            "抄表日期": "reading_date",
-            "用电地址": "address",
-            "安装地址": "address",
-            "项目名称": "project_name",
-            "项目": "project_name",
+            "电表资产号": "asset_number", "资产编号": "asset_number",
+            "资产号": "asset_number", "核销资产号": "asset_number",
+            "倍率": "multiplier", "CT倍率": "multiplier", "变比": "multiplier",
+            "统计日期": "reading_date", "抄表日期": "reading_date",
+            "用电地址": "address", "安装地址": "address",
+            "项目名称": "project_name", "项目": "project_name",
             "电站名称": "project_name",
             "折扣": "discount",
         }
 
-        # 收集所有单元格文本，检测是否为卡片格式
-        all_cells = []
-        for row_idx in range(min(len(df), 100)):
-            for col_idx in range(min(len(df.columns), 10)):
+        # 分组分隔标签（遇到这些标签时开始新的一组）
+        group_start_fields = {"user_id"}
+
+        # 第一步：扫描所有单元格，提取有序的(标签, 值)流
+        ordered_pairs = []  # [(field_name, value_str, row_idx), ...]
+
+        max_rows = min(len(df), 500)
+        max_cols = min(len(df.columns), 20)
+
+        # 收集所有标签位置
+        label_positions = []  # [(row, col, label_text, field_name)]
+
+        for row_idx in range(max_rows):
+            for col_idx in range(max_cols):
                 cell = df.iloc[row_idx, col_idx]
                 if cell is None or pd.isna(cell):
                     continue
                 cell_str = str(cell).strip()
-                if cell_str:
-                    all_cells.append((row_idx, col_idx, cell_str))
+                if not cell_str:
+                    continue
 
-        # 检测卡片标签数量
-        label_hits = set()
-        for _, _, cell_str in all_cells:
-            clean = cell_str.strip()
-            if clean in label_map:
-                label_hits.add(clean)
-            else:
-                # 检查是否包含标签关键词（如 "发电表号："）
-                for lbl in label_map:
-                    if clean.startswith(lbl) and len(clean) - len(lbl) <= 3:
-                        label_hits.add(lbl)
+                # 精确匹配标签
+                clean = cell_str.rstrip("：: ")
+                if clean in label_map:
+                    label_positions.append((row_idx, col_idx, clean, label_map[clean]))
+                    continue
 
-        # 至少需要2个关键标签才算卡片格式（且必须有电表/用户相关标签）
-        meter_labels = {"发电表号", "上网表号", "电表号", "发电表", "上网表",
-                        "发电电表号", "上网电表号", "逆变表号", "并网表号",
-                        "电表编号", "电能表号", "表号"}
-        has_meter_label = bool(label_hits & meter_labels)
-        if len(label_hits) < 2 or not has_meter_label:
-            return []
-
-        log.info("  检测到纵向卡片格式 [%s]: 标签=%s", sheet_name, label_hits)
-
-        # 提取所有标签-值对
-        # 策略1：同一行 横向标签-值对（A列=标签，B列=值）
-        # 策略2：纵向标签在上，值在下一行同列
-        kv_pairs = {}
-        label_positions = {}  # {(row, col): field_name}
-
-        for row_idx, col_idx, cell_str in all_cells:
-            clean = cell_str.strip().rstrip("：: ")
-            if clean in label_map:
-                field = label_map[clean]
-                label_positions[(row_idx, col_idx)] = field
-
-                # 横向：检查右侧单元格
-                for next_col in range(col_idx + 1, min(len(df.columns), col_idx + 3)):
-                    val = df.iloc[row_idx, next_col]
-                    if val is not None and not pd.isna(val):
-                        val_str = str(val).strip()
-                        if val_str and val_str not in label_map and len(val_str) >= 2:
-                            kv_pairs.setdefault(field, []).append(val_str)
-                            break
-
-        # 纵向：检查标签下方的值
-        for (row_idx, col_idx), field in label_positions.items():
-            if field in kv_pairs:
-                continue  # 已在横向中找到值
-            for next_row in range(row_idx + 1, min(len(df), row_idx + 3)):
-                val = df.iloc[next_row, col_idx]
-                if val is not None and not pd.isna(val):
-                    val_str = str(val).strip()
-                    if val_str and val_str not in label_map and len(val_str) >= 2:
-                        kv_pairs.setdefault(field, []).append(val_str)
+                # 内嵌格式 "标签：值"
+                for lbl, field in label_map.items():
+                    m = re.match(rf'^{re.escape(lbl)}\s*[:：]\s*(.+)$', cell_str)
+                    if m:
+                        val = m.group(1).strip()
+                        if val and len(val) >= 2:
+                            ordered_pairs.append((field, val, row_idx))
                         break
 
-        # 也检查同一单元格内的 "标签：值" 格式
-        for _, _, cell_str in all_cells:
-            for lbl, field in label_map.items():
-                m = re.match(rf'^{re.escape(lbl)}\s*[:：]\s*(.+)$', cell_str)
-                if m:
-                    val = m.group(1).strip()
-                    if val and len(val) >= 2:
-                        kv_pairs.setdefault(field, []).append(val)
-
-        log.debug("  卡片提取的键值对: %s", {k: v for k, v in kv_pairs.items()})
-
-        if not kv_pairs:
+        # 检测是否为卡片格式
+        label_fields = set(f for _, _, _, f in label_positions)
+        meter_fields = {"gen_meter", "grid_meter", "meter_number"}
+        has_meter = bool(label_fields & meter_fields)
+        if len(label_fields) < 2 or not has_meter:
             return []
 
-        # 构建电表记录
+        log.info("  检测到纵向卡片格式 [%s]: 字段=%s", sheet_name,
+                 set(l for _, _, l, _ in label_positions))
+
+        # 第二步：为每个标签找到对应的值
+        for row_idx, col_idx, lbl_text, field in label_positions:
+            value = None
+
+            # 策略1 - 横向：同行右侧单元格
+            for nc in range(col_idx + 1, min(max_cols, col_idx + 4)):
+                val = df.iloc[row_idx, nc]
+                if val is not None and not pd.isna(val):
+                    vs = str(val).strip()
+                    if vs and vs.rstrip("：: ") not in label_map and len(vs) >= 2:
+                        value = vs
+                        break
+
+            # 策略2 - 纵向：下方单元格
+            if not value:
+                for nr in range(row_idx + 1, min(max_rows, row_idx + 3)):
+                    val = df.iloc[nr, col_idx]
+                    if val is not None and not pd.isna(val):
+                        vs = str(val).strip()
+                        if vs and vs.rstrip("：: ") not in label_map and len(vs) >= 2:
+                            value = vs
+                            break
+
+            if value:
+                ordered_pairs.append((field, value, row_idx))
+
+        # 按行号排序，确保处理顺序正确
+        ordered_pairs.sort(key=lambda x: x[2])
+
+        if not ordered_pairs:
+            return []
+
+        # 第三步：按"用户号"分组（每个用户号开始一组新卡片）
+        groups = []
+        current_group = {}
+
+        for field, value, row_idx in ordered_pairs:
+            if field in group_start_fields and current_group:
+                # 遇到新的用户号，保存当前组，开始新组
+                groups.append(current_group)
+                current_group = {}
+            current_group.setdefault(field, []).append(value)
+
+        if current_group:
+            groups.append(current_group)
+
+        # 如果没有 user_id 分组标记，整体作为一组
+        if not groups:
+            return []
+
+        log.debug("  卡片分组: %d 组", len(groups))
+
+        # 第四步：每组生成电表记录
         results = []
         from src.parsers.validators import validate_record, clean_id
 
+        project_name = meta.get("project_name")
+        reading_month = "unknown"
+        if meta.get("reading_dates"):
+            reading_month = meta["reading_dates"][0]
+        if reading_month == "unknown":
+            reading_month = self._infer_month(source_info, filepath.name, sheet_name)
+
+        for group in groups:
+            g_results = self._build_records_from_card_group(
+                group, project_name, reading_month, filepath, sheet_name
+            )
+            results.extend(g_results)
+
+        if results:
+            gen_count = len([r for r in results if r.get("meter_type") == "发电表"])
+            grid_count = len([r for r in results if r.get("meter_type") == "上网表"])
+            other_count = len(results) - gen_count - grid_count
+            log.info("  卡片格式提取 [%s]: %d 条记录 (发电%d/上网%d/其他%d), %d 组用户",
+                     sheet_name, len(results), gen_count, grid_count, other_count, len(groups))
+
+        return results
+
+    def _build_records_from_card_group(self, group: dict, project_name: str,
+                                        default_month: str, filepath: Path,
+                                        sheet_name: str) -> list[dict]:
+        """从一组卡片键值对构建电表记录。"""
+        from src.parsers.validators import validate_record, clean_id
+
+        results = []
+
+        # 提取公共字段
         user_id = None
-        for uid in kv_pairs.get("user_id", []):
+        for uid in group.get("user_id", []):
             cleaned = clean_id(uid)
             if cleaned and len(cleaned) >= 6:
                 user_id = cleaned
                 break
 
         multiplier = None
-        for mv in kv_pairs.get("multiplier", []):
+        for mv in group.get("multiplier", []):
             try:
-                multiplier = float(mv.replace(",", ""))
+                multiplier = float(str(mv).replace(",", ""))
             except (ValueError, TypeError):
                 pass
 
         discount = None
-        for dv in kv_pairs.get("discount", []):
-            dm = re.search(r'(\d+\.?\d*)', dv)
+        for dv in group.get("discount", []):
+            dm = re.search(r'(\d+\.?\d*)', str(dv))
             if dm:
                 d = float(dm.group(1))
                 if 0 < d <= 10:
                     discount = d / 10.0 if d > 1 else d
 
-        project_name = meta.get("project_name")
-        if not project_name:
-            for pv in kv_pairs.get("project_name", []):
-                project_name = pv
+        proj = project_name
+        if not proj:
+            for pv in group.get("project_name", []):
+                proj = pv
                 break
 
-        # 推断月份
-        reading_month = "unknown"
-        for dv in kv_pairs.get("reading_date", []):
-            dm = re.search(r'(\d{4})[-/年.]?(\d{1,2})', dv)
+        reading_month = default_month
+        for dv in group.get("reading_date", []):
+            dm = re.search(r'(\d{4})[-/年.]?(\d{1,2})', str(dv))
             if dm:
                 y, m = int(dm.group(1)), int(dm.group(2))
                 if 2015 <= y <= 2035 and 1 <= m <= 12:
                     reading_month = f"{y}-{str(m).zfill(2)}"
                     break
-        if reading_month == "unknown" and meta.get("reading_dates"):
-            reading_month = meta["reading_dates"][0]
-        if reading_month == "unknown":
-            reading_month = self._infer_month(source_info, filepath.name, sheet_name)
 
-        gen_meters = [clean_id(v) for v in kv_pairs.get("gen_meter", [])]
-        grid_meters = [clean_id(v) for v in kv_pairs.get("grid_meter", [])]
-        gen_assets = [clean_id(v) for v in kv_pairs.get("gen_asset", [])]
-        grid_assets = [clean_id(v) for v in kv_pairs.get("grid_asset", [])]
-        plain_meters = [clean_id(v) for v in kv_pairs.get("meter_number", [])]
-        plain_assets = [clean_id(v) for v in kv_pairs.get("asset_number", [])]
+        base = {
+            "user_id": user_id,
+            "multiplier": multiplier,
+            "discount": discount,
+            "project_name": proj,
+            "reading_month": reading_month,
+            "sharp_peak": None, "peak": None, "flat": None, "valley": None,
+            "total_kwh": None,
+            "source_file": filepath.name,
+            "source_sheet": sheet_name,
+        }
 
-        # 生成发电表记录
+        gen_meters = [clean_id(v) for v in group.get("gen_meter", []) if clean_id(v)]
+        grid_meters = [clean_id(v) for v in group.get("grid_meter", []) if clean_id(v)]
+        gen_assets = [clean_id(v) for v in group.get("gen_asset", []) if clean_id(v)]
+        grid_assets = [clean_id(v) for v in group.get("grid_asset", []) if clean_id(v)]
+        plain_meters = [clean_id(v) for v in group.get("meter_number", []) if clean_id(v)]
+        plain_assets = [clean_id(v) for v in group.get("asset_number", []) if clean_id(v)]
+        used_meters = set()
+
+        # 发电表
         for i, gm in enumerate(gen_meters):
-            if not gm or len(gm) < 6:
+            if len(gm) < 6:
                 continue
-            ga = gen_assets[i] if i < len(gen_assets) else None
-            record = validate_record({
-                "meter_number": gm,
-                "asset_number": ga,
-                "user_id": user_id,
-                "meter_type": "发电表",
-                "multiplier": multiplier,
-                "discount": discount,
-                "project_name": project_name,
-                "reading_month": reading_month,
-                "sharp_peak": None, "peak": None, "flat": None, "valley": None,
-                "total_kwh": None,
-                "source_file": filepath.name,
-                "source_sheet": sheet_name,
-            })
-            if record:
-                results.append(record)
+            rec = {**base, "meter_number": gm, "meter_type": "发电表",
+                   "asset_number": gen_assets[i] if i < len(gen_assets) else None}
+            validated = validate_record(rec)
+            if validated:
+                results.append(validated)
+                used_meters.add(gm)
 
-        # 生成上网表记录
+        # 上网表
         for i, grd in enumerate(grid_meters):
-            if not grd or len(grd) < 6:
+            if len(grd) < 6:
                 continue
-            ga = grid_assets[i] if i < len(grid_assets) else None
-            record = validate_record({
-                "meter_number": grd,
-                "asset_number": ga,
-                "user_id": user_id,
-                "meter_type": "上网表",
-                "multiplier": multiplier,
-                "discount": discount,
-                "project_name": project_name,
-                "reading_month": reading_month,
-                "sharp_peak": None, "peak": None, "flat": None, "valley": None,
-                "total_kwh": None,
-                "source_file": filepath.name,
-                "source_sheet": sheet_name,
-            })
-            if record:
-                results.append(record)
+            rec = {**base, "meter_number": grd, "meter_type": "上网表",
+                   "asset_number": grid_assets[i] if i < len(grid_assets) else None}
+            validated = validate_record(rec)
+            if validated:
+                results.append(validated)
+                used_meters.add(grd)
 
-        # 生成普通电表记录
+        # 普通电表（排除已在发电/上网中出现的）
         for i, pm in enumerate(plain_meters):
-            if not pm or len(pm) < 6:
+            if len(pm) < 6 or pm in used_meters:
                 continue
-            # 跳过已在发电/上网中出现的
-            if pm in gen_meters or pm in grid_meters:
-                continue
-            pa = plain_assets[i] if i < len(plain_assets) else None
-            record = validate_record({
-                "meter_number": pm,
-                "asset_number": pa,
-                "user_id": user_id,
-                "meter_type": "未知",
-                "multiplier": multiplier,
-                "discount": discount,
-                "project_name": project_name,
-                "reading_month": reading_month,
-                "sharp_peak": None, "peak": None, "flat": None, "valley": None,
-                "total_kwh": None,
-                "source_file": filepath.name,
-                "source_sheet": sheet_name,
-            })
-            if record:
-                results.append(record)
-
-        if results:
-            log.info("  卡片格式提取 [%s]: %d 条记录 (发电%d/上网%d/普通%d)",
-                     sheet_name, len(results),
-                     len([r for r in results if r.get("meter_type") == "发电表"]),
-                     len([r for r in results if r.get("meter_type") == "上网表"]),
-                     len([r for r in results if r.get("meter_type") == "未知"]))
+            rec = {**base, "meter_number": pm, "meter_type": "未知",
+                   "asset_number": plain_assets[i] if i < len(plain_assets) else None}
+            validated = validate_record(rec)
+            if validated:
+                results.append(validated)
 
         return results
 
@@ -650,8 +1075,8 @@ class ExcelParser:
             "asset_number", "meter_number",
             "user_id", "multiplier",
             "project_name", "discount", "unit_price", "amount",
-            "usage", "reading_date", "user_name", "address",
             "forward_total", "reverse_total",
+            "usage", "reading_date", "user_name", "address",
         ]
 
         # 第一轮：所有字段做精确匹配
@@ -770,6 +1195,17 @@ class ExcelParser:
         fwd_total = get_float("forward_total")
         rev_total = get_float("reverse_total")
 
+        # 从上月/本月表数计算用电量（如果 usage/forward_total 缺失）
+        prev_reading = get_float("prev_reading")
+        curr_reading = get_float("curr_reading")
+        if prev_reading is not None and curr_reading is not None:
+            calc_usage = curr_reading - prev_reading
+            if calc_usage >= 0:
+                if total_kwh is None and fwd_total is None:
+                    total_kwh = calc_usage
+                    log.debug("  从表数差值计算用电量: %.2f - %.2f = %.2f",
+                              curr_reading, prev_reading, calc_usage)
+
         # 读取正向和反向表码数据
         fwd = {
             "sharp_peak": get_float("forward_readings_sharp") or get_float("forward_readings_sharp_peak"),
@@ -801,13 +1237,18 @@ class ExcelParser:
         if has_primary:
             # 有统一电表号列的模式
             meter_number = get_val("meter_number")
-            meter_type = self._detect_meter_type(sheet_name, filepath.name, col_map)
+            # 从 "用户类型" / "类别" 列检测（优先级最高，因为是行级信息）
+            category = str(get_val("category") or "")
+            meter_type = self._detect_type_from_category(category, "")
+            if meter_type == "未知":
+                meter_type = self._detect_meter_type(sheet_name, filepath.name, col_map)
             # 从行内容检测类型
-            row_text = " ".join(str(v) for v in first_cells)
-            if "上网" in row_text and meter_type == "未知":
-                meter_type = "上网表"
-            elif "发电" in row_text and meter_type == "未知":
-                meter_type = "发电表"
+            if meter_type == "未知":
+                row_text = " ".join(str(v) for v in first_cells)
+                if "上网" in row_text:
+                    meter_type = "上网表"
+                elif "发电" in row_text:
+                    meter_type = "发电表"
 
             # 如果这行同时有正向和反向数据（单表双向场景），
             # 优先用正向数据（发电），反向数据会在后面单独处理
@@ -1092,6 +1533,25 @@ class ExcelParser:
         if has_forward and not has_reverse:
             return "发电表"
 
+        return "未知"
+
+    def _detect_type_from_category(self, category: str, row_text: str) -> str:
+        """从用户类型/类别/方向字段智能判断电表类型。"""
+        text = f"{category} {row_text}"
+        # 光伏发电客户 / 发电 / 正向 → 发电表
+        if any(kw in text for kw in ["光伏发电", "发电客户", "发电户", "逆变"]):
+            return "发电表"
+        # 地方电厂户 / 上网 / 反向 / 关口 → 上网表
+        if any(kw in text for kw in ["地方电厂", "电厂户", "上网", "并网", "关口"]):
+            return "上网表"
+        # 方向标记
+        if "正向" in text and "反向" not in text:
+            return "发电表"
+        if "反向" in text and "正向" not in text:
+            return "上网表"
+        # 公变/专变客户
+        if any(kw in text for kw in ["公变客户", "专变客户", "公变", "专变"]):
+            return "未知"  # 无法确定
         return "未知"
 
     def _infer_month(self, source_info: dict, filename: str, sheet_name: str) -> str:

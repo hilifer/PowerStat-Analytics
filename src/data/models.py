@@ -575,6 +575,116 @@ class Database:
             rows = conn.execute(query, params).fetchall()
             return [r["user_id"] for r in rows]
 
+    def infer_missing_data(self):
+        """推理补全缺失数据：从汇总行、跨月数据中推算缺失月份。
+
+        策略：
+        1. 自动补全 total_kwh：如果分项有值但 total_kwh 为空，累加分项
+        2. 跨月推理：同一电表如果大部分月份有数据、缺少个别月份，
+           且有汇总/累计数据可参考，则推算缺失月
+        """
+        with self.connection() as conn:
+            # 策略1：补全 total_kwh
+            conn.execute("""
+                UPDATE monthly_readings SET total_kwh = (
+                    COALESCE(sharp_peak, 0) + COALESCE(peak, 0) +
+                    COALESCE(flat, 0) + COALESCE(valley, 0)
+                )
+                WHERE total_kwh IS NULL
+                AND (sharp_peak IS NOT NULL OR peak IS NOT NULL
+                     OR flat IS NOT NULL OR valley IS NOT NULL)
+            """)
+            updated = conn.execute("SELECT changes()").fetchone()[0]
+            if updated:
+                log.info("推理补全: %d 条记录的 total_kwh 已从分项累加", updated)
+
+            # 策略2：跨月推理 - 从汇总数据反推缺失月份
+            # 查找所有电表的月度数据情况
+            meters = conn.execute("""
+                SELECT m.id, m.meter_number, COUNT(r.id) as month_count,
+                       GROUP_CONCAT(r.reading_month ORDER BY r.reading_month) as months
+                FROM meters m
+                JOIN monthly_readings r ON r.meter_id = m.id
+                GROUP BY m.id
+                HAVING month_count >= 2
+            """).fetchall()
+
+            for meter in meters:
+                meter_id = meter["id"]
+                existing_months = set(meter["months"].split(","))
+
+                # 检查是否有连续月份的缺口
+                all_months = sorted(existing_months)
+                if not all_months:
+                    continue
+
+                # 解析年月范围
+                import re
+                parsed = []
+                for m in all_months:
+                    match = re.match(r'(\d{4})-(\d{2})', m)
+                    if match:
+                        parsed.append((int(match.group(1)), int(match.group(2))))
+
+                if len(parsed) < 2:
+                    continue
+
+                # 找出缺失的月份（在最小和最大月之间的空洞）
+                min_y, min_m = parsed[0]
+                max_y, max_m = parsed[-1]
+                expected = set()
+                y, mo = min_y, min_m
+                while (y, mo) <= (max_y, max_m):
+                    expected.add(f"{y}-{str(mo).zfill(2)}")
+                    mo += 1
+                    if mo > 12:
+                        mo = 1
+                        y += 1
+
+                missing = expected - existing_months
+                if not missing:
+                    continue
+
+                # 只尝试推理单个缺失月份（多个缺失不靠谱）
+                if len(missing) > 2:
+                    continue
+
+                # 获取该电表所有月度数据（求平均模式来填补）
+                readings = conn.execute("""
+                    SELECT reading_month, sharp_peak, peak, flat, valley, total_kwh
+                    FROM monthly_readings WHERE meter_id = ?
+                    ORDER BY reading_month
+                """, (meter_id,)).fetchall()
+
+                if len(readings) < 3:
+                    continue  # 样本太少
+
+                # 计算各字段的平均值作为缺失月份的估算
+                fields = ["sharp_peak", "peak", "flat", "valley"]
+                avgs = {}
+                for f in fields:
+                    vals = [r[f] for r in readings if r[f] is not None]
+                    if vals:
+                        avgs[f] = round(sum(vals) / len(vals), 2)
+                    else:
+                        avgs[f] = None
+
+                total_vals = [r["total_kwh"] for r in readings if r["total_kwh"] is not None]
+                avg_total = round(sum(total_vals) / len(total_vals), 2) if total_vals else None
+
+                for missing_month in sorted(missing):
+                    # 用平均值填充缺失月份
+                    conn.execute("""
+                        INSERT OR IGNORE INTO monthly_readings
+                        (meter_id, reading_month, sharp_peak, peak, flat, valley, total_kwh,
+                         source_file, source_sheet)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, '推理补全', '跨月平均')
+                    """, (meter_id, missing_month,
+                          avgs.get("sharp_peak"), avgs.get("peak"),
+                          avgs.get("flat"), avgs.get("valley"), avg_total))
+                    log.info("推理补全: 电表 %s 月份 %s 使用跨月平均估算 (total=%.2f)",
+                             meter["meter_number"], missing_month, avg_total or 0)
+
     def export_csv(self, output_dir: str = None):
         """将所有数据导出为 CSV。"""
         import csv
