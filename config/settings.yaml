@@ -28,7 +28,7 @@ email:
 # --- 附件处理设置 ---
 attachments:
   # 支持的附件类型
-  supported_formats: [".xlsx", ".xls", ".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff"]
+  supported_formats: [".xlsx", ".xls", ".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".zip", ".rar", ".7z"]
   # 临时下载目录
   temp_dir: "output/temp_attachments"
   # 最大附件大小 (MB)

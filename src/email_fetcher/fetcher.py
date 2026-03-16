@@ -10,6 +10,7 @@ import imaplib
 import os
 import re
 import time
+import zipfile
 from datetime import datetime
 from email.message import Message
 from pathlib import Path
@@ -296,8 +297,87 @@ class EmailFetcher:
             except Exception as e:
                 log.error("处理邮件 %s 时出错: %s", mid, e, exc_info=True)
 
-        log.info("共下载 %d 个附件", len(attachments))
+        # 解压 zip 文件，将内部文件展开为独立附件
+        attachments = self._extract_archives(attachments)
+
+        log.info("共获得 %d 个附件（含解压）", len(attachments))
         return attachments
+
+    def _extract_archives(self, attachments: list[EmailAttachment]) -> list[EmailAttachment]:
+        """解压 zip 等压缩包，将内部文件展开为独立附件返回。"""
+        ARCHIVE_EXTS = {".zip"}
+        INNER_EXTS = {".xlsx", ".xls", ".pdf", ".png", ".jpg", ".jpeg",
+                      ".bmp", ".tiff", ".tif", ".csv"}
+        result = []
+
+        for att in attachments:
+            ext = os.path.splitext(att.filepath)[1].lower()
+            if ext not in ARCHIVE_EXTS:
+                result.append(att)
+                continue
+
+            # 解压 zip
+            zip_path = Path(att.filepath)
+            if not zipfile.is_zipfile(str(zip_path)):
+                log.warning("  文件不是有效 zip: %s", att.filename)
+                result.append(att)
+                continue
+
+            extract_dir = zip_path.parent / zip_path.stem
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            extracted_count = 0
+
+            try:
+                with zipfile.ZipFile(str(zip_path), "r") as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+
+                        # 处理中文文件名编码
+                        try:
+                            inner_name = info.filename.encode("cp437").decode("gbk")
+                        except (UnicodeDecodeError, UnicodeEncodeError):
+                            try:
+                                inner_name = info.filename.encode("cp437").decode("utf-8")
+                            except (UnicodeDecodeError, UnicodeEncodeError):
+                                inner_name = info.filename
+
+                        inner_ext = os.path.splitext(inner_name)[1].lower()
+                        if inner_ext not in INNER_EXTS:
+                            log.debug("  跳过压缩包内文件: %s", inner_name)
+                            continue
+
+                        # 提取文件
+                        safe_inner = _safe_filename(os.path.basename(inner_name))
+                        dest_path = extract_dir / safe_inner
+                        counter = 1
+                        orig_stem = dest_path.stem
+                        while dest_path.exists():
+                            dest_path = extract_dir / f"{orig_stem}_{counter}{dest_path.suffix}"
+                            counter += 1
+
+                        with zf.open(info) as src, open(dest_path, "wb") as dst:
+                            dst.write(src.read())
+
+                        inner_att = EmailAttachment(
+                            filename=safe_inner,
+                            filepath=str(dest_path),
+                            content_type="",
+                            email_date=att.email_date,
+                            email_subject=att.email_subject,
+                            email_sender=att.email_sender,
+                        )
+                        result.append(inner_att)
+                        extracted_count += 1
+                        log.info("  解压: %s -> %s", att.filename, safe_inner)
+
+                log.info("  从 %s 解压出 %d 个文件", att.filename, extracted_count)
+
+            except Exception as e:
+                log.error("  解压失败 [%s]: %s", att.filename, e, exc_info=True)
+                result.append(att)  # 解压失败保留原始 zip
+
+        return result
 
     def _imap_search_utf8(self, criteria: list[str]):
         """使用 UTF-8 charset 执行 IMAP SEARCH，支持中文关键词。
