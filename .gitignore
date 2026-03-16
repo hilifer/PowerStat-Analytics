@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+output/temp_attachments/
+output/data/*.db
+output/charts/
+logs/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
