@@ -524,6 +524,91 @@ def _register_routes(app: Flask, db: Database):
 
         return jsonify({"nodes": nodes, "edges": edges})
 
+    # ---- 电表编辑页面 ----
+    @app.route("/meters/<int:meter_id>/edit")
+    def meter_edit(meter_id):
+        with db.connection() as conn:
+            meter = conn.execute("SELECT * FROM meters WHERE id = ?", (meter_id,)).fetchone()
+            if not meter:
+                abort(404)
+            meter = dict(meter)
+        projects = db.get_projects()
+        return render_template("meter_edit.html", meter=meter, projects=projects)
+
+    # ---- 电表更新 API ----
+    @app.route("/api/meters/<meter_number>/update", methods=["POST"])
+    def meter_update_api(meter_number):
+        data = request.get_json() or request.form.to_dict()
+        if not data:
+            return jsonify({"error": "无更新数据"}), 400
+
+        # 检查电表是否存在
+        meter = db.get_meter(meter_number)
+        if not meter:
+            return jsonify({"error": f"电表 {meter_number} 不存在"}), 404
+
+        # 检查锁定状态
+        if meter.get("is_locked") and "is_locked" not in data:
+            return jsonify({"error": "电表已锁定，请先解锁再修改", "is_locked": True}), 403
+
+        # 类型转换
+        fields = {}
+        for k, v in data.items():
+            if k in ("multiplier", "discount"):
+                try:
+                    fields[k] = float(v)
+                except (ValueError, TypeError):
+                    pass
+            elif k == "is_locked":
+                fields[k] = int(v)
+            elif k in ("user_id", "meter_type", "asset_number", "project_name"):
+                fields[k] = str(v).strip() if v else None
+
+        ok = db.update_meter(meter_number, **fields)
+        if ok:
+            return jsonify({"success": True, "message": f"电表 {meter_number} 已更新"})
+        else:
+            return jsonify({"error": "更新失败（电表可能已锁定）"}), 403
+
+    # ---- 电表锁定 API ----
+    @app.route("/api/meters/<meter_number>/lock", methods=["POST"])
+    def meter_lock_api(meter_number):
+        ok = db.lock_meter(meter_number)
+        return jsonify({"success": ok, "message": f"电表 {meter_number} 已锁定"})
+
+    # ---- 电表解锁 API ----
+    @app.route("/api/meters/<meter_number>/unlock", methods=["POST"])
+    def meter_unlock_api(meter_number):
+        ok = db.unlock_meter(meter_number)
+        return jsonify({"success": ok, "message": f"电表 {meter_number} 已解锁"})
+
+    # ---- 批量锁定/解锁 API ----
+    @app.route("/api/meters/batch-lock", methods=["POST"])
+    def meter_batch_lock():
+        data = request.get_json()
+        if not data or "meter_numbers" not in data:
+            return jsonify({"error": "请提供 meter_numbers 列表"}), 400
+
+        action = data.get("action", "lock")
+        count = 0
+        for mn in data["meter_numbers"]:
+            if action == "lock":
+                db.lock_meter(mn)
+            else:
+                db.unlock_meter(mn)
+            count += 1
+
+        return jsonify({"success": True, "count": count,
+                        "message": f"已{'锁定' if action == 'lock' else '解锁'} {count} 个电表"})
+
+    # ---- 电表详情 API ----
+    @app.route("/api/meters/<meter_number>")
+    def meter_detail_api(meter_number):
+        meter = db.get_meter(meter_number)
+        if not meter:
+            return jsonify({"error": "电表不存在"}), 404
+        return jsonify(meter)
+
     # ---- CSV 文件下载 ----
     @app.route("/download-csv/<filename>")
     def download_csv(filename):

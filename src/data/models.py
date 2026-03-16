@@ -2,6 +2,11 @@
 
 电表号是唯一主键。每次从不同文件提取到同一电表号的信息时，
 补全其关联数据（用户号、资产编号、倍率、项目名、电表类型等）。
+
+锁定机制：
+    - is_locked=1 时，自动化管线不能修改电表的固定信息
+    - 手动修改需先解锁(is_locked=0)，修改后重新锁定
+    - 锁定字段：user_id, project_name, meter_type, multiplier, discount, asset_number
 """
 
 import sqlite3
@@ -26,6 +31,8 @@ CREATE TABLE IF NOT EXISTS meters (
     user_id         TEXT,                            -- 用户编号
     meter_type      TEXT NOT NULL DEFAULT '未知',     -- 上网表 / 发电表
     multiplier      REAL DEFAULT 1.0,                -- 倍率
+    discount        REAL DEFAULT 1.0,                -- 折扣系数
+    is_locked       INTEGER DEFAULT 0,               -- 锁定标志 (1=锁定, 0=未锁定)
     project_name    TEXT,                            -- 所属项目
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -72,7 +79,7 @@ CREATE TABLE IF NOT EXISTS processed_emails (
     processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 月度账单汇总视图
+-- 月度账单汇总视图（含折扣）
 CREATE VIEW IF NOT EXISTS v_monthly_bill AS
 SELECT
     m.meter_number,
@@ -80,6 +87,7 @@ SELECT
     m.user_id,
     m.meter_type,
     m.multiplier,
+    m.discount,
     m.project_name,
     r.reading_month,
     r.sharp_peak,
@@ -91,15 +99,16 @@ SELECT
     p.peak_price,
     p.flat_price,
     p.valley_price,
-    ROUND(COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0), 2) AS sharp_peak_amount,
-    ROUND(COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0), 2)             AS peak_amount,
-    ROUND(COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0), 2)              AS flat_amount,
-    ROUND(COALESCE(r.valley, 0) * m.multiplier * COALESCE(p.valley_price, 0), 2)          AS valley_amount,
+    ROUND(COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0) * COALESCE(m.discount, 1.0), 2) AS sharp_peak_amount,
+    ROUND(COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0) * COALESCE(m.discount, 1.0), 2)             AS peak_amount,
+    ROUND(COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0) * COALESCE(m.discount, 1.0), 2)              AS flat_amount,
+    ROUND(COALESCE(r.valley, 0) * m.multiplier * COALESCE(p.valley_price, 0) * COALESCE(m.discount, 1.0), 2)          AS valley_amount,
     ROUND(
-        COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0) +
-        COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0) +
-        COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0) +
-        COALESCE(r.valley, 0) * m.multiplier * COALESCE(p.valley_price, 0),
+        (COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0) +
+         COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0) +
+         COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0) +
+         COALESCE(r.valley, 0) * m.multiplier * COALESCE(p.valley_price, 0))
+        * COALESCE(m.discount, 1.0),
     2) AS total_amount,
     r.source_file AS reading_source,
     p.source_file AS price_source
@@ -132,14 +141,65 @@ class Database:
             log.info("数据库初始化完成: %s", self.db_path)
 
     def _migrate(self, conn):
-        """兼容旧数据库：确保必要的 UNIQUE 约束存在。"""
-        # 检查 meters.meter_number 是否有 UNIQUE 约束
+        """兼容旧数据库：确保新字段和约束存在。"""
+        # 检查 meters 表的列信息
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(meters)").fetchall()}
+
+        # 添加 discount 列（如果缺失）
+        if "discount" not in columns:
+            log.info("迁移: 添加 meters.discount 列")
+            conn.execute("ALTER TABLE meters ADD COLUMN discount REAL DEFAULT 1.0")
+
+        # 添加 is_locked 列（如果缺失）
+        if "is_locked" not in columns:
+            log.info("迁移: 添加 meters.is_locked 列")
+            conn.execute("ALTER TABLE meters ADD COLUMN is_locked INTEGER DEFAULT 0")
+
+        # 重建视图（确保包含新字段）
+        conn.execute("DROP VIEW IF EXISTS v_monthly_bill")
+        conn.execute("""
+            CREATE VIEW v_monthly_bill AS
+            SELECT
+                m.meter_number,
+                m.asset_number,
+                m.user_id,
+                m.meter_type,
+                m.multiplier,
+                m.discount,
+                m.project_name,
+                r.reading_month,
+                r.sharp_peak,
+                r.peak,
+                r.flat,
+                r.valley,
+                r.total_kwh,
+                p.sharp_peak_price,
+                p.peak_price,
+                p.flat_price,
+                p.valley_price,
+                ROUND(COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0) * COALESCE(m.discount, 1.0), 2) AS sharp_peak_amount,
+                ROUND(COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0) * COALESCE(m.discount, 1.0), 2)             AS peak_amount,
+                ROUND(COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0) * COALESCE(m.discount, 1.0), 2)              AS flat_amount,
+                ROUND(COALESCE(r.valley, 0) * m.multiplier * COALESCE(p.valley_price, 0) * COALESCE(m.discount, 1.0), 2)          AS valley_amount,
+                ROUND(
+                    (COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0) +
+                     COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0) +
+                     COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0) +
+                     COALESCE(r.valley, 0) * m.multiplier * COALESCE(p.valley_price, 0))
+                    * COALESCE(m.discount, 1.0),
+                2) AS total_amount,
+                r.source_file AS reading_source,
+                p.source_file AS price_source
+            FROM meters m
+            JOIN monthly_readings r ON r.meter_id = m.id
+            LEFT JOIN price_records p ON p.user_id = m.user_id AND p.reading_month = r.reading_month
+        """)
+
+        # 检查 UNIQUE 约束
         indexes = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='meters'"
         ).fetchall()
         index_names = {row[0] for row in indexes}
-
-        # sqlite 自动为 UNIQUE 列创建名为 sqlite_autoindex_meters_1 的索引
         has_unique = any("autoindex" in name or "meter_number" in name for name in index_names)
         if not has_unique:
             log.warning("检测到旧数据库，正在迁移: 重建 meters 表以添加 UNIQUE 约束...")
@@ -151,18 +211,20 @@ class Database:
                     user_id         TEXT,
                     meter_type      TEXT NOT NULL DEFAULT '未知',
                     multiplier      REAL DEFAULT 1.0,
+                    discount        REAL DEFAULT 1.0,
+                    is_locked       INTEGER DEFAULT 0,
                     project_name    TEXT,
                     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 INSERT OR IGNORE INTO meters_new
-                    (id, meter_number, asset_number, user_id, meter_type, multiplier, project_name, created_at, updated_at)
-                    SELECT id, meter_number, asset_number, user_id, meter_type, multiplier, project_name, created_at, updated_at
+                    (id, meter_number, asset_number, user_id, meter_type, multiplier, discount, is_locked, project_name, created_at, updated_at)
+                    SELECT id, meter_number, asset_number, user_id, meter_type, multiplier,
+                           COALESCE(discount, 1.0), COALESCE(is_locked, 0), project_name, created_at, updated_at
                     FROM meters;
                 DROP TABLE meters;
                 ALTER TABLE meters_new RENAME TO meters;
             """)
-            # 重建索引
             conn.execute("CREATE INDEX IF NOT EXISTS idx_meters_user_id ON meters(user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_meters_project ON meters(project_name)")
             log.info("meters 表迁移完成")
@@ -191,42 +253,48 @@ class Database:
 
         电表号是唯一标识。user_id、asset_number 等是关联属性，
         只在当前值为空时才用新值补全（不覆盖已有数据）。
+        锁定的电表不会被自动更新固定信息。
         """
         import re
         _has_chinese = re.compile(r'[\u4e00-\u9fff]')
 
-        # DB 层安全检查：拒绝含中文的编号
         if not meter_number or len(meter_number) < 6 or _has_chinese.search(meter_number):
             raise ValueError(f"无效电表号: {meter_number}")
         if user_id and _has_chinese.search(user_id):
             user_id = None
         if asset_number and _has_chinese.search(asset_number):
             asset_number = None
+
         with self.connection() as conn:
             conn.execute(
                 """INSERT INTO meters (meter_number, user_id, meter_type, asset_number, multiplier, project_name)
                    VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(meter_number) DO UPDATE SET
                        user_id = CASE
+                           WHEN meters.is_locked = 1 THEN meters.user_id
                            WHEN meters.user_id IS NULL OR meters.user_id = ''
                            THEN COALESCE(excluded.user_id, meters.user_id)
                            ELSE meters.user_id
                        END,
                        meter_type = CASE
+                           WHEN meters.is_locked = 1 THEN meters.meter_type
                            WHEN excluded.meter_type != '未知' THEN excluded.meter_type
                            ELSE meters.meter_type
                        END,
                        asset_number = CASE
+                           WHEN meters.is_locked = 1 THEN meters.asset_number
                            WHEN meters.asset_number IS NULL OR meters.asset_number = ''
                            THEN COALESCE(excluded.asset_number, meters.asset_number)
                            ELSE meters.asset_number
                        END,
                        multiplier = CASE
+                           WHEN meters.is_locked = 1 THEN meters.multiplier
                            WHEN excluded.multiplier IS NOT NULL AND excluded.multiplier != 1.0
                            THEN excluded.multiplier
                            ELSE meters.multiplier
                        END,
                        project_name = CASE
+                           WHEN meters.is_locked = 1 THEN meters.project_name
                            WHEN meters.project_name IS NULL OR meters.project_name = ''
                            THEN COALESCE(excluded.project_name, meters.project_name)
                            ELSE meters.project_name
@@ -243,6 +311,52 @@ class Database:
             meter_id = row["id"]
             log.debug("电表 upsert: %s -> id=%d", meter_number, meter_id)
             return meter_id
+
+    def update_meter(self, meter_number: str, **fields) -> bool:
+        """手动更新电表信息（仅限解锁状态，或管理员操作）。
+
+        可更新字段: user_id, meter_type, multiplier, discount,
+                   asset_number, project_name, is_locked
+        """
+        allowed = {"user_id", "meter_type", "multiplier", "discount",
+                    "asset_number", "project_name", "is_locked"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+
+        with self.connection() as conn:
+            # 若不是解锁/锁定操作，检查是否已锁定
+            if "is_locked" not in updates:
+                row = conn.execute(
+                    "SELECT is_locked FROM meters WHERE meter_number = ?",
+                    (meter_number,)
+                ).fetchone()
+                if row and row["is_locked"]:
+                    log.warning("电表 %s 已锁定，拒绝修改。请先解锁。", meter_number)
+                    return False
+
+            set_clause = ", ".join(f"{k} = ?" for k in updates)
+            values = list(updates.values()) + [meter_number]
+            conn.execute(
+                f"UPDATE meters SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE meter_number = ?",
+                values,
+            )
+            log.info("电表 %s 手动更新: %s", meter_number, updates)
+            return True
+
+    def lock_meter(self, meter_number: str) -> bool:
+        """锁定电表，防止自动化程序修改固定信息。"""
+        return self.update_meter(meter_number, is_locked=1)
+
+    def unlock_meter(self, meter_number: str) -> bool:
+        """解锁电表，允许手动修改。"""
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE meters SET is_locked = 0, updated_at = CURRENT_TIMESTAMP WHERE meter_number = ?",
+                (meter_number,)
+            )
+            log.info("电表 %s 已解锁", meter_number)
+            return True
 
     def upsert_reading(self, meter_id: int, reading_month: str,
                        sharp_peak: float = None, peak: float = None,
@@ -295,6 +409,14 @@ class Database:
             )
 
     # ---- 查询 ----
+
+    def get_meter(self, meter_number: str) -> Optional[dict]:
+        """查询单个电表详情。"""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM meters WHERE meter_number = ?", (meter_number,)
+            ).fetchone()
+            return dict(row) if row else None
 
     def get_meters(self, project_name: str = None, user_id: str = None) -> list[dict]:
         """查询电表列表。"""

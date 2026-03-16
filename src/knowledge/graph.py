@@ -15,7 +15,9 @@
 用途：
     - 数据完整性检测（孤立节点 = 缺失关联）
     - 跨实体查询（项目下所有电表所有月份的账单汇总）
-    - 异常发现（同一用户关联了多个项目 / 电量突变）
+    - 异常发现（同一用户关联了多个项目 / 电量突变 / 电价异常）
+    - 电表类型分组分析（上网表 vs 发电表）
+    - 账单计算（电量 × 倍率 × 单价）
     - 关系可视化
 """
 
@@ -67,7 +69,9 @@ class KnowledgeGraph:
             self.G.add_node(meter_id, type="meter", label=m["meter_number"],
                             meter_type=m.get("meter_type", "未知"),
                             multiplier=m.get("multiplier", 1.0),
+                            discount=m.get("discount", 1.0),
                             asset_number=m.get("asset_number", ""),
+                            is_locked=bool(m.get("is_locked", 0)),
                             db_id=m["id"])
 
             # 项目关系
@@ -191,12 +195,15 @@ class KnowledgeGraph:
         return result
 
     def trace_meter(self, meter_number: str) -> dict:
-        """追溯单个电表的完整关系链。"""
+        """追溯单个电表的完整关系链，含账单计算。"""
         meter_id = f"meter:{meter_number}"
         if not self.G.has_node(meter_id):
             return {"error": f"电表 {meter_number} 不存在"}
 
-        info = {"meter": meter_number, **self.G.nodes[meter_id]}
+        node_data = self.G.nodes[meter_id]
+        info = {"meter": meter_number, **node_data}
+        multiplier = node_data.get("multiplier", 1.0) or 1.0
+        discount = node_data.get("discount", 1.0) or 1.0
 
         # 所属项目
         info["projects"] = []
@@ -224,20 +231,45 @@ class KnowledgeGraph:
                 })
         info["readings"].sort(key=lambda x: x["month"])
 
-        # 关联单价（通过用户节点）
-        info["prices"] = []
+        # 关联单价（通过用户节点）+ 账单计算
+        price_map = {}  # month -> price data
         for user_label in info["users"]:
-            user_id = f"user:{user_label}"
-            for _, target, edata in self.G.out_edges(user_id, data=True):
+            user_node = f"user:{user_label}"
+            for _, target, edata in self.G.out_edges(user_node, data=True):
                 if edata.get("relation") == "有单价":
-                    info["prices"].append({
-                        "month": self.G.nodes[target].get("label"),
+                    month = self.G.nodes[target].get("label")
+                    price_map[month] = {
                         "sharp_peak_price": edata.get("sharp_peak_price"),
                         "peak_price": edata.get("peak_price"),
                         "flat_price": edata.get("flat_price"),
                         "valley_price": edata.get("valley_price"),
-                    })
-        info["prices"].sort(key=lambda x: x["month"])
+                    }
+
+        info["prices"] = sorted(
+            [{"month": m, **p} for m, p in price_map.items()],
+            key=lambda x: x["month"]
+        )
+
+        # 账单计算：readings × multiplier × prices × discount
+        info["bills"] = []
+        for reading in info["readings"]:
+            month = reading["month"]
+            if month not in price_map:
+                continue
+            price = price_map[month]
+            bill = {"month": month}
+            total = 0.0
+            for period, p_field in [("sharp_peak", "sharp_peak_price"),
+                                     ("peak", "peak_price"),
+                                     ("flat", "flat_price"),
+                                     ("valley", "valley_price")]:
+                kwh = reading.get(period) or 0
+                unit_price = price.get(p_field) or 0
+                amount = round(kwh * multiplier * unit_price * discount, 2)
+                bill[f"{period}_amount"] = amount
+                total += amount
+            bill["total_amount"] = round(total, 2)
+            info["bills"].append(bill)
 
         return info
 
@@ -253,6 +285,8 @@ class KnowledgeGraph:
             "missing_readings": self._find_missing_readings(),
             "reading_spikes": self._find_reading_spikes(),
             "multi_project_users": self._find_multi_project_users(),
+            "price_anomalies": self._find_price_anomalies(),
+            "meter_type_issues": self._find_meter_type_issues(),
         }
 
         total = sum(len(v) for v in anomalies.values())
@@ -284,6 +318,7 @@ class KnowledgeGraph:
             if issues:
                 orphans.append({
                     "meter": data.get("label"),
+                    "meter_type": data.get("meter_type", "未知"),
                     "issues": issues,
                 })
         return orphans
@@ -292,7 +327,6 @@ class KnowledgeGraph:
         """找出有读数但缺少对应单价的记录。"""
         missing = []
         for meter_id in self.get_nodes_by_type("meter"):
-            # 找到此电表关联的用户
             user_ids = []
             for _, target, edata in self.G.out_edges(meter_id, data=True):
                 if edata.get("relation") == "关联用户":
@@ -301,13 +335,11 @@ class KnowledgeGraph:
             if not user_ids:
                 continue
 
-            # 找到有读数的月份
             for _, month_node, edata in self.G.out_edges(meter_id, data=True):
                 if edata.get("relation") != "有读数":
                     continue
                 month_label = self.G.nodes[month_node].get("label")
 
-                # 检查是否有对应单价
                 has_price = False
                 for uid in user_ids:
                     if self.G.has_edge(uid, month_node):
@@ -328,7 +360,6 @@ class KnowledgeGraph:
         """找出同一项目下，某些电表某月有数据但其他电表没有的情况。"""
         missing = []
         for proj_id in self.get_nodes_by_type("project"):
-            # 此项目下的所有电表
             meter_ids = [
                 target for _, target, edata in self.G.out_edges(proj_id, data=True)
                 if edata.get("relation") == "拥有"
@@ -336,7 +367,6 @@ class KnowledgeGraph:
             if len(meter_ids) < 2:
                 continue
 
-            # 收集每个电表有数据的月份
             meter_months = {}
             for mid in meter_ids:
                 months = set()
@@ -394,11 +424,9 @@ class KnowledgeGraph:
         """检测同一用户编号关联了多个项目的情况。"""
         results = []
         for user_id in self.get_nodes_by_type("user"):
-            # 用户 ← 电表 ← 项目
             projects = set()
             for source, _, edata in self.G.in_edges(user_id, data=True):
                 if edata.get("relation") == "关联用户":
-                    # source 是电表，找电表的项目
                     for proj, _, pedata in self.G.in_edges(source, data=True):
                         if pedata.get("relation") == "拥有":
                             projects.add(self.G.nodes[proj].get("label"))
@@ -410,6 +438,66 @@ class KnowledgeGraph:
                     "issue": f"用户关联了 {len(projects)} 个项目",
                 })
         return results
+
+    def _find_price_anomalies(self) -> list[dict]:
+        """检测单价异常（价格不合理或同用户不同月价格波动过大）。"""
+        anomalies = []
+        for user_id in self.get_nodes_by_type("user"):
+            prices_by_month = []
+            for _, target, edata in self.G.out_edges(user_id, data=True):
+                if edata.get("relation") != "有单价":
+                    continue
+                month = self.G.nodes[target].get("label")
+                for field in ["sharp_peak_price", "peak_price", "flat_price", "valley_price"]:
+                    val = edata.get(field)
+                    if val is not None and (val < 0.1 or val > 3.0):
+                        anomalies.append({
+                            "user": self.G.nodes[user_id].get("label"),
+                            "month": month,
+                            "field": field,
+                            "value": val,
+                            "issue": f"{field} 值 {val} 超出合理范围 (0.1~3.0 元/kWh)",
+                        })
+                prices_by_month.append({"month": month, **{
+                    f: edata.get(f) for f in ["sharp_peak_price", "peak_price",
+                                               "flat_price", "valley_price"]
+                }})
+
+            # 检查价格顺序：通常 尖峰 > 峰 > 平 > 谷
+            for pm in prices_by_month:
+                vals = [pm.get(f) for f in ["sharp_peak_price", "peak_price",
+                                             "flat_price", "valley_price"]]
+                vals = [v for v in vals if v is not None]
+                if len(vals) >= 4 and vals != sorted(vals, reverse=True):
+                    anomalies.append({
+                        "user": self.G.nodes[user_id].get("label"),
+                        "month": pm["month"],
+                        "issue": f"价格顺序异常（应 尖>峰>平>谷），实际: {vals}",
+                    })
+
+        return anomalies
+
+    def _find_meter_type_issues(self) -> list[dict]:
+        """检测电表类型相关异常。"""
+        issues = []
+        for proj_id in self.get_nodes_by_type("project"):
+            meter_types = defaultdict(list)
+            for _, meter_id, edata in self.G.out_edges(proj_id, data=True):
+                if edata.get("relation") != "拥有":
+                    continue
+                mtype = self.G.nodes[meter_id].get("meter_type", "未知")
+                meter_types[mtype].append(self.G.nodes[meter_id].get("label"))
+
+            # 检查项目下是否有未知类型的电表
+            unknown = meter_types.get("未知", [])
+            if unknown:
+                issues.append({
+                    "project": self.G.nodes[proj_id].get("label"),
+                    "meters": unknown,
+                    "issue": f"{len(unknown)} 个电表类型未知，需确认是上网表还是发电表",
+                })
+
+        return issues
 
     # ================================================================
     # 统计分析
@@ -440,21 +528,32 @@ class KnowledgeGraph:
         stats["largest_component_size"] = max(len(c) for c in components) if components else 0
         stats["isolated_nodes"] = len(list(nx.isolates(self.G)))
 
+        # 电表类型统计
+        meter_types = defaultdict(int)
+        for n, d in self.G.nodes(data=True):
+            if d.get("type") == "meter":
+                meter_types[d.get("meter_type", "未知")] += 1
+        stats["meter_types"] = dict(meter_types)
+
         return stats
 
     def get_project_ranking(self) -> list[dict]:
-        """按项目汇总电量和电表数，排序输出。"""
+        """按项目汇总电量和电表数，含电表类型分组。"""
         ranking = []
         for proj_id in self.get_nodes_by_type("project"):
             proj_label = self.G.nodes[proj_id].get("label")
             meter_count = 0
             total_kwh = 0.0
             months = set()
+            type_counts = defaultdict(int)
 
             for _, meter_id, edata in self.G.out_edges(proj_id, data=True):
                 if edata.get("relation") != "拥有":
                     continue
                 meter_count += 1
+                mtype = self.G.nodes[meter_id].get("meter_type", "未知")
+                type_counts[mtype] += 1
+
                 for _, month_node, rdata in self.G.out_edges(meter_id, data=True):
                     if rdata.get("relation") == "有读数":
                         total_kwh += rdata.get("total_kwh") or 0
@@ -463,6 +562,7 @@ class KnowledgeGraph:
             ranking.append({
                 "project": proj_label,
                 "meter_count": meter_count,
+                "meter_types": dict(type_counts),
                 "total_kwh": round(total_kwh, 2),
                 "month_count": len(months),
                 "month_range": f"{min(months)} ~ {max(months)}" if months else "-",
@@ -470,6 +570,112 @@ class KnowledgeGraph:
 
         ranking.sort(key=lambda x: x["total_kwh"], reverse=True)
         return ranking
+
+    def get_meter_type_summary(self) -> dict:
+        """按电表类型汇总分析。"""
+        summary = {}
+        for meter_id in self.get_nodes_by_type("meter"):
+            data = self.G.nodes[meter_id]
+            mtype = data.get("meter_type", "未知")
+            if mtype not in summary:
+                summary[mtype] = {
+                    "count": 0, "total_kwh": 0.0,
+                    "meters": [], "months": set(),
+                }
+
+            summary[mtype]["count"] += 1
+            summary[mtype]["meters"].append(data.get("label"))
+
+            for _, target, edata in self.G.out_edges(meter_id, data=True):
+                if edata.get("relation") == "有读数":
+                    summary[mtype]["total_kwh"] += edata.get("total_kwh") or 0
+                    summary[mtype]["months"].add(self.G.nodes[target].get("label"))
+
+        # 序列化 set
+        for v in summary.values():
+            v["total_kwh"] = round(v["total_kwh"], 2)
+            v["month_count"] = len(v["months"])
+            del v["months"]
+
+        return summary
+
+    def calculate_project_bill(self, project_name: str) -> dict:
+        """计算项目的月度账单汇总（通过图谱遍历）。"""
+        proj_id = f"project:{project_name}"
+        if not self.G.has_node(proj_id):
+            return {"project": project_name, "error": "项目不存在", "bills": []}
+
+        # 收集所有月份的账单
+        monthly_bills = defaultdict(lambda: {
+            "sharp_peak_amount": 0, "peak_amount": 0,
+            "flat_amount": 0, "valley_amount": 0,
+            "total_amount": 0, "meter_count": 0,
+        })
+
+        for _, meter_id, edata in self.G.out_edges(proj_id, data=True):
+            if edata.get("relation") != "拥有":
+                continue
+
+            meter_data = self.G.nodes[meter_id]
+            multiplier = meter_data.get("multiplier", 1.0) or 1.0
+            discount = meter_data.get("discount", 1.0) or 1.0
+
+            # 找用户节点以获取价格
+            user_nodes = []
+            for _, target, ed in self.G.out_edges(meter_id, data=True):
+                if ed.get("relation") == "关联用户":
+                    user_nodes.append(target)
+
+            # 构建 price_map: month -> prices
+            price_map = {}
+            for uid in user_nodes:
+                for _, target, ed in self.G.out_edges(uid, data=True):
+                    if ed.get("relation") == "有单价":
+                        month = self.G.nodes[target].get("label")
+                        price_map[month] = {
+                            "sharp_peak_price": ed.get("sharp_peak_price") or 0,
+                            "peak_price": ed.get("peak_price") or 0,
+                            "flat_price": ed.get("flat_price") or 0,
+                            "valley_price": ed.get("valley_price") or 0,
+                        }
+
+            # 读数 × 倍率 × 单价 × 折扣
+            for _, target, ed in self.G.out_edges(meter_id, data=True):
+                if ed.get("relation") != "有读数":
+                    continue
+                month = self.G.nodes[target].get("label")
+                if month not in price_map:
+                    continue
+
+                price = price_map[month]
+                bill = monthly_bills[month]
+                bill["meter_count"] += 1
+
+                for period, p_field in [("sharp_peak", "sharp_peak_price"),
+                                         ("peak", "peak_price"),
+                                         ("flat", "flat_price"),
+                                         ("valley", "valley_price")]:
+                    kwh = ed.get(period) or 0
+                    unit_price = price.get(p_field) or 0
+                    amount = kwh * multiplier * unit_price * discount
+                    bill[f"{period}_amount"] += amount
+                    bill["total_amount"] += amount
+
+        # 格式化输出
+        bills = []
+        for month in sorted(monthly_bills.keys()):
+            b = monthly_bills[month]
+            bills.append({
+                "month": month,
+                "meter_count": b["meter_count"],
+                "sharp_peak_amount": round(b["sharp_peak_amount"], 2),
+                "peak_amount": round(b["peak_amount"], 2),
+                "flat_amount": round(b["flat_amount"], 2),
+                "valley_amount": round(b["valley_amount"], 2),
+                "total_amount": round(b["total_amount"], 2),
+            })
+
+        return {"project": project_name, "bills": bills}
 
     # ================================================================
     # 可视化
@@ -526,12 +732,32 @@ class KnowledgeGraph:
             nodes = [n for n in G.nodes() if G.nodes[n].get("type") == ntype]
             if not nodes:
                 continue
-            node_pos = {n: pos[n] for n in nodes}
-            nx.draw_networkx_nodes(G, node_pos, nodelist=nodes,
-                                   node_color=style["color"],
-                                   node_size=style["size"],
-                                   node_shape=style["shape"],
-                                   alpha=0.85, ax=ax)
+
+            # 电表按类型细分颜色
+            if ntype == "meter":
+                grid_meters = [n for n in nodes if G.nodes[n].get("meter_type") == "上网表"]
+                gen_meters = [n for n in nodes if G.nodes[n].get("meter_type") == "发电表"]
+                unknown_meters = [n for n in nodes if G.nodes[n].get("meter_type") not in ("上网表", "发电表")]
+
+                for sub_nodes, color, label_suffix in [
+                    (grid_meters, "#3498DB", "上网表"),
+                    (gen_meters, "#9B59B6", "发电表"),
+                    (unknown_meters, "#95A5A6", "未知"),
+                ]:
+                    if sub_nodes:
+                        node_pos = {n: pos[n] for n in sub_nodes}
+                        nx.draw_networkx_nodes(G, node_pos, nodelist=sub_nodes,
+                                               node_color=color,
+                                               node_size=style["size"],
+                                               node_shape=style["shape"],
+                                               alpha=0.85, ax=ax)
+            else:
+                node_pos = {n: pos[n] for n in nodes}
+                nx.draw_networkx_nodes(G, node_pos, nodelist=nodes,
+                                       node_color=style["color"],
+                                       node_size=style["size"],
+                                       node_shape=style["shape"],
+                                       alpha=0.85, ax=ax)
 
         # 边
         edge_colors = {
@@ -548,21 +774,23 @@ class KnowledgeGraph:
                                        arrows=True, arrowsize=15, ax=ax,
                                        connectionstyle="arc3,rad=0.1")
 
-        # 标签（只显示 label 属性，避免过长）
+        # 标签
         labels = {}
         for n, d in G.nodes(data=True):
             label = d.get("label", n)
-            # 截断过长的标签
             if len(str(label)) > 15:
                 label = str(label)[:12] + "..."
             labels[n] = label
 
         nx.draw_networkx_labels(G, pos, labels, font_size=7, ax=ax)
 
-        # 图例
+        # 图例（含电表类型分类）
         from matplotlib.lines import Line2D
         legend_elements = []
-        for ntype, style in type_styles.items():
+
+        # 项目/用户/月份
+        for ntype in ["project", "user", "month"]:
+            style = type_styles[ntype]
             nodes = [n for n in G.nodes() if G.nodes[n].get("type") == ntype]
             if nodes:
                 legend_elements.append(
@@ -570,6 +798,19 @@ class KnowledgeGraph:
                            markerfacecolor=style["color"], markersize=10,
                            label=f"{style['label']} ({len(nodes)})")
                 )
+
+        # 电表按类型分列
+        meter_nodes = [n for n in G.nodes() if G.nodes[n].get("type") == "meter"]
+        if meter_nodes:
+            for mtype, color in [("上网表", "#3498DB"), ("发电表", "#9B59B6"), ("未知", "#95A5A6")]:
+                count = sum(1 for n in meter_nodes if G.nodes[n].get("meter_type") == mtype)
+                if count:
+                    legend_elements.append(
+                        Line2D([0], [0], marker="o", color="w",
+                               markerfacecolor=color, markersize=10,
+                               label=f"{mtype} ({count})")
+                    )
+
         for relation, color in edge_colors.items():
             edges = [(u, v) for u, v, d in G.edges(data=True) if d.get("relation") == relation]
             if edges:
@@ -602,7 +843,6 @@ class KnowledgeGraph:
             return set()
 
         nodes = {proj_id}
-        # BFS 收集相关节点（限 3 跳）
         frontier = {proj_id}
         for _ in range(3):
             next_frontier = set()
@@ -630,15 +870,25 @@ class KnowledgeGraph:
         }
 
         for node_id, attrs in self.G.nodes(data=True):
-            data["nodes"].append({
+            node = {
                 "id": node_id,
                 "label": attrs.get("label", node_id),
                 "type": attrs.get("type", "unknown"),
-            })
+            }
+            if attrs.get("type") == "meter":
+                node["meter_type"] = attrs.get("meter_type", "未知")
+                node["multiplier"] = attrs.get("multiplier", 1.0)
+                node["discount"] = attrs.get("discount", 1.0)
+                node["is_locked"] = attrs.get("is_locked", False)
+            data["nodes"].append(node)
 
         for source, target, attrs in self.G.edges(data=True):
             edge = {"source": source, "target": target}
             edge["relation"] = attrs.get("relation", "")
+            # 包含边属性数据
+            for k, v in attrs.items():
+                if k != "relation" and v is not None:
+                    edge[k] = v
             data["edges"].append(edge)
 
         if output_path is None:

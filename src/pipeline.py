@@ -336,6 +336,9 @@ class Pipeline:
         self._save_records(all_records)
         self._save_prices(all_ocr)
 
+        # 数据关联补齐
+        self._reconcile_data(all_records)
+
     def _save_records(self, records: list[dict]):
         """将电表/抄表记录写入数据库。"""
         log.info("写入 %d 条电表/抄表记录...", len(records))
@@ -352,6 +355,11 @@ class Pipeline:
                     multiplier=rec.get("multiplier"),
                     project_name=rec.get("project_name"),
                 )
+                # 折扣单独更新（仅在有值且未锁定时）
+                discount = rec.get("discount")
+                if discount and discount != 1.0:
+                    self.db.update_meter(meter_number, discount=discount)
+
                 month = rec.get("reading_month")
                 if month and month != "unknown":
                     self.db.upsert_reading(
@@ -365,6 +373,18 @@ class Pipeline:
                         source_file=rec.get("source_file"),
                         source_sheet=rec.get("source_sheet"),
                     )
+
+                # 如果记录里有电价和月份，也入库为 price_record
+                unit_price = rec.get("unit_price")
+                user_id = rec.get("user_id")
+                if unit_price and user_id and month and month != "unknown":
+                    self.db.upsert_price(
+                        user_id=user_id,
+                        reading_month=month,
+                        flat_price=unit_price,
+                        source_file=rec.get("source_file"),
+                    )
+
             except Exception as e:
                 log.error("入库失败: %s - %s", rec.get("meter_number"), e)
 
@@ -385,6 +405,119 @@ class Pipeline:
                     )
                 except Exception as e:
                     log.error("单价入库失败: user=%s - %s", ocr.user_id, e)
+
+    def _reconcile_data(self, all_records: list[dict]):
+        """数据关联补齐：跨文件交叉引用，填补缺失字段。
+
+        策略：
+        1. 用户编号关联：同一用户编号的电表共享项目名、折扣
+        2. 配对电表关联：发电表号 ↔ 上网表号 共享用户编号和项目
+        3. 项目名补齐：通过同源文件传递项目名
+        """
+        log.info("[阶段2.5] 数据关联补齐...")
+        meters = self.db.get_meters()
+        if not meters:
+            log.info("  无电表数据，跳过关联")
+            return
+
+        # 建立索引
+        by_user = {}     # user_id -> [meter_dict]
+        by_meter = {}    # meter_number -> meter_dict
+        for m in meters:
+            by_meter[m["meter_number"]] = m
+            uid = m.get("user_id")
+            if uid:
+                by_user.setdefault(uid, []).append(m)
+
+        # 从 all_records 收集配对关系和跨文件信息
+        pairs = []        # (gen_meter, grid_meter)
+        file_meters = {}  # source_file -> [meter_number]
+        file_project = {} # source_file -> project_name
+        file_user = {}    # source_file -> user_id
+        file_discount = {}  # source_file -> discount
+
+        for rec in all_records:
+            mn = rec.get("meter_number", "").strip()
+            sf = rec.get("source_file", "")
+            if mn:
+                file_meters.setdefault(sf, []).append(mn)
+            if rec.get("project_name"):
+                file_project[sf] = rec["project_name"]
+            if rec.get("user_id"):
+                file_user[sf] = rec["user_id"]
+            if rec.get("discount") and rec["discount"] != 1.0:
+                file_discount[sf] = rec["discount"]
+
+            # 配对关系
+            gen = rec.get("gen_meter_number", "").strip()
+            grid = rec.get("grid_meter_number", "").strip()
+            if gen and mn and gen != mn:
+                pairs.append((gen, mn))
+            if grid and mn and grid != mn:
+                pairs.append((mn, grid))
+
+        updates_count = 0
+
+        # 1. 通过配对关系传递用户编号和项目名
+        for gen, grid in pairs:
+            gen_m = by_meter.get(gen)
+            grid_m = by_meter.get(grid)
+            if not gen_m or not grid_m:
+                continue
+
+            # 传递用户编号
+            if gen_m.get("user_id") and not grid_m.get("user_id"):
+                self.db.update_meter(grid, user_id=gen_m["user_id"])
+                updates_count += 1
+            elif grid_m.get("user_id") and not gen_m.get("user_id"):
+                self.db.update_meter(gen, user_id=grid_m["user_id"])
+                updates_count += 1
+
+            # 传递项目名
+            if gen_m.get("project_name") and not grid_m.get("project_name"):
+                self.db.update_meter(grid, project_name=gen_m["project_name"])
+                updates_count += 1
+            elif grid_m.get("project_name") and not gen_m.get("project_name"):
+                self.db.update_meter(gen, project_name=grid_m["project_name"])
+                updates_count += 1
+
+        # 2. 同一用户编号的电表共享项目名和折扣
+        for uid, meter_list in by_user.items():
+            project = next((m["project_name"] for m in meter_list if m.get("project_name")), None)
+            discount = next((m.get("discount") for m in meter_list if m.get("discount") and m["discount"] != 1.0), None)
+
+            for m in meter_list:
+                changed = {}
+                if project and not m.get("project_name"):
+                    changed["project_name"] = project
+                if discount and (not m.get("discount") or m["discount"] == 1.0):
+                    changed["discount"] = discount
+                if changed:
+                    self.db.update_meter(m["meter_number"], **changed)
+                    updates_count += 1
+
+        # 3. 同源文件的电表共享项目名、用户编号、折扣
+        for sf, meter_nums in file_meters.items():
+            project = file_project.get(sf)
+            user = file_user.get(sf)
+            discount = file_discount.get(sf)
+
+            for mn in meter_nums:
+                m = by_meter.get(mn)
+                if not m:
+                    continue
+                changed = {}
+                if project and not m.get("project_name"):
+                    changed["project_name"] = project
+                if user and not m.get("user_id"):
+                    changed["user_id"] = user
+                if discount and (not m.get("discount") or m["discount"] == 1.0):
+                    changed["discount"] = discount
+                if changed:
+                    self.db.update_meter(mn, **changed)
+                    updates_count += 1
+
+        log.info("  关联补齐完成: %d 条更新", updates_count)
 
     def _archive_all(self, attachments: list[EmailAttachment]):
         """归档所有附件到月份/项目目录。"""

@@ -2,6 +2,11 @@
 
 支持 PaddleOCR 和 Tesseract 两种引擎，通过配置切换。
 单价通过用户编号与抄表数据关联。
+
+优化点：
+- 图片预处理（灰度化、对比度增强、二值化）提升 OCR 准确率
+- 多级正则匹配策略（表格行级 → 标签级 → 通用模式）
+- 从文件名推断月份和用户编号作为补充
 """
 
 import re
@@ -53,8 +58,8 @@ class OCREngine:
         self.tesseract_lang = ocr_cfg.get("tesseract_lang", "chi_sim+eng")
         self.extraction_rules = config.get("ocr_extraction_rules") or {}
         self._engine = None
-        self._unavailable = False  # 标记引擎是否不可用
-        self._warned = False  # 只警告一次
+        self._unavailable = False
+        self._warned = False
 
     def _init_engine(self):
         """延迟初始化 OCR 引擎。"""
@@ -82,6 +87,30 @@ class OCREngine:
                 log.warning("Tesseract 不可用: %s。图片 OCR 功能将被跳过。", e)
                 self._unavailable = True
 
+    def _preprocess_image(self, filepath: str):
+        """图片预处理：灰度化 + 对比度增强 + 自适应二值化，提升 OCR 准确率。"""
+        from PIL import Image, ImageEnhance, ImageFilter
+
+        img = Image.open(filepath)
+
+        # 转灰度
+        if img.mode != "L":
+            img = img.convert("L")
+
+        # 对比度增强 (1.5x)
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.5)
+
+        # 锐化
+        img = img.filter(ImageFilter.SHARPEN)
+
+        # 放大小图片（宽度 < 1000px 时放大2倍）
+        w, h = img.size
+        if w < 1000:
+            img = img.resize((w * 2, h * 2), Image.LANCZOS)
+
+        return img
+
     def extract_from_image(self, filepath: str, source_info: dict = None) -> OCRResult:
         """从单张图片提取单价和用户编号。"""
         self._init_engine()
@@ -107,10 +136,12 @@ class OCREngine:
             result.raw_text = raw_text
             log.debug("OCR 原始文本 [%s]:\n%s", filepath.name, raw_text[:500])
 
-            # 提取用户编号
+            # 提取用户编号（OCR文本 + 文件名双重匹配）
             result.user_id = self._extract_user_id(raw_text)
+            if not result.user_id:
+                result.user_id = self._extract_user_id_from_filename(filepath.name)
 
-            # 提取单价
+            # 提取单价（多级策略）
             prices = self._extract_prices(raw_text)
             result.sharp_peak_price = prices.get("sharp_peak_price")
             result.peak_price = prices.get("peak_price")
@@ -120,9 +151,10 @@ class OCREngine:
             # 推断月份
             result.reading_month = self._infer_month(raw_text, source_info, filepath.name)
 
-            if result.user_id:
-                log.info("  OCR 提取 [%s]: 用户=%s, 尖峰=%.4f, 峰=%.4f, 平=%.4f, 谷=%.4f",
-                         filepath.name, result.user_id,
+            if result.user_id or result.has_price_data():
+                log.info("  OCR 提取 [%s]: 用户=%s, 月份=%s, 尖峰=%.4f, 峰=%.4f, 平=%.4f, 谷=%.4f",
+                         filepath.name, result.user_id or "未识别",
+                         result.reading_month or "未知",
                          result.sharp_peak_price or 0,
                          result.peak_price or 0,
                          result.flat_price or 0,
@@ -150,9 +182,12 @@ class OCREngine:
             return "\n".join(lines)
 
         elif self.engine_type == "tesseract":
-            from PIL import Image
-            img = Image.open(filepath)
-            text = self._engine.image_to_string(img, lang=self.tesseract_lang)
+            # 使用预处理后的图片
+            img = self._preprocess_image(filepath)
+            # 使用 PSM 6（假设为均匀的文本块）对表格类图片效果更好
+            custom_config = r'--oem 3 --psm 6'
+            text = self._engine.image_to_string(img, lang=self.tesseract_lang,
+                                                 config=custom_config)
             return text
 
         return ""
@@ -167,18 +202,46 @@ class OCREngine:
             if match:
                 return match.group(1).strip()
 
-        # 兜底：查找连续数字串（8-20位）
+        # 增强匹配：各种常见标签格式
+        extra_patterns = [
+            r'(?:用户编号|用户号|户号|客户编号|用户编码|客户号)\s*[:：\s]\s*(\d{6,20})',
+            r'(?:编号|No\.?|NO\.?)\s*[:：\s]\s*(\d{8,20})',
+            r'户\s*号\s*[:：\s]\s*(\d{6,20})',
+        ]
+        for pattern in extra_patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1).strip()
+
+        # 兜底：查找连续数字串（8-20位），只取唯一一个
         numbers = re.findall(r'\b(\d{8,20})\b', text)
         if len(numbers) == 1:
             return numbers[0]
 
         return None
 
+    def _extract_user_id_from_filename(self, filename: str) -> Optional[str]:
+        """从文件名提取用户编号（文件名可能包含用户编号）。"""
+        # 匹配8-16位纯数字
+        matches = re.findall(r'(\d{8,16})', filename)
+        for m in matches:
+            # 排除日期格式 (如 20240115)
+            if re.match(r'^20\d{2}(0[1-9]|1[0-2])', m) and len(m) == 8:
+                continue
+            return m
+        return None
+
     def _extract_prices(self, text: str) -> dict:
-        """从文本中提取尖峰平谷单价。"""
+        """从文本中提取尖峰平谷单价（多级策略）。"""
         prices = {}
         rules = self.extraction_rules.get("unit_price", {})
 
+        # 策略1：表格行级匹配（同一行内包含标签和价格）
+        prices = self._extract_prices_table_row(text)
+        if len(prices) >= 3:
+            return prices
+
+        # 策略2：专用标签匹配
         price_fields = {
             "sharp_peak_price": rules.get("sharp_peak_price", []),
             "peak_price": rules.get("peak_price", []),
@@ -191,27 +254,122 @@ class OCREngine:
                 match = re.search(pattern, text)
                 if match:
                     try:
-                        prices[field] = float(match.group(1))
+                        val = float(match.group(1))
+                        if self._is_valid_price(val):
+                            prices[field] = val
                     except (ValueError, IndexError):
                         pass
                     break
 
-        # 如果未通过专用规则提取到，尝试通用模式
-        if not prices:
-            general_patterns = rules.get("patterns", [])
-            for pattern in general_patterns:
-                matches = re.findall(pattern, text)
-                if len(matches) >= 4:
+        if len(prices) >= 3:
+            return prices
+
+        # 策略3：增强的标签匹配（处理OCR空格、换行等噪声）
+        enhanced_patterns = {
+            "sharp_peak_price": [
+                r'尖\s*峰?\s*[:：\s价单]*\s*(\d+\.?\d{2,4})',
+                r'尖\s*[:：]\s*(\d+\.\d+)',
+            ],
+            "peak_price": [
+                r'(?<!尖)\s*峰\s*[:：\s价单]*\s*(\d+\.?\d{2,4})',
+                r'(?<![尖a-zA-Z])峰\s*[:：]\s*(\d+\.\d+)',
+            ],
+            "flat_price": [
+                r'平\s*[:：\s价单]*\s*(\d+\.?\d{2,4})',
+                r'平\s*段?\s*[:：]\s*(\d+\.\d+)',
+            ],
+            "valley_price": [
+                r'谷\s*[:：\s价单]*\s*(\d+\.?\d{2,4})',
+                r'谷\s*段?\s*[:：]\s*(\d+\.\d+)',
+            ],
+        }
+        for field, patterns in enhanced_patterns.items():
+            if field in prices:
+                continue
+            for pattern in patterns:
+                match = re.search(pattern, text)
+                if match:
                     try:
-                        prices["sharp_peak_price"] = float(matches[0])
-                        prices["peak_price"] = float(matches[1])
-                        prices["flat_price"] = float(matches[2])
-                        prices["valley_price"] = float(matches[3])
+                        val = float(match.group(1))
+                        if self._is_valid_price(val):
+                            prices[field] = val
+                            break
                     except (ValueError, IndexError):
                         pass
-                    break
+
+        if prices:
+            return prices
+
+        # 策略4：通用模式（连续找到4个价格数字）
+        general_patterns = rules.get("patterns", [])
+        for pattern in general_patterns:
+            matches = re.findall(pattern, text)
+            if len(matches) >= 4:
+                try:
+                    candidates = [float(m) for m in matches[:4]]
+                    if all(self._is_valid_price(v) for v in candidates):
+                        prices["sharp_peak_price"] = candidates[0]
+                        prices["peak_price"] = candidates[1]
+                        prices["flat_price"] = candidates[2]
+                        prices["valley_price"] = candidates[3]
+                except (ValueError, IndexError):
+                    pass
+                break
+
+        # 策略5：提取所有看起来像价格的数字（0.2~2.0之间，保留2-4位小数）
+        if not prices:
+            price_candidates = re.findall(r'(\d\.\d{2,4})', text)
+            valid = [float(p) for p in price_candidates if self._is_valid_price(float(p))]
+            if len(valid) >= 4:
+                # 按从大到小排序（通常 尖 > 峰 > 平 > 谷）
+                valid_sorted = sorted(set(valid), reverse=True)
+                if len(valid_sorted) >= 4:
+                    prices["sharp_peak_price"] = valid_sorted[0]
+                    prices["peak_price"] = valid_sorted[1]
+                    prices["flat_price"] = valid_sorted[2]
+                    prices["valley_price"] = valid_sorted[3]
 
         return prices
+
+    def _extract_prices_table_row(self, text: str) -> dict:
+        """从表格行结构中提取价格（每行一个时段）。"""
+        prices = {}
+        lines = text.split("\n")
+
+        field_map = {
+            "sharp_peak_price": ["尖峰", "尖"],
+            "peak_price": ["峰"],
+            "flat_price": ["平"],
+            "valley_price": ["谷"],
+        }
+
+        for line in lines:
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+
+            for field, keywords in field_map.items():
+                if field in prices:
+                    continue
+                for kw in keywords:
+                    if kw in line_clean:
+                        # 特殊处理：「峰」不能匹配「尖峰」行
+                        if field == "peak_price" and "尖" in line_clean:
+                            continue
+                        # 在该行中找价格数字
+                        nums = re.findall(r'(\d+\.\d{2,4})', line_clean)
+                        for n in nums:
+                            val = float(n)
+                            if self._is_valid_price(val):
+                                prices[field] = val
+                                break
+                        break
+
+        return prices
+
+    def _is_valid_price(self, val: float) -> bool:
+        """判断是否为合理的电价（元/kWh）。"""
+        return 0.1 <= val <= 3.0
 
     def _infer_month(self, text: str, source_info: dict, filename: str) -> Optional[str]:
         """推断月份。"""
@@ -219,16 +377,20 @@ class OCREngine:
         month_patterns = [
             r'(\d{4})[-/年](\d{1,2})[-/月]',
             r'(\d{4})(\d{2})(?:月|期)',
+            r'(\d{4})[-/.](\d{1,2})',
+            r'(\d{4})\s*年\s*(\d{1,2})\s*月',
         ]
         for pattern in month_patterns:
             match = re.search(pattern, text)
             if match:
-                return f"{match.group(1)}-{match.group(2).zfill(2)}"
+                year, month = int(match.group(1)), int(match.group(2))
+                if 2015 <= year <= 2035 and 1 <= month <= 12:
+                    return f"{year}-{str(month).zfill(2)}"
 
         # 从文件名推断
-        for match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})', filename):
+        for match in re.finditer(r'(\d{4})[-_年.]?(\d{1,2})', filename):
             year, month = int(match.group(1)), int(match.group(2))
-            if 2015 <= year <= 2030 and 1 <= month <= 12:
+            if 2015 <= year <= 2035 and 1 <= month <= 12:
                 return f"{year}-{str(month).zfill(2)}"
 
         # 从邮件日期

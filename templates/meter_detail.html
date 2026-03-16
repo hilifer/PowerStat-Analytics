@@ -10,11 +10,18 @@
     <span>{{ meter.meter_number or meter.user_id }}</span>
 </div>
 
-<h1 style="margin-bottom:1rem;">电表详情</h1>
+<h1 style="margin-bottom:1rem;">电表详情
+    {% if meter.is_locked %}
+    <span class="tag" style="background:#ffc107;color:#333;font-size:0.7rem;vertical-align:middle;">已锁定</span>
+    {% endif %}
+</h1>
 
 <!-- 基本信息 -->
 <div class="card">
-    <div class="card-header"><h2>基本信息</h2></div>
+    <div class="card-header">
+        <h2>基本信息</h2>
+        <a href="{{ url_for('meter_edit', meter_id=meter.id) }}" class="btn btn-primary btn-sm">编辑</a>
+    </div>
     <div class="kv-grid">
         <div class="kv-item">
             <span class="kv-label">电表号</span>
@@ -43,6 +50,10 @@
         <div class="kv-item">
             <span class="kv-label">倍率</span>
             <span class="kv-value">{{ meter.multiplier }}</span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">折扣</span>
+            <span class="kv-value">{{ meter.discount or 1.0 }}{% if meter.discount and meter.discount != 1.0 %} ({{ "%.1f"|format(meter.discount * 10) }}折){% endif %}</span>
         </div>
         <div class="kv-item">
             <span class="kv-label">项目</span>
