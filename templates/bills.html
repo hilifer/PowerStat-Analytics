@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}账单查询 - PowerStat{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <span>账单查询</span>
+</div>
+
+<h1 style="margin-bottom:1rem;">账单查询</h1>
+
+<!-- 筛选栏 -->
+<form method="GET" action="{{ url_for('bills') }}" class="filter-bar">
+    <div class="filter-group">
+        <label>项目</label>
+        <select name="project" class="auto-submit">
+            <option value="">全部项目</option>
+            {% for p in projects %}
+            <option value="{{ p }}" {% if sel_project == p %}selected{% endif %}>{{ p }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>用户编号</label>
+        <select name="user_id" class="auto-submit">
+            <option value="">全部用户</option>
+            {% for u in user_ids %}
+            <option value="{{ u }}" {% if sel_user_id == u %}selected{% endif %}>{{ u }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>电表号</label>
+        <input type="text" name="meter" value="{{ sel_meter or '' }}" placeholder="输入电表号">
+    </div>
+    <div class="filter-group">
+        <label>起始月份</label>
+        <input type="month" name="from" value="{{ sel_from or '' }}">
+    </div>
+    <div class="filter-group">
+        <label>截止月份</label>
+        <input type="month" name="to" value="{{ sel_to or '' }}">
+    </div>
+    <button type="submit" class="btn btn-secondary btn-sm">查询</button>
+    <a href="{{ url_for('bills') }}" class="btn btn-outline btn-sm">重置</a>
+</form>
+
+{% if bills %}
+<div class="card">
+    <div class="card-header">
+        <h2>共 {{ bills|length }} 条记录</h2>
+        <a href="{{ url_for('export_csv') }}" class="btn btn-success btn-sm">导出 CSV</a>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>月份</th>
+                    <th>电表号</th>
+                    <th>用户编号</th>
+                    <th>类型</th>
+                    <th>项目</th>
+                    <th>倍率</th>
+                    <th>尖峰</th>
+                    <th>峰</th>
+                    <th>平</th>
+                    <th>谷</th>
+                    <th>总电量</th>
+                    <th>尖峰价</th>
+                    <th>峰价</th>
+                    <th>平价</th>
+                    <th>谷价</th>
+                    <th>总金额</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for b in bills %}
+                <tr>
+                    <td>{{ b.reading_month }}</td>
+                    <td><a href="{{ url_for('meters_list', user_id=b.user_id) }}" class="row-link">{{ b.meter_number or '-' }}</a></td>
+                    <td>{{ b.user_id or '-' }}</td>
+                    <td>
+                        {% if b.meter_type == '上网表' %}
+                        <span class="tag tag-grid">上网表</span>
+                        {% elif b.meter_type == '发电表' %}
+                        <span class="tag tag-gen">发电表</span>
+                        {% else %}
+                        <span class="tag tag-unknown">{{ b.meter_type }}</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ b.project_name or '-' }}</td>
+                    <td class="num">{{ b.multiplier }}</td>
+                    <td class="num">{{ "%.2f"|format(b.sharp_peak) if b.sharp_peak is not none else '-' }}</td>
+                    <td class="num">{{ "%.2f"|format(b.peak) if b.peak is not none else '-' }}</td>
+                    <td class="num">{{ "%.2f"|format(b.flat) if b.flat is not none else '-' }}</td>
+                    <td class="num">{{ "%.2f"|format(b.valley) if b.valley is not none else '-' }}</td>
+                    <td class="num"><strong>{{ "%.2f"|format(b.total_kwh) if b.total_kwh is not none else '-' }}</strong></td>
+                    <td class="num">{{ "%.4f"|format(b.sharp_peak_price) if b.sharp_peak_price is not none else '-' }}</td>
+                    <td class="num">{{ "%.4f"|format(b.peak_price) if b.peak_price is not none else '-' }}</td>
+                    <td class="num">{{ "%.4f"|format(b.flat_price) if b.flat_price is not none else '-' }}</td>
+                    <td class="num">{{ "%.4f"|format(b.valley_price) if b.valley_price is not none else '-' }}</td>
+                    <td class="num"><strong>{{ "%.2f"|format(b.total_amount) if b.total_amount is not none else '-' }}</strong></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% else %}
+<div class="empty-state">
+    <p>暂无匹配的账单数据</p>
+    <a href="{{ url_for('index') }}" class="btn btn-primary">返回首页刷新邮件</a>
+</div>
+{% endif %}
+{% endblock %}

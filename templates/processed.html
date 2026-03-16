@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}处理记录 - PowerStat{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <span>处理记录</span>
+</div>
+
+<h1 style="margin-bottom:1rem;">已处理邮件附件</h1>
+
+{% if records %}
+<div class="card">
+    <div class="card-header">
+        <h2>共 {{ records|length }} 个已处理附件</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>文件名</th>
+                    <th>邮件主题</th>
+                    <th>邮件日期</th>
+                    <th>处理时间</th>
+                    <th>指纹</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in records %}
+                <tr>
+                    <td>{{ r.id }}</td>
+                    <td>{{ r.filename or '-' }}</td>
+                    <td>{{ r.email_subject or '-' }}</td>
+                    <td>{{ r.email_date or '-' }}</td>
+                    <td>{{ r.processed_at or '-' }}</td>
+                    <td style="font-size:0.75rem;color:var(--text-secondary);">{{ r.fingerprint }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% else %}
+<div class="empty-state">
+    <p>暂无处理记录</p>
+    <a href="{{ url_for('index') }}" class="btn btn-primary">返回首页刷新邮件</a>
+</div>
+{% endif %}
+
+<div style="margin-top:1rem;">
+    <a href="{{ url_for('index') }}" class="btn btn-secondary">返回首页</a>
+</div>
+{% endblock %}

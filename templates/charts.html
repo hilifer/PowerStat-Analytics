@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}可视化 - PowerStat{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <span>可视化图表</span>
+</div>
+
+<h1 style="margin-bottom:1rem;">可视化图表</h1>
+
+<!-- 筛选 -->
+<form method="GET" action="{{ url_for('charts') }}" class="filter-bar">
+    <div class="filter-group">
+        <label>项目</label>
+        <select name="project" class="auto-submit">
+            <option value="">全部项目</option>
+            {% for p in projects %}
+            <option value="{{ p }}" {% if sel_project == p %}selected{% endif %}>{{ p }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>用户编号</label>
+        <select name="user_id" class="auto-submit">
+            <option value="">全部用户</option>
+            {% for u in user_ids %}
+            <option value="{{ u }}" {% if sel_user_id == u %}selected{% endif %}>{{ u }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <button type="submit" class="btn btn-secondary btn-sm">生成图表</button>
+    <a href="{{ url_for('charts') }}" class="btn btn-outline btn-sm">重置</a>
+</form>
+
+{% if chart_files %}
+<div class="chart-grid">
+    {% for img in chart_files %}
+    <div class="chart-card card">
+        <img src="{{ url_for('chart_image', filename=img) }}" alt="{{ img }}" loading="lazy">
+        <p style="text-align:center;font-size:0.8rem;color:var(--text-secondary);margin-top:0.5rem;">{{ img }}</p>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+    <p>暂无图表数据，请先刷新邮件获取数据</p>
+    <a href="{{ url_for('index') }}" class="btn btn-primary">返回首页</a>
+</div>
+{% endif %}
+
+<div style="margin-top:1.5rem;">
+    <a href="{{ url_for('index') }}" class="btn btn-secondary">返回首页</a>
+</div>
+{% endblock %}

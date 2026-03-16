@@ -26,6 +26,9 @@ matplotlib>=3.8.0
 PyYAML>=6.0.1
 python-dotenv>=1.0.0
 
+# Web 框架
+Flask>=3.0.0
+
 # CLI
 click>=8.1.7
 rich>=13.7.0

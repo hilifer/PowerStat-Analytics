@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}首页 - PowerStat{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom:1.5rem;">电费数据管理系统</h1>
+
+<!-- 刷新邮件面板 -->
+<div class="refresh-panel">
+    <form method="POST" action="{{ url_for('refresh_emails') }}" style="display:inline;">
+        <button type="submit" id="refreshBtn" class="btn btn-primary"
+                {% if refresh_status.running %}disabled{% endif %}>
+            {% if refresh_status.running %}刷新中…{% else %}刷新邮件{% endif %}
+        </button>
+    </form>
+    <div class="refresh-info">
+        {% if refresh_status.last_run %}
+            上次刷新: <strong>{{ refresh_status.last_run }}</strong>
+        {% else %}
+            尚未执行过刷新
+        {% endif %}
+        {% if refresh_status.result and not refresh_status.result.get('error') %}
+            &nbsp;| 新增 <strong>{{ refresh_status.result.new }}</strong> 个附件，
+            跳过 <strong>{{ refresh_status.result.skipped }}</strong> 个已处理
+        {% endif %}
+    </div>
+</div>
+
+<!-- 刷新进度（JS 控制显示） -->
+<div class="refresh-panel" id="refreshStatus"
+     style="{% if not refresh_status.running %}display:none;{% endif %}">
+    <div class="spinner" id="refreshSpinner"></div>
+    <div class="refresh-info" id="refreshProgress">
+        {{ refresh_status.progress if refresh_status.running else "" }}
+    </div>
+</div>
+
+<!-- 统计卡片 -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value">{{ meter_count }}</div>
+        <div class="stat-label">电表数量</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ reading_count }}</div>
+        <div class="stat-label">抄表记录</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ price_count }}</div>
+        <div class="stat-label">单价记录</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ project_count }}</div>
+        <div class="stat-label">项目数量</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ user_count }}</div>
+        <div class="stat-label">用户编号</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ processed_count }}</div>
+        <div class="stat-label">已处理附件</div>
+    </div>
+    <div class="stat-card" style="grid-column: span 2;">
+        <div class="stat-value" style="font-size:1.2rem;">{{ month_min }} ~ {{ month_max }}</div>
+        <div class="stat-label">数据范围</div>
+    </div>
+</div>
+
+<!-- 快捷入口 -->
+<div class="card">
+    <div class="card-header"><h2>快捷操作</h2></div>
+    <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+        <a href="{{ url_for('meters_list') }}" class="btn btn-outline">电表管理</a>
+        <a href="{{ url_for('bills') }}" class="btn btn-outline">账单查询</a>
+        <a href="{{ url_for('archive_index') }}" class="btn btn-outline">归档浏览</a>
+        <a href="{{ url_for('charts') }}" class="btn btn-outline">可视化图表</a>
+        <a href="{{ url_for('export_csv') }}" class="btn btn-success">导出 CSV</a>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}电表 {{ meter.meter_number }} - PowerStat{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <a href="{{ url_for('meters_list') }}">电表管理</a>
+    <span class="sep">/</span>
+    <span>{{ meter.meter_number or meter.user_id }}</span>
+</div>
+
+<h1 style="margin-bottom:1rem;">电表详情</h1>
+
+<!-- 基本信息 -->
+<div class="card">
+    <div class="card-header"><h2>基本信息</h2></div>
+    <div class="kv-grid">
+        <div class="kv-item">
+            <span class="kv-label">电表号</span>
+            <span class="kv-value">{{ meter.meter_number or '-' }}</span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">用户编号</span>
+            <span class="kv-value">{{ meter.user_id or '-' }}</span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">资产编号</span>
+            <span class="kv-value">{{ meter.asset_number or '-' }}</span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">类型</span>
+            <span class="kv-value">
+                {% if meter.meter_type == '上网表' %}
+                <span class="tag tag-grid">上网表</span>
+                {% elif meter.meter_type == '发电表' %}
+                <span class="tag tag-gen">发电表</span>
+                {% else %}
+                <span class="tag tag-unknown">{{ meter.meter_type }}</span>
+                {% endif %}
+            </span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">倍率</span>
+            <span class="kv-value">{{ meter.multiplier }}</span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">项目</span>
+            <span class="kv-value">{{ meter.project_name or '-' }}</span>
+        </div>
+    </div>
+</div>
+
+<!-- 抄表记录 -->
+<div class="card">
+    <div class="card-header">
+        <h2>月度抄表记录 ({{ readings|length }} 条)</h2>
+        <a href="{{ url_for('bills', user_id=meter.user_id, meter=meter.meter_number) }}" class="btn btn-outline btn-sm">在账单中查看</a>
+    </div>
+
+    {% if readings %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>月份</th>
+                    <th>尖峰</th>
+                    <th>峰</th>
+                    <th>平</th>
+                    <th>谷</th>
+                    <th>总电量</th>
+                    <th>尖峰价</th>
+                    <th>峰价</th>
+                    <th>平价</th>
+                    <th>谷价</th>
+                    <th>来源</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in readings %}
+                <tr>
+                    <td>{{ r.reading_month }}</td>
+                    <td class="num">{{ "%.2f"|format(r.sharp_peak) if r.sharp_peak is not none else '-' }}</td>
+                    <td class="num">{{ "%.2f"|format(r.peak) if r.peak is not none else '-' }}</td>
+                    <td class="num">{{ "%.2f"|format(r.flat) if r.flat is not none else '-' }}</td>
+                    <td class="num">{{ "%.2f"|format(r.valley) if r.valley is not none else '-' }}</td>
+                    <td class="num"><strong>{{ "%.2f"|format(r.total_kwh) if r.total_kwh is not none else '-' }}</strong></td>
+                    <td class="num">{{ "%.4f"|format(r.sharp_peak_price) if r.sharp_peak_price is not none else '-' }}</td>
+                    <td class="num">{{ "%.4f"|format(r.peak_price) if r.peak_price is not none else '-' }}</td>
+                    <td class="num">{{ "%.4f"|format(r.flat_price) if r.flat_price is not none else '-' }}</td>
+                    <td class="num">{{ "%.4f"|format(r.valley_price) if r.valley_price is not none else '-' }}</td>
+                    <td style="font-size:0.75rem;">{{ r.source_file or '-' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state"><p>暂无抄表记录</p></div>
+    {% endif %}
+</div>
+
+<div style="margin-top:1rem;">
+    <a href="{{ url_for('meters_list') }}" class="btn btn-secondary">返回电表列表</a>
+    <a href="{{ url_for('charts', user_id=meter.user_id) }}" class="btn btn-outline">查看该用户图表</a>
+</div>
+{% endblock %}
