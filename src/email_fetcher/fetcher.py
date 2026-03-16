@@ -69,12 +69,21 @@ def _parse_date(msg: Message) -> Optional[datetime]:
 
 
 def _matches_filter(msg: Message, filter_cfg: dict) -> bool:
-    """判断邮件是否符合过滤规则。"""
+    """判断邮件是否符合过滤规则。
+
+    匹配逻辑：
+    1. 主题/发件人关键词：主题或发件人中包含任一关键词即可
+    2. 收件人关键词：收件人(To/Cc)或主题或发件人中包含即可
+       （因为很多邮件的"曹先生"可能出现在主题而非收件人字段）
+    """
     subject = _decode_header_value(msg.get("Subject", ""))
     sender = _decode_header_value(msg.get("From", ""))
     to_addr = _decode_header_value(msg.get("To", ""))
     cc_addr = _decode_header_value(msg.get("Cc", ""))
     recipients = f"{to_addr} {cc_addr}"
+
+    # 将所有文本合并用于宽松匹配
+    all_text = f"{subject} {sender} {recipients}"
 
     subject_kw = filter_cfg.get("subject_keywords", [])
     sender_kw = filter_cfg.get("sender_keywords", [])
@@ -88,9 +97,9 @@ def _matches_filter(msg: Message, filter_cfg: dict) -> bool:
     if not keyword_match:
         return False
 
-    # 收件人须包含关键词
+    # 收件人关键词：在收件人、主题、发件人中任意位置出现即可
     if recipient_kw:
-        if not any(kw in recipients for kw in recipient_kw):
+        if not any(kw in all_text for kw in recipient_kw):
             return False
 
     return True
@@ -173,6 +182,7 @@ class EmailFetcher:
 
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         attachments = []
+        debug_logged = 0  # 打印前几封被过滤掉的邮件头，用于诊断
 
         for mid in ids:
             try:
@@ -184,6 +194,12 @@ class EmailFetcher:
                 msg = email.message_from_bytes(raw)
 
                 if not _matches_filter(msg, self.filter_cfg):
+                    if debug_logged < 5:
+                        _subj = _decode_header_value(msg.get("Subject", ""))
+                        _from = _decode_header_value(msg.get("From", ""))
+                        _to = _decode_header_value(msg.get("To", ""))
+                        log.debug("跳过邮件: Subject=[%s] From=[%s] To=[%s]", _subj, _from, _to)
+                        debug_logged += 1
                     continue
 
                 subject = _decode_header_value(msg.get("Subject", ""))

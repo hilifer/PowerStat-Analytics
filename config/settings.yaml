@@ -148,7 +148,7 @@ visualization:
 
 # --- 日志设置 ---
 logging:
-  level: "INFO"
+  level: "DEBUG"
   log_file: "logs/powerstat.log"
   max_size_mb: 10
   backup_count: 5
