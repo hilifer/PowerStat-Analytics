@@ -139,16 +139,17 @@ class MultiPassExtractor:
                     if not hdr:
                         continue
 
-                    # 先判断资产列（"发电表资产编号"含"发电表"会误匹配电表列）
-                    if self._matches_any(hdr, self._asset_aliases):
+                    # 竞争匹配：最长别名匹配决定列类型
+                    cat = self._classify_header(hdr)
+                    if cat == "asset":
                         asset_cols.append(c)
-                    elif self._matches_any(hdr, self._gen_aliases):
+                    elif cat == "gen_meter":
                         meter_cols.append((c, "发电表"))
                         has_meter_col = True
-                    elif self._matches_any(hdr, self._grid_aliases):
+                    elif cat == "grid_meter":
                         meter_cols.append((c, "上网表"))
                         has_meter_col = True
-                    elif self._matches_any(hdr, self._meter_aliases):
+                    elif cat == "meter":
                         meter_cols.append((c, None))
                         has_meter_col = True
 
@@ -183,28 +184,20 @@ class MultiPassExtractor:
                     if not cell:
                         continue
 
-                    # 资产编号标签配对（必须先于电表判断，否则"发电表资产编号"会匹配"发电表"）
-                    if self._matches_any(cell, self._asset_aliases):
+                    # 竞争匹配：标签配对
+                    cat = self._classify_header(cell)
+                    if cat == "asset":
                         val = clean_id(self._find_value_near(df, r, c))
                         if val and len(val) >= 4 and not _CHINESE_RE.search(val):
                             nearest = self._find_nearest_meter(df, r, c, filepath.name)
                             if nearest and not self.meters[nearest]["asset_number"]:
                                 self.meters[nearest]["asset_number"] = val
                                 asset_count += 1
-
-                    # 电表号标签配对
-                    elif self._matches_any(cell, self._meter_aliases):
+                    elif cat in ("meter", "gen_meter", "grid_meter"):
+                        mtype = {"gen_meter": "发电表", "grid_meter": "上网表"}.get(cat)
                         val = clean_id(self._find_value_near(df, r, c))
                         if is_valid_meter_number(val):
-                            self._register_meter(val, filepath.name, sheet_name)
-                    elif self._matches_any(cell, self._gen_aliases):
-                        val = clean_id(self._find_value_near(df, r, c))
-                        if is_valid_meter_number(val):
-                            self._register_meter(val, filepath.name, sheet_name, "发电表")
-                    elif self._matches_any(cell, self._grid_aliases):
-                        val = clean_id(self._find_value_near(df, r, c))
-                        if is_valid_meter_number(val):
-                            self._register_meter(val, filepath.name, sheet_name, "上网表")
+                            self._register_meter(val, filepath.name, sheet_name, mtype)
 
                     # 内嵌格式："电表号：12345678"
                     for pattern, mtype in [
@@ -864,6 +857,13 @@ class MultiPassExtractor:
         return best_idx if best_score >= 2 else None
 
     def _matches_any(self, text: str, aliases: set) -> bool:
+        """判断 text 是否匹配 aliases 中的某个别名。
+
+        匹配规则：
+        1. 精确匹配
+        2. 子串匹配（alias in text 或 text in alias）
+        3. 当 text 同时匹配多个类别的别名时，需用 _classify_header 做竞争
+        """
         if not text or not aliases:
             return False
         text = text.strip()
@@ -873,6 +873,54 @@ class MultiPassExtractor:
             if a in text or text in a:
                 return True
         return False
+
+    def _best_match_length(self, text: str, aliases: set) -> int:
+        """返回 text 与 aliases 中最长匹配别名的长度，无匹配返回 0。"""
+        if not text or not aliases:
+            return 0
+        text = text.strip()
+        best = 0
+        for a in aliases:
+            if text == a:
+                return len(text) + 1000  # 精确匹配最优
+            if a in text or text in a:
+                best = max(best, len(a))
+        return best
+
+    # 所有参与竞争的类别及对应的别名集合（按需查表）
+    def _classify_header(self, text: str) -> Optional[str]:
+        """对表头文本做竞争匹配，返回最佳匹配类别。
+
+        解决 "发电表资产编号" 同时包含 "发电表" 和 "资产编号" 的歧义：
+        "资产编号"(4字) > "发电表"(3字)，归为 asset_number。
+        """
+        if not text:
+            return None
+        text = text.strip()
+
+        categories = {
+            "gen_meter":    self._gen_aliases,
+            "grid_meter":   self._grid_aliases,
+            "meter":        self._meter_aliases,
+            "asset":        self._asset_aliases,
+            "user":         self._user_aliases,
+            "multiplier":   self._multiplier_aliases,
+            "discount":     self._discount_aliases,
+            "project":      self._project_aliases,
+            "usage":        self._usage_aliases,
+            "fwd_total":    self._fwd_total_aliases,
+            "rev_total":    self._rev_total_aliases,
+            "date":         self._date_aliases,
+        }
+
+        best_cat = None
+        best_len = 0
+        for cat, aliases in categories.items():
+            ml = self._best_match_length(text, aliases)
+            if ml > best_len:
+                best_len = ml
+                best_cat = cat
+        return best_cat
 
     def _find_value_near(self, df, row_idx, col_idx) -> str:
         max_r, max_c = len(df), len(df.columns)
