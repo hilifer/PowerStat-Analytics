@@ -145,8 +145,11 @@ class SmartDispatcher:
 
             elif file_type == "image":
                 ocr = self.ocr_engine.extract_from_image(filepath, source_info)
-                if ocr.has_price_data() or ocr.user_id:
+                if ocr.has_any_data():
                     result["ocr_results"].append(ocr)
+                    # OCR 提取的电表记录也加入 records
+                    if ocr.meter_records:
+                        result["records"].extend(ocr.meter_records)
 
             elif file_type in ("html", "text"):
                 result["records"] = self.html_parser.parse(filepath, source_info)

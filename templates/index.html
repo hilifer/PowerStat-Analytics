@@ -13,10 +13,10 @@
         </button>
     </form>
     <form method="POST" action="{{ url_for('force_refresh') }}" style="display:inline; margin-left:0.5rem;"
-          onsubmit="return confirm('确定要清除所有数据并重新解析？此操作不可撤销。');">
+          onsubmit="return confirm('确定要重新解析所有邮件？已有数据不会丢失，会增量补全。');">
         <button type="submit" class="btn btn-danger"
                 {% if refresh_status.running %}disabled{% endif %}>
-            强制刷新（重新解析全部）
+            重新解析全部邮件
         </button>
     </form>
     <div class="refresh-info">

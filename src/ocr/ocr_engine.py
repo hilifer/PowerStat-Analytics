@@ -18,7 +18,7 @@ from src.logger import log
 
 
 class OCRResult:
-    """OCR 提取结果。"""
+    """OCR 提取结果：包含单价数据和/或电表记录。"""
 
     def __init__(self):
         self.user_id: Optional[str] = None
@@ -30,11 +30,16 @@ class OCRResult:
         self.raw_text: str = ""
         self.source_file: str = ""
         self.confidence: float = 0.0
+        # 从图片中提取的电表记录（电费单等）
+        self.meter_records: list[dict] = []
 
     def has_price_data(self) -> bool:
         return any(v is not None for v in [
             self.sharp_peak_price, self.peak_price, self.flat_price, self.valley_price
         ])
+
+    def has_any_data(self) -> bool:
+        return self.has_price_data() or bool(self.user_id) or bool(self.meter_records)
 
     def to_dict(self) -> dict:
         return {
@@ -151,14 +156,20 @@ class OCREngine:
             # 推断月份
             result.reading_month = self._infer_month(raw_text, source_info, filepath.name)
 
+            # 从图片文本中提取电表记录（电费单图片等）
+            result.meter_records = self._extract_meter_records(
+                raw_text, filepath, source_info, result
+            )
+
             if result.user_id or result.has_price_data():
-                log.info("  OCR 提取 [%s]: 用户=%s, 月份=%s, 尖峰=%.4f, 峰=%.4f, 平=%.4f, 谷=%.4f",
+                log.info("  OCR 提取 [%s]: 用户=%s, 月份=%s, 尖峰=%.4f, 峰=%.4f, 平=%.4f, 谷=%.4f, 电表记录=%d",
                          filepath.name, result.user_id or "未识别",
                          result.reading_month or "未知",
                          result.sharp_peak_price or 0,
                          result.peak_price or 0,
                          result.flat_price or 0,
-                         result.valley_price or 0)
+                         result.valley_price or 0,
+                         len(result.meter_records))
 
         except Exception as e:
             log.error("OCR 处理失败 [%s]: %s", filepath, e, exc_info=True)
@@ -229,6 +240,90 @@ class OCREngine:
             if re.match(r'^20\d{2}(0[1-9]|1[0-2])', m) and len(m) == 8:
                 continue
             return m
+        return None
+
+    def _extract_meter_records(self, text: str, filepath: Path,
+                               source_info: dict, ocr_result) -> list[dict]:
+        """从 OCR 文本中提取电表记录（电费单、抄表单等图片）。"""
+        from src.parsers.validators import validate_record
+
+        records = []
+        if not text or len(text) < 20:
+            return records
+
+        field_mapping = config.get("field_mapping") or {}
+
+        # 提取电表号
+        meter_numbers = []
+        for alias in field_mapping.get("meter_number", []):
+            for m in re.finditer(rf'{re.escape(alias)}\s*[:：]?\s*(\d{{6,20}})', text):
+                mn = m.group(1)
+                if mn not in meter_numbers:
+                    meter_numbers.append(mn)
+
+        # 提取资产号
+        asset_numbers = []
+        for alias in field_mapping.get("asset_number", []):
+            for m in re.finditer(rf'{re.escape(alias)}\s*[:：]?\s*([A-Za-z0-9]{{8,30}})', text):
+                an = m.group(1)
+                if an not in asset_numbers:
+                    asset_numbers.append(an)
+
+        # 没有电表号时用资产号
+        if not meter_numbers and asset_numbers:
+            meter_numbers = asset_numbers
+
+        # 提取读数
+        sharp_peak = self._extract_reading_value(text, ["尖峰?", "尖\\s*[:：]"])
+        peak = self._extract_reading_value(text, ["(?<!尖)峰\\s*[:：]", "峰段"])
+        flat = self._extract_reading_value(text, ["平\\s*[:：]", "平段"])
+        valley = self._extract_reading_value(text, ["谷\\s*[:：]", "谷段"])
+        total = self._extract_reading_value(text, ["总电量", "总用电", "合计.*电量", "总\\s*[:：]"])
+
+        # 提取项目名
+        project = None
+        try:
+            from src.parsers.excel_parser import ExcelParser
+            ep = ExcelParser()
+            project = ep._extract_project_from_text(text[:1000])
+            if not project:
+                project = ep._extract_project_from_text(filepath.name)
+        except Exception:
+            pass
+
+        for mn in meter_numbers:
+            record = validate_record({
+                "meter_number": mn,
+                "asset_number": None,
+                "user_id": ocr_result.user_id,
+                "meter_type": "未知",
+                "multiplier": 1.0,
+                "project_name": project,
+                "reading_month": ocr_result.reading_month or "unknown",
+                "sharp_peak": sharp_peak,
+                "peak": peak,
+                "flat": flat,
+                "valley": valley,
+                "total_kwh": total,
+                "source_file": filepath.name,
+                "source_sheet": "OCR",
+            })
+            if record:
+                records.append(record)
+
+        return records
+
+    def _extract_reading_value(self, text: str, patterns: list[str]) -> Optional[float]:
+        """从文本中按模式提取电量读数。"""
+        for pattern in patterns:
+            m = re.search(rf'{pattern}\s*(\d+\.?\d*)', text)
+            if m:
+                try:
+                    val = float(m.group(1))
+                    if val > 0:
+                        return val
+                except ValueError:
+                    pass
         return None
 
     def _extract_prices(self, text: str) -> dict:

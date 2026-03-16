@@ -131,17 +131,18 @@ def _register_routes(app: Flask, db: Database):
                                processed_count=processed_count,
                                refresh_status=refresh_status)
 
-    # ---- 强制刷新（清除历史，重新处理所有邮件） ----
+    # ---- 强制刷新（增量重新解析：清除处理记录，UPSERT 补全数据） ----
     @app.route("/force-refresh", methods=["POST"])
     def force_refresh():
-        """清除已处理记录和所有数据，重新从邮箱抓取并解析。"""
+        """清除已处理邮件记录，重新解析所有邮件。
+
+        已有电表数据不会被删除，UPSERT 逻辑会补全缺失字段。
+        锁定的电表不受影响。
+        """
         with db.connection() as conn:
             conn.execute("DELETE FROM processed_emails")
-            conn.execute("DELETE FROM monthly_readings")
-            conn.execute("DELETE FROM price_records")
-            conn.execute("DELETE FROM meters")
-            log.info("强制刷新：已清除所有数据")
-        flash("已清除历史数据，正在重新抓取并解析所有邮件…", "info")
+            log.info("强制刷新：已清除处理记录，将增量重新解析所有邮件")
+        flash("已清除处理记录，正在增量重新解析所有邮件（已有数据不会丢失）…", "info")
         return redirect(url_for("refresh_emails"))
 
     # ---- 刷新邮件（带防重复） ----
@@ -238,6 +239,38 @@ def _register_routes(app: Flask, db: Database):
                                 meters_added += 1
                             except Exception as e:
                                 log.error("入库失败: %s", e)
+
+                        # 入库 OCR 提取的电表记录
+                        for ocr in result["ocr_results"]:
+                            for rec in getattr(ocr, 'meter_records', []):
+                                mn = rec.get("meter_number", "").strip()
+                                if not mn:
+                                    continue
+                                try:
+                                    mid = db.upsert_meter(
+                                        meter_number=mn,
+                                        user_id=rec.get("user_id"),
+                                        meter_type=rec.get("meter_type", "未知"),
+                                        asset_number=rec.get("asset_number"),
+                                        multiplier=rec.get("multiplier"),
+                                        project_name=rec.get("project_name"),
+                                    )
+                                    month = rec.get("reading_month")
+                                    if month and month != "unknown":
+                                        db.upsert_reading(
+                                            meter_id=mid,
+                                            reading_month=month,
+                                            sharp_peak=rec.get("sharp_peak"),
+                                            peak=rec.get("peak"),
+                                            flat=rec.get("flat"),
+                                            valley=rec.get("valley"),
+                                            total_kwh=rec.get("total_kwh"),
+                                            source_file=rec.get("source_file"),
+                                            source_sheet=rec.get("source_sheet"),
+                                        )
+                                    meters_added += 1
+                                except Exception as e:
+                                    log.error("OCR电表入库失败: %s", e)
 
                         # 入库 OCR 单价
                         for ocr in result["ocr_results"]:

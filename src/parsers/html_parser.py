@@ -1,8 +1,13 @@
-"""HTML 邮件正文解析器：从邮件正文中提取表格和电表数据。"""
+"""HTML 邮件正文解析器：从邮件正文中提取表格和电表数据。
+
+HTML 表格复用 ExcelParser 的智能 DataFrame 解析逻辑。
+"""
 
 import re
 from pathlib import Path
 from typing import Optional
+
+import pandas as pd
 
 from src.config_loader import config
 from src.logger import log
@@ -14,6 +19,13 @@ class HTMLParser:
 
     def __init__(self):
         self.field_mapping = config.get("field_mapping") or {}
+        self._excel_parser = None
+
+    def _get_excel_parser(self):
+        if self._excel_parser is None:
+            from src.parsers.excel_parser import ExcelParser
+            self._excel_parser = ExcelParser()
+        return self._excel_parser
 
     def parse(self, filepath: str, source_info: dict = None) -> list[dict]:
         """解析 HTML 或纯文本文件，提取电表数据。"""
@@ -46,15 +58,13 @@ class HTMLParser:
 
     def _parse_html_tables(self, html: str, filepath: Path,
                            source_info: dict) -> list[dict]:
-        """从 HTML 中提取 <table> 表格数据。"""
+        """从 HTML 中提取 <table> 表格数据，复用 ExcelParser 智能解析。"""
         results = []
         try:
-            import pandas as pd
             tables = pd.read_html(html, flavor="lxml")
             if not tables:
                 tables = pd.read_html(html)
         except ImportError:
-            # 没有 lxml 时用正则手动提取
             tables = self._regex_extract_tables(html)
             if not tables:
                 return []
@@ -63,12 +73,15 @@ class HTMLParser:
             if not tables:
                 return []
 
-        import pandas as pd
+        parser = self._get_excel_parser()
         for ti, df in enumerate(tables):
             if df.empty or len(df) < 1:
                 continue
-            records = self._extract_from_dataframe(
-                df, filepath, f"html_table_{ti}", source_info
+            # 将 DataFrame 转为无表头格式，让 ExcelParser 自动检测
+            # pd.read_html 默认把第一行当表头，需要重置
+            full_df = pd.DataFrame([df.columns.tolist()] + df.values.tolist())
+            records = parser._parse_dataframe_smart(
+                full_df, f"html_table_{ti}", filepath, source_info
             )
             results.extend(records)
 
@@ -76,8 +89,6 @@ class HTMLParser:
 
     def _regex_extract_tables(self, html: str) -> list:
         """用正则从 HTML 提取表格，返回 DataFrame 列表。"""
-        import pandas as pd
-
         dfs = []
         table_pattern = re.compile(r'<table[^>]*>(.*?)</table>', re.DOTALL | re.IGNORECASE)
         row_pattern = re.compile(r'<tr[^>]*>(.*?)</tr>', re.DOTALL | re.IGNORECASE)
@@ -93,14 +104,10 @@ class HTMLParser:
                 if cells:
                     rows_data.append(cells)
             if len(rows_data) >= 2:
-                headers = rows_data[0]
-                data = rows_data[1:]
-                # 对齐列数
-                max_cols = max(len(r) for r in [headers] + data)
-                headers += [""] * (max_cols - len(headers))
-                data = [r + [""] * (max_cols - len(r)) for r in data]
+                max_cols = max(len(r) for r in rows_data)
+                rows_data = [r + [""] * (max_cols - len(r)) for r in rows_data]
                 try:
-                    df = pd.DataFrame(data, columns=headers)
+                    df = pd.DataFrame(rows_data)
                     dfs.append(df)
                 except Exception:
                     pass
@@ -109,32 +116,33 @@ class HTMLParser:
     def _parse_text_content(self, text: str, filepath: Path,
                             source_info: dict) -> list[dict]:
         """从纯文本中提取电表关键信息。"""
-        # 去除 HTML 标签
         clean = re.sub(r'<[^>]+>', ' ', text)
         clean = re.sub(r'\s+', ' ', clean)
 
         results = []
 
-        # 提取所有可能的数据对
         user_ids = self._find_values(clean, self.field_mapping.get("user_id", []))
         meter_numbers = self._find_values(clean, self.field_mapping.get("meter_number", []))
+        asset_numbers = self._find_values(clean, self.field_mapping.get("asset_number", []))
+
+        # asset_number 也可以作为 meter_number
+        if not meter_numbers and asset_numbers:
+            meter_numbers = asset_numbers
 
         if not user_ids and not meter_numbers:
             return []
 
         reading_month = self._infer_month(source_info, filepath.name)
+        project_name = self._extract_project(text, filepath.name, source_info)
 
-        # 提取电量数值
-        for i, (uid, mn) in enumerate(
-            self._zip_longest(user_ids, meter_numbers)
-        ):
+        for uid, mn in self._zip_longest(user_ids, meter_numbers):
             record = validate_record({
                 "meter_number": mn,
                 "asset_number": None,
                 "user_id": uid,
                 "meter_type": "未知",
                 "multiplier": 1.0,
-                "project_name": self._extract_project(text, source_info),
+                "project_name": project_name,
                 "reading_month": reading_month,
                 "sharp_peak": None,
                 "peak": None,
@@ -149,63 +157,11 @@ class HTMLParser:
 
         return results
 
-    def _extract_from_dataframe(self, df, filepath: Path,
-                                 source_sheet: str, source_info: dict) -> list[dict]:
-        """从 DataFrame 提取电表记录（复用 ExcelParser 的列映射逻辑）。"""
-        import pandas as pd
-
-        results = []
-        col_map = {}
-
-        simple_fields = ["meter_number", "asset_number", "user_id", "multiplier", "project_name"]
-        for field in simple_fields:
-            aliases = self.field_mapping.get(field, [])
-            if isinstance(aliases, list):
-                for col in df.columns:
-                    col_clean = str(col).strip()
-                    if col_clean in aliases or any(a in col_clean for a in aliases):
-                        col_map[field] = col
-                        break
-
-        if not col_map.get("meter_number") and not col_map.get("user_id"):
-            return []
-
-        reading_month = self._infer_month(source_info, filepath.name)
-
-        for _, row in df.iterrows():
-            def get_val(field):
-                col = col_map.get(field)
-                if col is None:
-                    return None
-                val = row.get(col)
-                if pd.isna(val):
-                    return None
-                return val
-
-            record = validate_record({
-                "meter_number": get_val("meter_number"),
-                "asset_number": get_val("asset_number"),
-                "user_id": get_val("user_id"),
-                "meter_type": "未知",
-                "multiplier": 1.0,
-                "project_name": str(get_val("project_name") or "").strip() or None,
-                "reading_month": reading_month,
-                "sharp_peak": None,
-                "peak": None,
-                "flat": None,
-                "valley": None,
-                "total_kwh": None,
-                "source_file": filepath.name,
-                "source_sheet": source_sheet,
-            })
-            if record:
-                results.append(record)
-
-        return results
-
     def _find_values(self, text: str, aliases: list) -> list[str]:
         """按关键词别名从文本中提取对应的值。"""
         values = []
+        if not isinstance(aliases, list):
+            return values
         for alias in aliases:
             pattern = rf'{re.escape(alias)}\s*[:：]?\s*(\S+)'
             for m in re.finditer(pattern, text):
@@ -215,29 +171,33 @@ class HTMLParser:
         return values
 
     def _zip_longest(self, a: list, b: list):
-        """zip 两个列表，短的用 None 补齐。"""
         max_len = max(len(a), len(b)) if a or b else 0
         for i in range(max_len):
             yield (a[i] if i < len(a) else None, b[i] if i < len(b) else None)
 
-    def _extract_project(self, text: str, source_info: dict) -> Optional[str]:
-        """从文本或邮件主题中提取项目名。"""
-        aliases = self.field_mapping.get("project_name", [])
-        for alias in aliases:
-            match = re.search(rf'{re.escape(alias)}\s*[:：]?\s*(\S+)', text)
-            if match:
-                return match.group(1).strip("，。、,.")
-        # 从邮件主题推断
+    def _extract_project(self, text: str, filename: str, source_info: dict) -> Optional[str]:
+        """提取项目名（复用 ExcelParser 逻辑，不直接用邮件主题）。"""
+        parser = self._get_excel_parser()
+        # 从文本内容提取
+        proj = parser._extract_project_from_text(text[:2000])
+        if proj:
+            return proj
+        # 从文件名提取
+        proj = parser._extract_project_from_text(filename)
+        if proj:
+            return proj
+        # 从邮件主题提取（通过 _extract_project_from_text 过滤月份前缀）
         if source_info and source_info.get("email_subject"):
-            return source_info["email_subject"]
+            proj = parser._extract_project_from_text(source_info["email_subject"])
+            if proj:
+                return proj
         return None
 
     def _infer_month(self, source_info: dict, filename: str) -> str:
-        """推断月份。"""
         for text in [filename, (source_info or {}).get("email_subject", "")]:
             for match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})(?:月?)', text):
                 year, month = int(match.group(1)), int(match.group(2))
-                if 2015 <= year <= 2030 and 1 <= month <= 12:
+                if 2015 <= year <= 2035 and 1 <= month <= 12:
                     return f"{year}-{str(month).zfill(2)}"
         if source_info and source_info.get("email_date"):
             d = source_info["email_date"]
