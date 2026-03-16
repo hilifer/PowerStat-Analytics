@@ -241,32 +241,50 @@ class EmailFetcher:
                         continue
 
                     # ---- 获取附件（不限格式，全部下载） ----
+                    # 多种方式获取文件名（兼容各种邮件客户端）
                     filename = part.get_filename()
                     if not filename:
                         filename = part.get_param("name")
                     if not filename:
-                        # 无名附件按 content-type 命名
-                        content_id = part.get("Content-ID", "")
-                        cid = content_id.strip("<>").split("@")[0] if content_id else ""
-                        ext_map = {
-                            "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
-                            "image/bmp": ".bmp", "application/pdf": ".pdf",
-                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-                            "application/vnd.ms-excel": ".xls",
-                        }
-                        ext_guess = ext_map.get(content_type, "")
-                        if cid:
-                            filename = f"{cid}{ext_guess}"
-                        elif ext_guess:
-                            filename = f"unnamed{ext_guess}"
-                        else:
-                            # 完全未知的附件也下载
-                            sub_type = content_type.split("/")[-1].split(";")[0]
-                            filename = f"unnamed.{sub_type}" if sub_type != "octet-stream" else None
+                        # 从 Content-Disposition 头直接正则提取
+                        if "filename" in disposition:
+                            fn_match = re.search(
+                                r'filename[*]?=["\']?([^"\';\r\n]+)', disposition
+                            )
+                            if fn_match:
+                                filename = fn_match.group(1).strip()
+                    if not filename:
+                        # 从 Content-Type 头直接正则提取
+                        ct_header = part.get("Content-Type", "")
+                        if "name" in ct_header:
+                            nm_match = re.search(
+                                r'name[*]?=["\']?([^"\';\r\n]+)', ct_header
+                            )
+                            if nm_match:
+                                filename = nm_match.group(1).strip()
+                    if not filename:
+                        # 兜底：有 attachment disposition 或非文本类型就给默认名
+                        if "attachment" in disposition:
+                            filename = f"attachment_{hash(mid) & 0xFFFF:04x}.bin"
+                        elif content_type not in ("text/plain", "text/html"):
+                            content_id = part.get("Content-ID", "")
+                            cid = content_id.strip("<>").split("@")[0] if content_id else ""
+                            ext_map = {
+                                "image/png": ".png", "image/jpeg": ".jpg",
+                                "image/gif": ".gif", "image/bmp": ".bmp",
+                                "application/pdf": ".pdf",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                                "application/vnd.ms-excel": ".xls",
+                                "application/octet-stream": ".bin",
+                                "application/zip": ".zip",
+                            }
+                            ext = ext_map.get(content_type, ".bin")
+                            filename = f"{cid}{ext}" if cid else f"unnamed{ext}"
 
                     if not filename:
                         continue
 
+                    # 解码 MIME 编码的文件名 (=?utf-8?B?...?=)
                     filename = _decode_header_value(filename)
                     payload = part.get_payload(decode=True)
                     if not payload:
