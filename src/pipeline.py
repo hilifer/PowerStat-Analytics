@@ -544,14 +544,20 @@ class Pipeline:
         return "unknown"
 
     def _infer_project_for_file(self, att: EmailAttachment) -> Optional[str]:
-        """推断文件对应的项目（从邮件主题或文件名）。"""
+        """推断文件对应的项目（从已有项目列表匹配，或从文件名提取）。"""
         projects = self.db.get_projects()
         for proj in projects:
             if proj in att.filename or proj in att.email_subject:
                 return proj
-        # 用邮件主题作为项目名的兜底
-        if att.email_subject:
-            return att.email_subject
+
+        # 从文件名提取项目名（复用 Excel 解析器的逻辑）
+        from src.parsers.excel_parser import ExcelParser
+        parser = ExcelParser()
+        for text in [att.filename, att.email_subject]:
+            proj = parser._extract_project_from_text(text)
+            if proj:
+                return proj
+
         return None
 
     def _build_knowledge_graph(self):
