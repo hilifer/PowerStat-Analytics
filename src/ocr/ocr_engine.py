@@ -283,11 +283,12 @@ class OCREngine:
         # 提取项目名
         project = None
         try:
-            from src.parsers.excel_parser import ExcelParser
-            ep = ExcelParser()
-            project = ep._extract_project_from_text(text[:1000])
-            if not project:
-                project = ep._extract_project_from_text(filepath.name)
+            import re as _re
+            for t in [text[:1000], filepath.name]:
+                m = _re.search(r'([\u4e00-\u9fff]{2,10}(?:项目|电站|光伏))', t)
+                if m:
+                    project = m.group(1)
+                    break
         except Exception:
             pass
 
