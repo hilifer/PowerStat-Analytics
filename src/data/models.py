@@ -254,6 +254,10 @@ class Database:
         电表号是唯一标识。user_id、asset_number 等是关联属性，
         只在当前值为空时才用新值补全（不覆盖已有数据）。
         锁定的电表不会被自动更新固定信息。
+
+        模糊匹配：如果传入的短电表号是某个已有长电表号的子串，
+        则合并到长电表号上（不创建新记录）。反之，如果传入的长电表号
+        包含已有的短电表号，则用长号替换短号。
         """
         import re
         _has_chinese = re.compile(r'[\u4e00-\u9fff]')
@@ -266,6 +270,12 @@ class Database:
             asset_number = None
 
         with self.connection() as conn:
+            # 模糊匹配：查找是否有包含关系的已有电表号
+            resolved = self._resolve_meter_number(conn, meter_number)
+            if resolved != meter_number:
+                log.info("  电表号模糊匹配: '%s' -> '%s'", meter_number, resolved)
+                meter_number = resolved
+
             conn.execute(
                 """INSERT INTO meters (meter_number, user_id, meter_type, asset_number, multiplier, project_name)
                    VALUES (?, ?, ?, ?, ?, ?)
@@ -311,6 +321,90 @@ class Database:
             meter_id = row["id"]
             log.debug("电表 upsert: %s -> id=%d", meter_number, meter_id)
             return meter_id
+
+    def _resolve_meter_number(self, conn, meter_number: str) -> str:
+        """模糊匹配电表号：短号是长号子串时合并到长号。
+
+        规则：
+        1. 精确匹配 → 直接返回
+        2. 传入短号，DB中有包含它的长号 → 返回长号（合并到长号）
+        3. 传入长号，DB中有被它包含的短号 → 迁移短号数据到长号，删除短号
+        4. 无匹配 → 返回原号
+
+        只在纯数字电表号之间做模糊匹配，防止误匹配。
+        """
+        import re
+
+        # 精确匹配
+        exact = conn.execute(
+            "SELECT id FROM meters WHERE meter_number = ?", (meter_number,)
+        ).fetchone()
+        if exact:
+            return meter_number
+
+        # 只对纯数字电表号做模糊匹配
+        if not re.match(r'^\d+$', meter_number):
+            return meter_number
+
+        # 查找所有纯数字电表号
+        all_meters = conn.execute(
+            "SELECT id, meter_number FROM meters"
+        ).fetchall()
+
+        for row in all_meters:
+            existing = row["meter_number"]
+            if not re.match(r'^\d+$', existing):
+                continue
+
+            # Case 2: 传入短号，已有长号包含它
+            if len(meter_number) < len(existing) and meter_number in existing:
+                return existing
+
+            # Case 3: 传入长号，已有短号被它包含
+            if len(meter_number) > len(existing) and existing in meter_number:
+                # 迁移：将短号的 readings 和 prices 转移到长号
+                log.info("  电表号升级: '%s' -> '%s'，迁移关联数据", existing, meter_number)
+                self._migrate_meter(conn, from_number=existing, to_number=meter_number)
+                return meter_number
+
+        return meter_number
+
+    def _migrate_meter(self, conn, from_number: str, to_number: str):
+        """将短电表号的关联数据迁移到长电表号。"""
+        old = conn.execute(
+            "SELECT id, user_id, meter_type, asset_number, multiplier, project_name, discount "
+            "FROM meters WHERE meter_number = ?", (from_number,)
+        ).fetchone()
+        if not old:
+            return
+
+        old_id = old["id"]
+
+        # 先创建长号记录（继承短号的属性）
+        conn.execute(
+            """INSERT OR IGNORE INTO meters
+               (meter_number, user_id, meter_type, asset_number, multiplier, project_name, discount)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (to_number, old["user_id"], old["meter_type"], old["asset_number"],
+             old["multiplier"], old["project_name"], old["discount"]),
+        )
+        new_row = conn.execute(
+            "SELECT id FROM meters WHERE meter_number = ?", (to_number,)
+        ).fetchone()
+        new_id = new_row["id"]
+
+        # 迁移 monthly_readings
+        conn.execute(
+            "UPDATE OR IGNORE monthly_readings SET meter_id = ? WHERE meter_id = ?",
+            (new_id, old_id),
+        )
+        # 删除无法迁移的冲突记录（同月份）
+        conn.execute(
+            "DELETE FROM monthly_readings WHERE meter_id = ?", (old_id,)
+        )
+
+        # 删除旧短号记录
+        conn.execute("DELETE FROM meters WHERE id = ?", (old_id,))
 
     def update_meter(self, meter_number: str, **fields) -> bool:
         """手动更新电表信息（仅限解锁状态，或管理员操作）。

@@ -88,6 +88,11 @@ class ExcelParser:
         meta = self._scan_meta_info(df, sheet_name, filepath)
         log.debug("  元信息: %s", {k: v for k, v in meta.items() if v})
 
+        # 尝试纵向卡片格式（标签-值配对，如"用户表码"）
+        card_records = self._try_parse_card_layout(df, sheet_name, filepath, source_info, meta)
+        if card_records:
+            return card_records
+
         # 找表头行
         header_row_idx = self._find_header_row(df)
         if header_row_idx is None:
@@ -103,6 +108,284 @@ class ExcelParser:
         data_df.columns = headers
 
         return self._parse_dataframe(data_df, sheet_name, filepath, source_info, meta)
+
+    def _try_parse_card_layout(self, df: pd.DataFrame, sheet_name: str,
+                                filepath: Path, source_info: dict,
+                                meta: dict) -> list[dict]:
+        """尝试解析纵向卡片格式（标签-值配对）。
+
+        这种格式常见于"用户表码"等Sheet，布局如下：
+            用户号
+            094803002727160
+            发电表号
+            094803004432605
+            发电表资产编号
+            09001SF00000042508942176
+            上网表号
+            094803002727160
+
+        或横向标签-值对：
+            用户号      | 094803002727160
+            发电表号    | 094803004432605
+
+        检测条件：
+        - 至少出现2个纵向标签关键词（发电表号/上网表号/用户号/电表资产号等）
+        - 数据不是标准表格格式（列数少或没有明显表头行）
+        """
+        # 纵向标签关键词映射
+        label_map = {
+            "用户号": "user_id",
+            "用户编号": "user_id",
+            "户号": "user_id",
+            "客户编号": "user_id",
+            "用电户号": "user_id",
+            "用户名称": "user_name",
+            "客户名称": "user_name",
+            "电表号": "meter_number",
+            "表号": "meter_number",
+            "电表编号": "meter_number",
+            "电能表号": "meter_number",
+            "发电表号": "gen_meter",
+            "发电表": "gen_meter",
+            "发电电表号": "gen_meter",
+            "逆变表号": "gen_meter",
+            "上网表号": "grid_meter",
+            "上网表": "grid_meter",
+            "上网电表号": "grid_meter",
+            "并网表号": "grid_meter",
+            "发电表资产编号": "gen_asset",
+            "发电表资产号": "gen_asset",
+            "发电资产号": "gen_asset",
+            "上网表资产编号": "grid_asset",
+            "上网表资产号": "grid_asset",
+            "上网资产号": "grid_asset",
+            "电表资产号": "asset_number",
+            "资产编号": "asset_number",
+            "资产号": "asset_number",
+            "核销资产号": "asset_number",
+            "倍率": "multiplier",
+            "CT倍率": "multiplier",
+            "变比": "multiplier",
+            "统计日期": "reading_date",
+            "抄表日期": "reading_date",
+            "用电地址": "address",
+            "安装地址": "address",
+            "项目名称": "project_name",
+            "项目": "project_name",
+            "电站名称": "project_name",
+            "折扣": "discount",
+        }
+
+        # 收集所有单元格文本，检测是否为卡片格式
+        all_cells = []
+        for row_idx in range(min(len(df), 100)):
+            for col_idx in range(min(len(df.columns), 10)):
+                cell = df.iloc[row_idx, col_idx]
+                if cell is None or pd.isna(cell):
+                    continue
+                cell_str = str(cell).strip()
+                if cell_str:
+                    all_cells.append((row_idx, col_idx, cell_str))
+
+        # 检测卡片标签数量
+        label_hits = set()
+        for _, _, cell_str in all_cells:
+            clean = cell_str.strip()
+            if clean in label_map:
+                label_hits.add(clean)
+            else:
+                # 检查是否包含标签关键词（如 "发电表号："）
+                for lbl in label_map:
+                    if clean.startswith(lbl) and len(clean) - len(lbl) <= 3:
+                        label_hits.add(lbl)
+
+        # 至少需要2个关键标签才算卡片格式（且必须有电表/用户相关标签）
+        meter_labels = {"发电表号", "上网表号", "电表号", "发电表", "上网表",
+                        "发电电表号", "上网电表号", "逆变表号", "并网表号",
+                        "电表编号", "电能表号", "表号"}
+        has_meter_label = bool(label_hits & meter_labels)
+        if len(label_hits) < 2 or not has_meter_label:
+            return []
+
+        log.info("  检测到纵向卡片格式 [%s]: 标签=%s", sheet_name, label_hits)
+
+        # 提取所有标签-值对
+        # 策略1：同一行 横向标签-值对（A列=标签，B列=值）
+        # 策略2：纵向标签在上，值在下一行同列
+        kv_pairs = {}
+        label_positions = {}  # {(row, col): field_name}
+
+        for row_idx, col_idx, cell_str in all_cells:
+            clean = cell_str.strip().rstrip("：: ")
+            if clean in label_map:
+                field = label_map[clean]
+                label_positions[(row_idx, col_idx)] = field
+
+                # 横向：检查右侧单元格
+                for next_col in range(col_idx + 1, min(len(df.columns), col_idx + 3)):
+                    val = df.iloc[row_idx, next_col]
+                    if val is not None and not pd.isna(val):
+                        val_str = str(val).strip()
+                        if val_str and val_str not in label_map and len(val_str) >= 2:
+                            kv_pairs.setdefault(field, []).append(val_str)
+                            break
+
+        # 纵向：检查标签下方的值
+        for (row_idx, col_idx), field in label_positions.items():
+            if field in kv_pairs:
+                continue  # 已在横向中找到值
+            for next_row in range(row_idx + 1, min(len(df), row_idx + 3)):
+                val = df.iloc[next_row, col_idx]
+                if val is not None and not pd.isna(val):
+                    val_str = str(val).strip()
+                    if val_str and val_str not in label_map and len(val_str) >= 2:
+                        kv_pairs.setdefault(field, []).append(val_str)
+                        break
+
+        # 也检查同一单元格内的 "标签：值" 格式
+        for _, _, cell_str in all_cells:
+            for lbl, field in label_map.items():
+                m = re.match(rf'^{re.escape(lbl)}\s*[:：]\s*(.+)$', cell_str)
+                if m:
+                    val = m.group(1).strip()
+                    if val and len(val) >= 2:
+                        kv_pairs.setdefault(field, []).append(val)
+
+        log.debug("  卡片提取的键值对: %s", {k: v for k, v in kv_pairs.items()})
+
+        if not kv_pairs:
+            return []
+
+        # 构建电表记录
+        results = []
+        from src.parsers.validators import validate_record, clean_id
+
+        user_id = None
+        for uid in kv_pairs.get("user_id", []):
+            cleaned = clean_id(uid)
+            if cleaned and len(cleaned) >= 6:
+                user_id = cleaned
+                break
+
+        multiplier = None
+        for mv in kv_pairs.get("multiplier", []):
+            try:
+                multiplier = float(mv.replace(",", ""))
+            except (ValueError, TypeError):
+                pass
+
+        discount = None
+        for dv in kv_pairs.get("discount", []):
+            dm = re.search(r'(\d+\.?\d*)', dv)
+            if dm:
+                d = float(dm.group(1))
+                if 0 < d <= 10:
+                    discount = d / 10.0 if d > 1 else d
+
+        project_name = meta.get("project_name")
+        if not project_name:
+            for pv in kv_pairs.get("project_name", []):
+                project_name = pv
+                break
+
+        # 推断月份
+        reading_month = "unknown"
+        for dv in kv_pairs.get("reading_date", []):
+            dm = re.search(r'(\d{4})[-/年.]?(\d{1,2})', dv)
+            if dm:
+                y, m = int(dm.group(1)), int(dm.group(2))
+                if 2015 <= y <= 2035 and 1 <= m <= 12:
+                    reading_month = f"{y}-{str(m).zfill(2)}"
+                    break
+        if reading_month == "unknown" and meta.get("reading_dates"):
+            reading_month = meta["reading_dates"][0]
+        if reading_month == "unknown":
+            reading_month = self._infer_month(source_info, filepath.name, sheet_name)
+
+        gen_meters = [clean_id(v) for v in kv_pairs.get("gen_meter", [])]
+        grid_meters = [clean_id(v) for v in kv_pairs.get("grid_meter", [])]
+        gen_assets = [clean_id(v) for v in kv_pairs.get("gen_asset", [])]
+        grid_assets = [clean_id(v) for v in kv_pairs.get("grid_asset", [])]
+        plain_meters = [clean_id(v) for v in kv_pairs.get("meter_number", [])]
+        plain_assets = [clean_id(v) for v in kv_pairs.get("asset_number", [])]
+
+        # 生成发电表记录
+        for i, gm in enumerate(gen_meters):
+            if not gm or len(gm) < 6:
+                continue
+            ga = gen_assets[i] if i < len(gen_assets) else None
+            record = validate_record({
+                "meter_number": gm,
+                "asset_number": ga,
+                "user_id": user_id,
+                "meter_type": "发电表",
+                "multiplier": multiplier,
+                "discount": discount,
+                "project_name": project_name,
+                "reading_month": reading_month,
+                "sharp_peak": None, "peak": None, "flat": None, "valley": None,
+                "total_kwh": None,
+                "source_file": filepath.name,
+                "source_sheet": sheet_name,
+            })
+            if record:
+                results.append(record)
+
+        # 生成上网表记录
+        for i, grd in enumerate(grid_meters):
+            if not grd or len(grd) < 6:
+                continue
+            ga = grid_assets[i] if i < len(grid_assets) else None
+            record = validate_record({
+                "meter_number": grd,
+                "asset_number": ga,
+                "user_id": user_id,
+                "meter_type": "上网表",
+                "multiplier": multiplier,
+                "discount": discount,
+                "project_name": project_name,
+                "reading_month": reading_month,
+                "sharp_peak": None, "peak": None, "flat": None, "valley": None,
+                "total_kwh": None,
+                "source_file": filepath.name,
+                "source_sheet": sheet_name,
+            })
+            if record:
+                results.append(record)
+
+        # 生成普通电表记录
+        for i, pm in enumerate(plain_meters):
+            if not pm or len(pm) < 6:
+                continue
+            # 跳过已在发电/上网中出现的
+            if pm in gen_meters or pm in grid_meters:
+                continue
+            pa = plain_assets[i] if i < len(plain_assets) else None
+            record = validate_record({
+                "meter_number": pm,
+                "asset_number": pa,
+                "user_id": user_id,
+                "meter_type": "未知",
+                "multiplier": multiplier,
+                "discount": discount,
+                "project_name": project_name,
+                "reading_month": reading_month,
+                "sharp_peak": None, "peak": None, "flat": None, "valley": None,
+                "total_kwh": None,
+                "source_file": filepath.name,
+                "source_sheet": sheet_name,
+            })
+            if record:
+                results.append(record)
+
+        if results:
+            log.info("  卡片格式提取 [%s]: %d 条记录 (发电%d/上网%d/普通%d)",
+                     sheet_name, len(results),
+                     len([r for r in results if r.get("meter_type") == "发电表"]),
+                     len([r for r in results if r.get("meter_type") == "上网表"]),
+                     len([r for r in results if r.get("meter_type") == "未知"]))
+
+        return results
 
     def _disambiguate_headers(self, headers: list[str]) -> list[str]:
         """消歧重复列名：根据位置上下文（正向有功/反向有功）前缀化。
