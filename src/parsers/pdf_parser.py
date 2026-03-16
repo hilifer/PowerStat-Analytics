@@ -6,6 +6,7 @@ from typing import Optional
 
 from src.config_loader import config
 from src.logger import log
+from src.parsers.validators import validate_record
 
 
 class PDFParser:
@@ -104,10 +105,10 @@ class PDFParser:
 
         reading_month = self._infer_month(source_info, filepath.name, source_sheet)
 
-        record = {
-            "meter_number": meter_number or "",
+        record = validate_record({
+            "meter_number": meter_number,
             "asset_number": None,
-            "user_id": user_id or "",
+            "user_id": user_id,
             "meter_type": "未知",
             "multiplier": 1.0,
             "project_name": None,
@@ -119,8 +120,9 @@ class PDFParser:
             "total_kwh": None,
             "source_file": filepath.name,
             "source_sheet": source_sheet,
-        }
-        results.append(record)
+        })
+        if record:
+            results.append(record)
         return results
 
     def _extract_number(self, text: str, keywords: list[str]) -> Optional[float]:
@@ -181,19 +183,14 @@ class PDFParser:
             except (ValueError, TypeError):
                 return None
 
-        meter_number = get_val("meter_number")
-        user_id = get_val("user_id")
-        if not meter_number and not user_id:
-            return None
-
         reading_month = self._infer_month(source_info, filepath.name, source_sheet)
 
-        return {
-            "meter_number": str(meter_number).strip() if meter_number else "",
-            "asset_number": str(get_val("asset_number") or "").strip() or None,
-            "user_id": str(user_id).strip() if user_id else "",
+        return validate_record({
+            "meter_number": get_val("meter_number"),
+            "asset_number": get_val("asset_number"),
+            "user_id": get_val("user_id"),
             "meter_type": "未知",
-            "multiplier": get_float("multiplier") or 1.0,
+            "multiplier": get_float("multiplier"),
             "project_name": str(get_val("project_name") or "").strip() or None,
             "reading_month": reading_month,
             "sharp_peak": get_float("reverse_readings_sharp_peak") or get_float("forward_readings_sharp"),

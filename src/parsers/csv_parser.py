@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.config_loader import config
-from src.logger import log
+from src.parsers.validators import validate_record
 
 
 class CSVParser:
@@ -97,17 +97,12 @@ class CSVParser:
             except (ValueError, TypeError):
                 return None
 
-        mn = get_val("meter_number")
-        uid = get_val("user_id")
-        if not mn and not uid:
-            return None
-
-        return {
-            "meter_number": str(mn).strip() if mn else "",
-            "asset_number": str(get_val("asset_number") or "").strip() or None,
-            "user_id": str(uid).strip() if uid else "",
+        return validate_record({
+            "meter_number": get_val("meter_number"),
+            "asset_number": get_val("asset_number"),
+            "user_id": get_val("user_id"),
             "meter_type": "未知",
-            "multiplier": get_float("multiplier") or 1.0,
+            "multiplier": get_float("multiplier"),
             "project_name": str(get_val("project_name") or "").strip() or None,
             "reading_month": reading_month,
             "sharp_peak": get_float("reverse_readings_sharp_peak") or get_float("forward_readings_sharp"),
@@ -117,7 +112,7 @@ class CSVParser:
             "total_kwh": None,
             "source_file": filepath.name,
             "source_sheet": "csv",
-        }
+        })
 
     def _infer_month(self, source_info, filename):
         for text in [filename, (source_info or {}).get("email_subject", "")]:

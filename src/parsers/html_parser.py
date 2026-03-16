@@ -6,6 +6,7 @@ from typing import Optional
 
 from src.config_loader import config
 from src.logger import log
+from src.parsers.validators import validate_record
 
 
 class HTMLParser:
@@ -127,10 +128,10 @@ class HTMLParser:
         for i, (uid, mn) in enumerate(
             self._zip_longest(user_ids, meter_numbers)
         ):
-            record = {
-                "meter_number": mn or "",
+            record = validate_record({
+                "meter_number": mn,
                 "asset_number": None,
-                "user_id": uid or "",
+                "user_id": uid,
                 "meter_type": "未知",
                 "multiplier": 1.0,
                 "project_name": self._extract_project(text, source_info),
@@ -142,8 +143,9 @@ class HTMLParser:
                 "total_kwh": None,
                 "source_file": filepath.name,
                 "source_sheet": "邮件正文",
-            }
-            results.append(record)
+            })
+            if record:
+                results.append(record)
 
         return results
 
@@ -180,15 +182,10 @@ class HTMLParser:
                     return None
                 return val
 
-            mn = get_val("meter_number")
-            uid = get_val("user_id")
-            if not mn and not uid:
-                continue
-
-            record = {
-                "meter_number": str(mn).strip() if mn else "",
-                "asset_number": str(get_val("asset_number") or "").strip() or None,
-                "user_id": str(uid).strip() if uid else "",
+            record = validate_record({
+                "meter_number": get_val("meter_number"),
+                "asset_number": get_val("asset_number"),
+                "user_id": get_val("user_id"),
                 "meter_type": "未知",
                 "multiplier": 1.0,
                 "project_name": str(get_val("project_name") or "").strip() or None,
@@ -200,8 +197,9 @@ class HTMLParser:
                 "total_kwh": None,
                 "source_file": filepath.name,
                 "source_sheet": source_sheet,
-            }
-            results.append(record)
+            })
+            if record:
+                results.append(record)
 
         return results
 

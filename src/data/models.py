@@ -154,9 +154,17 @@ class Database:
 
         电表号是唯一标识。user_id、asset_number 等是关联属性，
         只在当前值为空时才用新值补全（不覆盖已有数据）。
-        meter_type 只在新值不是"未知"时更新。
-        multiplier 只在新值不是 None 且不是 1.0（默认值）时更新已有的 1.0。
         """
+        import re
+        _has_chinese = re.compile(r'[\u4e00-\u9fff]')
+
+        # DB 层安全检查：拒绝含中文的编号
+        if not meter_number or len(meter_number) < 6 or _has_chinese.search(meter_number):
+            raise ValueError(f"无效电表号: {meter_number}")
+        if user_id and _has_chinese.search(user_id):
+            user_id = None
+        if asset_number and _has_chinese.search(asset_number):
+            asset_number = None
         with self.connection() as conn:
             conn.execute(
                 """INSERT INTO meters (meter_number, user_id, meter_type, asset_number, multiplier, project_name)
