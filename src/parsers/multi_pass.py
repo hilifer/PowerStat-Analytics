@@ -139,7 +139,10 @@ class MultiPassExtractor:
                     if not hdr:
                         continue
 
-                    if self._matches_any(hdr, self._gen_aliases):
+                    # 先判断资产列（"发电表资产编号"含"发电表"会误匹配电表列）
+                    if self._matches_any(hdr, self._asset_aliases):
+                        asset_cols.append(c)
+                    elif self._matches_any(hdr, self._gen_aliases):
                         meter_cols.append((c, "发电表"))
                         has_meter_col = True
                     elif self._matches_any(hdr, self._grid_aliases):
@@ -149,23 +152,21 @@ class MultiPassExtractor:
                         meter_cols.append((c, None))
                         has_meter_col = True
 
-                    if self._matches_any(hdr, self._asset_aliases):
-                        asset_cols.append(c)
-
-                # 从电表号列提取电表，同时同行关联资产编号
+                # 从电表号列提取电表，同时同行关联最近的资产编号列
                 for mc, mtype in meter_cols:
+                    # 找距离此电表列最近的资产列（优先右侧相邻列，表头通常是 电表号|资产编号）
+                    nearest_ac = min(asset_cols, key=lambda ac: (abs(ac - mc), -ac)) if asset_cols else None
                     for r in range(header_idx + 1, len(df)):
                         val = clean_id(_cell_str(df.iloc[r, mc]))
                         if is_valid_meter_number(val):
                             self._register_meter(val, filepath.name, sheet_name, mtype)
-                            # 同行资产编号
-                            for ac in asset_cols:
-                                av = clean_id(_cell_str(df.iloc[r, ac]))
+                            # 同行最近资产编号
+                            if nearest_ac is not None:
+                                av = clean_id(_cell_str(df.iloc[r, nearest_ac]))
                                 if av and len(av) >= 4 and not _CHINESE_RE.search(av):
                                     if not self.meters[val]["asset_number"]:
                                         self.meters[val]["asset_number"] = av
                                         asset_count += 1
-                                    break
 
                 # 无电表号列时，资产编号列当电表号
                 if not has_meter_col:
@@ -182,8 +183,17 @@ class MultiPassExtractor:
                     if not cell:
                         continue
 
+                    # 资产编号标签配对（必须先于电表判断，否则"发电表资产编号"会匹配"发电表"）
+                    if self._matches_any(cell, self._asset_aliases):
+                        val = clean_id(self._find_value_near(df, r, c))
+                        if val and len(val) >= 4 and not _CHINESE_RE.search(val):
+                            nearest = self._find_nearest_meter(df, r, c, filepath.name)
+                            if nearest and not self.meters[nearest]["asset_number"]:
+                                self.meters[nearest]["asset_number"] = val
+                                asset_count += 1
+
                     # 电表号标签配对
-                    if self._matches_any(cell, self._meter_aliases):
+                    elif self._matches_any(cell, self._meter_aliases):
                         val = clean_id(self._find_value_near(df, r, c))
                         if is_valid_meter_number(val):
                             self._register_meter(val, filepath.name, sheet_name)
@@ -195,15 +205,6 @@ class MultiPassExtractor:
                         val = clean_id(self._find_value_near(df, r, c))
                         if is_valid_meter_number(val):
                             self._register_meter(val, filepath.name, sheet_name, "上网表")
-
-                    # 资产编号标签配对
-                    elif self._matches_any(cell, self._asset_aliases):
-                        val = clean_id(self._find_value_near(df, r, c))
-                        if val and len(val) >= 4 and not _CHINESE_RE.search(val):
-                            nearest = self._find_nearest_meter(df, r, c, filepath.name)
-                            if nearest and not self.meters[nearest]["asset_number"]:
-                                self.meters[nearest]["asset_number"] = val
-                                asset_count += 1
 
                     # 内嵌格式："电表号：12345678"
                     for pattern, mtype in [
