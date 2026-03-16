@@ -11,6 +11,7 @@ from src.config_loader import config
 from src.data.models import Database
 from src.email_fetcher.fetcher import EmailFetcher, EmailAttachment
 from src.parsers.excel_parser import ExcelParser
+from src.parsers.multi_pass import MultiPassExtractor
 from src.parsers.pdf_parser import PDFParser
 from src.parsers.csv_parser import CSVParser
 from src.parsers.html_parser import HTMLParser
@@ -110,6 +111,85 @@ class SmartDispatcher:
         except Exception:
             pass
         return "zip"
+
+    def load_as_dataframes(self, filepath: str, source_info: dict = None) -> list:
+        """将文件加载为 DataFrame 列表，供多轮扫描使用。
+
+        Returns:
+            [(df, filepath_obj, sheet_name, source_info), ...]
+        """
+        import pandas as pd
+        import openpyxl
+
+        fname = Path(filepath).name
+        filepath_obj = Path(filepath)
+
+        if fname.startswith("~$"):
+            return []
+
+        file_type = self.detect_type(filepath)
+        sheets = []
+
+        try:
+            if file_type in ("excel", "ole"):
+                ext = filepath_obj.suffix.lower()
+                if ext == ".xls":
+                    xls = pd.ExcelFile(str(filepath), engine="xlrd")
+                    for sn in xls.sheet_names:
+                        df = pd.read_excel(xls, sheet_name=sn, header=None)
+                        sheets.append((df, filepath_obj, sn, source_info))
+                else:
+                    wb = openpyxl.load_workbook(str(filepath), read_only=True, data_only=True)
+                    for sn in wb.sheetnames:
+                        data = list(wb[sn].values)
+                        if data:
+                            df = pd.DataFrame(data)
+                            sheets.append((df, filepath_obj, sn, source_info))
+                    wb.close()
+
+            elif file_type == "pdf":
+                try:
+                    import pdfplumber
+                    with pdfplumber.open(filepath) as pdf:
+                        for i, page in enumerate(pdf.pages):
+                            tables = page.extract_tables()
+                            for j, table in enumerate(tables):
+                                if table and len(table) > 1:
+                                    df = pd.DataFrame(table)
+                                    sheets.append((df, filepath_obj, f"PDF_p{i+1}_t{j+1}", source_info))
+                except Exception as e:
+                    log.error("  PDF 加载失败: %s", e)
+
+            elif file_type == "csv":
+                for enc in ["utf-8", "gbk", "gb2312", "utf-8-sig"]:
+                    try:
+                        for sep in [",", "\t", "|"]:
+                            df = pd.read_csv(filepath, encoding=enc, sep=sep, header=None)
+                            if len(df.columns) > 1:
+                                sheets.append((df, filepath_obj, "CSV", source_info))
+                                break
+                        if sheets:
+                            break
+                    except Exception:
+                        continue
+
+            elif file_type in ("html", "text"):
+                try:
+                    dfs = pd.read_html(filepath)
+                    for i, df in enumerate(dfs):
+                        df = df.reset_index(drop=True)
+                        df.columns = range(len(df.columns))
+                        sheets.append((df, filepath_obj, f"HTML_t{i+1}", source_info))
+                except Exception:
+                    pass
+
+        except Exception as e:
+            log.error("  文件加载失败 [%s]: %s", fname, e)
+
+        if sheets:
+            log.info("  加载 [%s] %s: %d 个 sheet", file_type.upper(), fname, len(sheets))
+
+        return sheets
 
     def process(self, filepath: str, source_info: dict = None) -> dict:
         """智能处理单个文件，返回提取结果。
@@ -304,10 +384,10 @@ class Pipeline:
         return attachments
 
     def _process_all(self, attachments: list[EmailAttachment]):
-        """智能解析所有附件和邮件正文，递归处理压缩包。"""
-        log.info("[阶段2] 智能解析所有内容...")
+        """多轮扫描：先加载所有文件为 DataFrame，再多轮提取。"""
+        log.info("[阶段2] 加载所有文件...")
 
-        all_records = []
+        all_sheets = []   # [(df, filepath, sheet_name, source_info), ...]
         all_ocr = []
 
         # 待处理队列（支持递归解压）
@@ -326,14 +406,32 @@ class Pipeline:
                 continue
             processed_paths.add(filepath)
 
-            result = self.dispatcher.process(filepath, source_info)
+            # 加载为 DataFrame
+            sheets = self.dispatcher.load_as_dataframes(filepath, source_info)
+            all_sheets.extend(sheets)
 
-            all_records.extend(result["records"])
-            all_ocr.extend(result["ocr_results"])
+            # 图片走 OCR
+            file_type = self.dispatcher.detect_type(filepath)
+            if file_type == "image":
+                try:
+                    ocr = self.dispatcher.ocr_engine.extract_from_image(filepath, source_info)
+                    if ocr.has_any_data():
+                        all_ocr.append(ocr)
+                except Exception as e:
+                    log.error("  OCR 失败: %s", e)
 
-            # 如果解压出子文件，加入队列继续处理
-            for sub_file in result["sub_files"]:
-                queue.append((sub_file, source_info))
+            # 压缩包解压后加入队列
+            if file_type == "zip":
+                sub_files = self.dispatcher._extract_zip(filepath)
+                for sf in sub_files:
+                    queue.append((sf, source_info))
+
+        log.info("共加载 %d 个 sheet", len(all_sheets))
+
+        # 多轮扫描提取
+        extractor = MultiPassExtractor()
+        extractor.load_dataframes(all_sheets)
+        all_records = extractor.extract_all()
 
         # 写入数据库
         self._save_records(all_records)
@@ -342,7 +440,7 @@ class Pipeline:
         # 数据关联补齐
         self._reconcile_data(all_records)
 
-        # 推理补全缺失数据（如从汇总推算缺失月份）
+        # 推理补全缺失数据
         log.info("[阶段2.6] 推理补全缺失数据...")
         self.db.infer_missing_data()
 

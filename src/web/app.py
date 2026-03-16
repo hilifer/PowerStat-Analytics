@@ -163,6 +163,7 @@ def _register_routes(app: Flask, db: Database):
             try:
                 from src.email_fetcher.fetcher import EmailFetcher
                 from src.pipeline import SmartDispatcher
+                from src.parsers.multi_pass import MultiPassExtractor
                 import re, shutil
 
                 status["progress"] = "正在连接邮箱并搜索邮件…"
@@ -180,7 +181,11 @@ def _register_routes(app: Flask, db: Database):
                 meters_added = 0
 
                 dispatcher = SmartDispatcher()
+                all_sheets = []
+                all_ocr = []
+                new_attachments = []
 
+                # 第一步：加载所有文件为 DataFrame
                 for i, att in enumerate(attachments, 1):
                     date_str = att.email_date.strftime("%Y-%m-%d %H:%M") if att.email_date else ""
                     fp = _email_fingerprint(att.email_subject, att.email_sender,
@@ -190,14 +195,14 @@ def _register_routes(app: Flask, db: Database):
                         skipped += 1
                         continue
 
-                    status["progress"] = f"处理 {i}/{len(attachments)}: {att.filename}"
+                    new_attachments.append((att, fp, date_str))
+                    status["progress"] = f"加载 {i}/{len(attachments)}: {att.filename}"
                     source_info = {
                         "email_date": att.email_date,
                         "email_subject": att.email_subject,
                         "filename": att.filename,
                     }
 
-                    # 智能处理：自动检测文件类型，递归解压
                     queue = [(att.filepath, source_info)]
                     processed_paths = set()
 
@@ -207,89 +212,86 @@ def _register_routes(app: Flask, db: Database):
                             continue
                         processed_paths.add(fpath)
 
-                        result = dispatcher.process(fpath, sinfo)
+                        # 加载为 DataFrame
+                        sheets = dispatcher.load_as_dataframes(fpath, sinfo)
+                        all_sheets.extend(sheets)
 
-                        # 入库电表记录
-                        for rec in result["records"]:
-                            meter_number = rec.get("meter_number", "").strip()
-                            if not meter_number:
-                                continue
+                        # 图片走 OCR
+                        file_type = dispatcher.detect_type(fpath)
+                        if file_type == "image":
                             try:
-                                meter_id = db.upsert_meter(
-                                    meter_number=meter_number,
-                                    user_id=rec.get("user_id"),
-                                    meter_type=rec.get("meter_type", "未知"),
-                                    asset_number=rec.get("asset_number"),
-                                    multiplier=rec.get("multiplier"),
-                                    project_name=rec.get("project_name"),
-                                )
-                                month = rec.get("reading_month")
-                                if month and month != "unknown":
-                                    db.upsert_reading(
-                                        meter_id=meter_id,
-                                        reading_month=month,
-                                        sharp_peak=rec.get("sharp_peak"),
-                                        peak=rec.get("peak"),
-                                        flat=rec.get("flat"),
-                                        valley=rec.get("valley"),
-                                        total_kwh=rec.get("total_kwh"),
-                                        source_file=rec.get("source_file"),
-                                        source_sheet=rec.get("source_sheet"),
-                                    )
-                                meters_added += 1
+                                ocr = dispatcher.ocr_engine.extract_from_image(fpath, sinfo)
+                                if ocr.has_any_data():
+                                    all_ocr.append(ocr)
                             except Exception as e:
-                                log.error("入库失败: %s", e)
+                                log.error("  OCR 失败: %s", e)
 
-                        # 入库 OCR 提取的电表记录
-                        for ocr in result["ocr_results"]:
-                            for rec in getattr(ocr, 'meter_records', []):
-                                mn = rec.get("meter_number", "").strip()
-                                if not mn:
-                                    continue
-                                try:
-                                    mid = db.upsert_meter(
-                                        meter_number=mn,
-                                        user_id=rec.get("user_id"),
-                                        meter_type=rec.get("meter_type", "未知"),
-                                        asset_number=rec.get("asset_number"),
-                                        multiplier=rec.get("multiplier"),
-                                        project_name=rec.get("project_name"),
-                                    )
-                                    month = rec.get("reading_month")
-                                    if month and month != "unknown":
-                                        db.upsert_reading(
-                                            meter_id=mid,
-                                            reading_month=month,
-                                            sharp_peak=rec.get("sharp_peak"),
-                                            peak=rec.get("peak"),
-                                            flat=rec.get("flat"),
-                                            valley=rec.get("valley"),
-                                            total_kwh=rec.get("total_kwh"),
-                                            source_file=rec.get("source_file"),
-                                            source_sheet=rec.get("source_sheet"),
-                                        )
-                                    meters_added += 1
-                                except Exception as e:
-                                    log.error("OCR电表入库失败: %s", e)
+                        # 压缩包
+                        if file_type == "zip":
+                            sub_files = dispatcher._extract_zip(fpath)
+                            for sf in sub_files:
+                                queue.append((sf, sinfo))
 
-                        # 入库 OCR 单价
-                        for ocr in result["ocr_results"]:
-                            if ocr.user_id and ocr.reading_month:
-                                db.upsert_price(
-                                    user_id=ocr.user_id,
-                                    reading_month=ocr.reading_month,
-                                    sharp_peak_price=ocr.sharp_peak_price,
-                                    peak_price=ocr.peak_price,
-                                    flat_price=ocr.flat_price,
-                                    valley_price=ocr.valley_price,
-                                    source_file=ocr.source_file,
-                                )
+                # 第二步：多轮扫描提取
+                status["progress"] = f"多轮扫描提取 ({len(all_sheets)} 个sheet)…"
+                extractor = MultiPassExtractor()
+                extractor.load_dataframes(all_sheets)
+                all_records = extractor.extract_all()
 
-                        # 子文件加入队列
-                        for sub in result["sub_files"]:
-                            queue.append((sub, sinfo))
+                # 第三步：入库
+                status["progress"] = "写入数据库…"
+                for rec in all_records:
+                    meter_number = rec.get("meter_number", "").strip()
+                    if not meter_number:
+                        continue
+                    try:
+                        meter_id = db.upsert_meter(
+                            meter_number=meter_number,
+                            user_id=rec.get("user_id"),
+                            meter_type=rec.get("meter_type", "未知"),
+                            asset_number=rec.get("asset_number"),
+                            multiplier=rec.get("multiplier"),
+                            project_name=rec.get("project_name"),
+                        )
+                        discount = rec.get("discount")
+                        if discount and discount != 1.0:
+                            db.update_meter(meter_number, discount=discount)
 
-                    # 归档到月份目录
+                        month = rec.get("reading_month")
+                        if month and month != "unknown":
+                            db.upsert_reading(
+                                meter_id=meter_id,
+                                reading_month=month,
+                                sharp_peak=rec.get("sharp_peak"),
+                                peak=rec.get("peak"),
+                                flat=rec.get("flat"),
+                                valley=rec.get("valley"),
+                                total_kwh=rec.get("total_kwh"),
+                                source_file=rec.get("source_file"),
+                                source_sheet=rec.get("source_sheet"),
+                            )
+                        meters_added += 1
+                    except Exception as e:
+                        log.error("入库失败: %s - %s", rec.get("meter_number"), e)
+
+                # OCR 单价入库
+                for ocr in all_ocr:
+                    if ocr.user_id and ocr.reading_month:
+                        try:
+                            db.upsert_price(
+                                user_id=ocr.user_id,
+                                reading_month=ocr.reading_month,
+                                sharp_peak_price=ocr.sharp_peak_price,
+                                peak_price=ocr.peak_price,
+                                flat_price=ocr.flat_price,
+                                valley_price=ocr.valley_price,
+                                source_file=ocr.source_file,
+                            )
+                        except Exception as e:
+                            log.error("单价入库失败: %s", e)
+
+                # 归档
+                for att, fp, date_str in new_attachments:
                     if not att.is_body:
                         reading_month = None
                         for month_match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})', att.filename):
