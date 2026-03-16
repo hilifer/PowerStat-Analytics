@@ -146,7 +146,7 @@ def _register_routes(app: Flask, db: Database):
         return redirect(url_for("refresh_emails"))
 
     # ---- 刷新邮件（带防重复） ----
-    @app.route("/refresh", methods=["POST"])
+    @app.route("/refresh", methods=["GET", "POST"])
     def refresh_emails():
         lock = app.config["REFRESH_LOCK"]
         status = app.config["REFRESH_STATUS"]
