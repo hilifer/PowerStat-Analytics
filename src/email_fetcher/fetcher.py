@@ -209,11 +209,47 @@ class EmailFetcher:
 
                 log.info("处理邮件: [%s] %s", mail_date, subject)
 
+                # 诊断：列出邮件中所有 MIME 部件
+                part_list = list(msg.walk())
+                log.info("  邮件共 %d 个 MIME 部件:", len(part_list))
+                for pi, p in enumerate(part_list):
+                    ct = p.get_content_type()
+                    cd = p.get("Content-Disposition", "")
+                    fn = p.get_filename()
+                    fn2 = p.get_param("name")  # 有些附件用 name 而非 filename
+                    log.info("    [%d] type=%s, disposition=%s, filename=%s, name=%s",
+                             pi, ct, cd[:60] if cd else "无", fn, fn2)
+
                 for part in msg.walk():
                     if part.get_content_maintype() == "multipart":
                         continue
 
+                    # 获取文件名：优先 get_filename()，备选 Content-Type 的 name 参数
                     filename = part.get_filename()
+                    if not filename:
+                        filename = part.get_param("name")
+                    if not filename:
+                        # 对于 application/octet-stream 等，尝试从 Content-ID 生成名字
+                        content_type = part.get_content_type()
+                        if content_type not in ("text/plain", "text/html", "multipart/mixed",
+                                                "multipart/alternative", "multipart/related"):
+                            content_id = part.get("Content-ID", "")
+                            if content_id:
+                                # 内嵌资源，用 Content-ID 作文件名
+                                cid = content_id.strip("<>").split("@")[0]
+                                ext_guess = {
+                                    "image/png": ".png", "image/jpeg": ".jpg",
+                                    "image/gif": ".gif", "image/bmp": ".bmp",
+                                    "application/pdf": ".pdf",
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                                    "application/vnd.ms-excel": ".xls",
+                                    "application/octet-stream": "",
+                                }.get(content_type, "")
+                                filename = f"{cid}{ext_guess}" if cid else None
+                            elif content_type.startswith("image/") or content_type == "application/pdf":
+                                # 无名附件，按类型给个默认名
+                                ext_guess = content_type.split("/")[-1].split(";")[0]
+                                filename = f"unnamed_attachment.{ext_guess}"
                     if not filename:
                         continue
 
