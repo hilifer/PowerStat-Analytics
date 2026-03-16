@@ -10,11 +10,7 @@ from typing import Optional
 from src.config_loader import config
 from src.data.models import Database
 from src.email_fetcher.fetcher import EmailFetcher, EmailAttachment
-from src.parsers.excel_parser import ExcelParser
 from src.parsers.multi_pass import MultiPassExtractor
-from src.parsers.pdf_parser import PDFParser
-from src.parsers.csv_parser import CSVParser
-from src.parsers.html_parser import HTMLParser
 from src.ocr.ocr_engine import OCREngine, OCRResult
 from src.archive.archiver import Archiver
 from src.visualization.charts import ChartGenerator
@@ -47,10 +43,6 @@ class SmartDispatcher:
     }
 
     def __init__(self):
-        self.excel_parser = ExcelParser()
-        self.pdf_parser = PDFParser()
-        self.csv_parser = CSVParser()
-        self.html_parser = HTMLParser()
         self.ocr_engine = OCREngine()
 
     def detect_type(self, filepath: str) -> str:
@@ -190,73 +182,6 @@ class SmartDispatcher:
             log.info("  加载 [%s] %s: %d 个 sheet", file_type.upper(), fname, len(sheets))
 
         return sheets
-
-    def process(self, filepath: str, source_info: dict = None) -> dict:
-        """智能处理单个文件，返回提取结果。
-
-        Returns:
-            {
-                "records": list[dict],      # 电表/抄表记录
-                "ocr_results": list[OCRResult],  # OCR 单价结果
-                "sub_files": list[str],     # 解压出的子文件路径
-            }
-        """
-        fname = Path(filepath).name
-
-        # 跳过 Office 临时锁文件（~$ 开头）
-        if fname.startswith("~$"):
-            log.debug("  跳过 Office 临时文件: %s", fname)
-            return {"records": [], "ocr_results": [], "sub_files": []}
-
-        file_type = self.detect_type(filepath)
-        log.info("  [%s] %s", file_type.upper(), fname)
-
-        result = {"records": [], "ocr_results": [], "sub_files": []}
-
-        try:
-            if file_type == "excel":
-                result["records"] = self.excel_parser.parse(filepath, source_info)
-
-            elif file_type == "pdf":
-                result["records"] = self.pdf_parser.parse(filepath, source_info)
-
-            elif file_type == "csv":
-                result["records"] = self.csv_parser.parse(filepath, source_info)
-
-            elif file_type == "image":
-                ocr = self.ocr_engine.extract_from_image(filepath, source_info)
-                if ocr.has_any_data():
-                    result["ocr_results"].append(ocr)
-                    # OCR 提取的电表记录也加入 records
-                    if ocr.meter_records:
-                        result["records"].extend(ocr.meter_records)
-
-            elif file_type in ("html", "text"):
-                result["records"] = self.html_parser.parse(filepath, source_info)
-
-            elif file_type == "zip":
-                result["sub_files"] = self._extract_zip(filepath)
-
-            elif file_type == "ole":
-                # 旧版 XLS 也走 Excel 解析
-                result["records"] = self.excel_parser.parse(filepath, source_info)
-
-            else:
-                # 未知类型：尝试当文本解析
-                log.info("    未知类型，尝试文本解析: %s", fname)
-                result["records"] = self.html_parser.parse(filepath, source_info)
-
-        except Exception as e:
-            log.error("    解析失败 [%s]: %s", fname, e, exc_info=True)
-
-        rec_count = len(result["records"])
-        ocr_count = len(result["ocr_results"])
-        sub_count = len(result["sub_files"])
-        if rec_count or ocr_count or sub_count:
-            log.info("    结果: %d 条记录, %d 条OCR, %d 个子文件",
-                     rec_count, ocr_count, sub_count)
-
-        return result
 
     def _extract_zip(self, filepath: str) -> list[str]:
         """解压 ZIP，返回内部文件路径列表。"""
@@ -650,18 +575,17 @@ class Pipeline:
 
     def _infer_project_for_file(self, att: EmailAttachment) -> Optional[str]:
         """推断文件对应的项目（从已有项目列表匹配，或从文件名提取）。"""
+        import re
         projects = self.db.get_projects()
         for proj in projects:
             if proj in att.filename or proj in att.email_subject:
                 return proj
 
-        # 从文件名提取项目名（复用 Excel 解析器的逻辑）
-        from src.parsers.excel_parser import ExcelParser
-        parser = ExcelParser()
+        # 从文件名提取项目名
         for text in [att.filename, att.email_subject]:
-            proj = parser._extract_project_from_text(text)
-            if proj:
-                return proj
+            m = re.search(r'([\u4e00-\u9fff]{2,10}(?:项目|电站|光伏))', text)
+            if m:
+                return m.group(1)
 
         return None
 
