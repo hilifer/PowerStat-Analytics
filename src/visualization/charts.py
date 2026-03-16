@@ -34,7 +34,8 @@ def _setup_chinese_font():
     candidates = [font_family] + fallback + ["WenQuanYi Micro Hei", "WenQuanYi Zen Hei", "Noto Sans CJK SC", "Noto Sans SC"]
     for font in candidates:
         if font in available:
-            plt.rcParams["font.sans-serif"] = [font]
+            plt.rcParams["font.family"] = "sans-serif"
+            plt.rcParams["font.sans-serif"] = [font, "DejaVu Sans"]
             plt.rcParams["axes.unicode_minus"] = False
             log.debug("使用字体: %s", font)
             return

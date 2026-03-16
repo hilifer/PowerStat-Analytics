@@ -626,8 +626,7 @@ class Pipeline:
                         for item in items[:3]:
                             log.warning("    - %s", item.get("issue", item))
 
-            # 导出图谱可视化和 JSON
-            self.knowledge_graph.export_graph_image()
+            # 导出 JSON（图片导出已禁用，spring_layout 太慢）
             self.knowledge_graph.export_json()
         except Exception as e:
             log.error("知识图谱构建失败: %s", e, exc_info=True)
