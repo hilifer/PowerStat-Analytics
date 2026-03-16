@@ -1,0 +1,231 @@
+{% extends "base.html" %}
+{% block title %}知识图谱 - PowerStat{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <span>知识图谱</span>
+</div>
+
+<h1 style="margin-bottom:1rem;">知识图谱</h1>
+
+<!-- 项目筛选 -->
+<form method="GET" action="{{ url_for('knowledge_graph') }}" class="filter-bar">
+    <div class="filter-group">
+        <label>项目</label>
+        <select name="project" class="auto-submit">
+            <option value="">全局视图</option>
+            {% for p in projects %}
+            <option value="{{ p }}" {% if sel_project == p %}selected{% endif %}>{{ p }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <button type="submit" class="btn btn-secondary btn-sm">刷新图谱</button>
+    <a href="{{ url_for('knowledge_graph') }}" class="btn btn-outline btn-sm">重置</a>
+</form>
+
+<!-- 统计卡片 -->
+<div class="stats-row" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1rem;margin:1.5rem 0;">
+    <div class="card stat-card" style="padding:1rem;text-align:center;">
+        <div style="font-size:2rem;font-weight:bold;color:var(--primary);">{{ stats.total_nodes }}</div>
+        <div style="font-size:0.85rem;color:var(--text-secondary);">总节点</div>
+    </div>
+    <div class="card stat-card" style="padding:1rem;text-align:center;">
+        <div style="font-size:2rem;font-weight:bold;color:var(--primary);">{{ stats.total_edges }}</div>
+        <div style="font-size:0.85rem;color:var(--text-secondary);">总关系</div>
+    </div>
+    <div class="card stat-card" style="padding:1rem;text-align:center;">
+        <div style="font-size:2rem;font-weight:bold;color:#e74c3c;">{{ stats.node_types.get('project', 0) }}</div>
+        <div style="font-size:0.85rem;color:var(--text-secondary);">项目</div>
+    </div>
+    <div class="card stat-card" style="padding:1rem;text-align:center;">
+        <div style="font-size:2rem;font-weight:bold;color:#3498db;">{{ stats.node_types.get('meter', 0) }}</div>
+        <div style="font-size:0.85rem;color:var(--text-secondary);">电表</div>
+    </div>
+    <div class="card stat-card" style="padding:1rem;text-align:center;">
+        <div style="font-size:2rem;font-weight:bold;color:#2ecc71;">{{ stats.node_types.get('user', 0) }}</div>
+        <div style="font-size:0.85rem;color:var(--text-secondary);">用户</div>
+    </div>
+    <div class="card stat-card" style="padding:1rem;text-align:center;">
+        <div style="font-size:2rem;font-weight:bold;color:#f39c12;">{{ stats.node_types.get('month', 0) }}</div>
+        <div style="font-size:0.85rem;color:var(--text-secondary);">月份</div>
+    </div>
+    <div class="card stat-card" style="padding:1rem;text-align:center;">
+        <div style="font-size:2rem;font-weight:bold;color:var(--text-secondary);">{{ stats.connected_components }}</div>
+        <div style="font-size:0.85rem;color:var(--text-secondary);">连通分量</div>
+    </div>
+</div>
+
+<!-- 图谱可视化 -->
+{% if graph_image %}
+<div class="card" style="padding:1rem;margin-bottom:1.5rem;">
+    <h2 style="margin-bottom:1rem;">关系图谱</h2>
+    <img src="{{ url_for('chart_image', filename=graph_image) }}" alt="知识图谱"
+         style="width:100%;border-radius:8px;" loading="lazy">
+</div>
+{% endif %}
+
+<!-- 异常检测 -->
+<div class="card" style="padding:1rem;margin-bottom:1.5rem;">
+    <h2 style="margin-bottom:1rem;">
+        数据异常检测
+        {% if anomalies.total_issues == 0 %}
+        <span style="font-size:0.85rem;color:#2ecc71;font-weight:normal;margin-left:0.5rem;">全部正常</span>
+        {% else %}
+        <span style="font-size:0.85rem;color:#e74c3c;font-weight:normal;margin-left:0.5rem;">{{ anomalies.total_issues }} 个异常</span>
+        {% endif %}
+    </h2>
+
+    {% set anomaly_sections = [
+        ('orphan_meters', '孤立电表', '缺少项目归属或用户关联'),
+        ('missing_prices', '缺少单价', '有读数但无对应单价记录'),
+        ('missing_readings', '读数缺失', '同项目其他电表有数据但此表缺失'),
+        ('reading_spikes', '电量突变', '环比变化超过阈值'),
+        ('multi_project_users', '跨项目用户', '同一用户关联了多个项目'),
+    ] %}
+
+    {% for key, title, desc in anomaly_sections %}
+    {% set items = anomalies.get(key, []) %}
+    {% if items %}
+    <div style="margin-bottom:1rem;">
+        <h3 style="font-size:1rem;color:#e74c3c;margin-bottom:0.5rem;">{{ title }} ({{ items|length }})</h3>
+        <p style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.5rem;">{{ desc }}</p>
+        <table class="data-table" style="font-size:0.85rem;">
+            <thead>
+                <tr>
+                    {% if 'meter' in items[0] %}<th>电表号</th>{% endif %}
+                    {% if 'month' in items[0] %}<th>月份</th>{% endif %}
+                    {% if 'project' in items[0] %}<th>项目</th>{% endif %}
+                    {% if 'user' in items[0] %}<th>用户</th>{% endif %}
+                    <th>问题描述</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in items[:20] %}
+                <tr>
+                    {% if 'meter' in item %}<td>{{ item.meter }}</td>{% endif %}
+                    {% if 'month' in item %}<td>{{ item.month }}</td>{% endif %}
+                    {% if 'project' in item %}<td>{{ item.project }}</td>{% endif %}
+                    {% if 'user' in item %}<td>{{ item.user }}</td>{% endif %}
+                    <td>{{ item.get('issue', item.get('issues', '')|join(', ')) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if items|length > 20 %}
+        <p style="font-size:0.8rem;color:var(--text-secondary);margin-top:0.5rem;">... 还有 {{ items|length - 20 }} 条</p>
+        {% endif %}
+    </div>
+    {% endif %}
+    {% endfor %}
+
+    {% if anomalies.total_issues == 0 %}
+    <p style="color:var(--text-secondary);">所有数据关系完整，未发现异常。</p>
+    {% endif %}
+</div>
+
+<!-- 项目排名 -->
+{% if ranking %}
+<div class="card" style="padding:1rem;margin-bottom:1.5rem;">
+    <h2 style="margin-bottom:1rem;">项目电量排名</h2>
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>排名</th>
+                <th>项目</th>
+                <th>电表数</th>
+                <th>总电量 (kWh)</th>
+                <th>数据月份</th>
+                <th>时间范围</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in ranking %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td><strong>{{ r.project }}</strong></td>
+                <td>{{ r.meter_count }}</td>
+                <td style="text-align:right;">{{ "{:,.2f}".format(r.total_kwh) }}</td>
+                <td>{{ r.month_count }}</td>
+                <td>{{ r.month_range }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<!-- 电表追溯 -->
+<div class="card" style="padding:1rem;margin-bottom:1.5rem;">
+    <h2 style="margin-bottom:1rem;">电表关系追溯</h2>
+    <div style="display:flex;gap:0.5rem;align-items:center;">
+        <input type="text" id="trace-meter-input" placeholder="输入电表号..."
+               style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;flex:1;max-width:300px;">
+        <button onclick="traceMeter()" class="btn btn-primary btn-sm">追溯</button>
+    </div>
+    <div id="trace-result" style="margin-top:1rem;"></div>
+</div>
+
+<div style="margin-top:1.5rem;">
+    <a href="{{ url_for('index') }}" class="btn btn-secondary">返回首页</a>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function traceMeter() {
+    const meter = document.getElementById('trace-meter-input').value.trim();
+    if (!meter) return;
+
+    const resultDiv = document.getElementById('trace-result');
+    resultDiv.innerHTML = '<p style="color:var(--text-secondary);">查询中...</p>';
+
+    fetch('/api/graph/trace/' + encodeURIComponent(meter))
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                resultDiv.innerHTML = '<p style="color:#e74c3c;">' + data.error + '</p>';
+                return;
+            }
+            let html = '<div style="background:var(--bg-secondary);padding:1rem;border-radius:8px;">';
+            html += '<h3 style="margin-bottom:0.5rem;">电表: ' + data.meter + '</h3>';
+            html += '<p>类型: ' + (data.meter_type || '未知') + ' | 倍率: ' + (data.multiplier || 1.0) + '</p>';
+            html += '<p>所属项目: ' + (data.projects && data.projects.length ? data.projects.join(', ') : '<span style="color:#e74c3c;">无</span>') + '</p>';
+            html += '<p>关联用户: ' + (data.users && data.users.length ? data.users.join(', ') : '<span style="color:#e74c3c;">无</span>') + '</p>';
+
+            if (data.readings && data.readings.length) {
+                html += '<h4 style="margin-top:1rem;">读数记录 (' + data.readings.length + ' 条)</h4>';
+                html += '<table class="data-table" style="font-size:0.85rem;"><thead><tr><th>月份</th><th>总电量</th><th>尖峰</th><th>峰</th><th>平</th><th>谷</th></tr></thead><tbody>';
+                data.readings.forEach(r => {
+                    html += '<tr><td>' + r.month + '</td><td>' + (r.total_kwh || 0).toFixed(1) + '</td>';
+                    html += '<td>' + (r.sharp_peak || 0).toFixed(1) + '</td><td>' + (r.peak || 0).toFixed(1) + '</td>';
+                    html += '<td>' + (r.flat || 0).toFixed(1) + '</td><td>' + (r.valley || 0).toFixed(1) + '</td></tr>';
+                });
+                html += '</tbody></table>';
+            }
+
+            if (data.prices && data.prices.length) {
+                html += '<h4 style="margin-top:1rem;">单价记录 (' + data.prices.length + ' 条)</h4>';
+                html += '<table class="data-table" style="font-size:0.85rem;"><thead><tr><th>月份</th><th>尖峰价</th><th>峰价</th><th>平价</th><th>谷价</th></tr></thead><tbody>';
+                data.prices.forEach(p => {
+                    html += '<tr><td>' + p.month + '</td>';
+                    html += '<td>' + (p.sharp_peak_price || '-') + '</td><td>' + (p.peak_price || '-') + '</td>';
+                    html += '<td>' + (p.flat_price || '-') + '</td><td>' + (p.valley_price || '-') + '</td></tr>';
+                });
+                html += '</tbody></table>';
+            }
+
+            html += '</div>';
+            resultDiv.innerHTML = html;
+        })
+        .catch(err => {
+            resultDiv.innerHTML = '<p style="color:#e74c3c;">请求失败: ' + err + '</p>';
+        });
+}
+
+document.getElementById('trace-meter-input').addEventListener('keypress', function(e) {
+    if (e.key === 'Enter') traceMeter();
+});
+</script>
+{% endblock %}

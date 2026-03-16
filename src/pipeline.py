@@ -17,6 +17,7 @@ from src.parsers.html_parser import HTMLParser
 from src.ocr.ocr_engine import OCREngine, OCRResult
 from src.archive.archiver import Archiver
 from src.visualization.charts import ChartGenerator
+from src.knowledge.graph import KnowledgeGraph
 from src.logger import log
 
 
@@ -230,6 +231,7 @@ class Pipeline:
         self.dispatcher = SmartDispatcher()
         self.archiver = Archiver(self.db)
         self.chart_gen = ChartGenerator(self.db)
+        self.knowledge_graph = KnowledgeGraph(self.db)
 
     def run_full(self, skip_fetch: bool = False, skip_viz: bool = False):
         """执行完整流程。"""
@@ -256,7 +258,10 @@ class Pipeline:
         # 4. 导出 CSV
         self.db.export_csv()
 
-        # 5. 生成图表
+        # 5. 构建知识图谱并检测异常
+        self._build_knowledge_graph()
+
+        # 6. 生成图表
         if not skip_viz:
             self._generate_visualizations()
 
@@ -416,9 +421,29 @@ class Pipeline:
             return att.email_subject
         return None
 
+    def _build_knowledge_graph(self):
+        """构建知识图谱并执行异常检测。"""
+        log.info("[阶段5] 构建知识图谱...")
+        try:
+            self.knowledge_graph.build()
+            anomalies = self.knowledge_graph.detect_anomalies()
+            if anomalies["total_issues"]:
+                log.warning("检测到 %d 个数据异常:", anomalies["total_issues"])
+                for category, items in anomalies.items():
+                    if isinstance(items, list) and items:
+                        log.warning("  %s: %d 个", category, len(items))
+                        for item in items[:3]:
+                            log.warning("    - %s", item.get("issue", item))
+
+            # 导出图谱可视化和 JSON
+            self.knowledge_graph.export_graph_image()
+            self.knowledge_graph.export_json()
+        except Exception as e:
+            log.error("知识图谱构建失败: %s", e, exc_info=True)
+
     def _generate_visualizations(self):
         """生成可视化图表。"""
-        log.info("[阶段4] 生成图表...")
+        log.info("[阶段6] 生成图表...")
         self.chart_gen.generate_all()
         for project in self.db.get_projects():
             self.chart_gen.generate_all(project_name=project)

@@ -447,6 +447,83 @@ def _register_routes(app: Flask, db: Database):
         flash(f"CSV 已导出到 {csv_dir}", "success")
         return redirect(url_for("index"))
 
+    # ---- 知识图谱 ----
+    @app.route("/graph")
+    def knowledge_graph():
+        project = request.args.get("project")
+        from src.knowledge.graph import KnowledgeGraph
+        kg = KnowledgeGraph(db)
+        kg.build()
+
+        stats = kg.get_stats()
+        anomalies = kg.detect_anomalies()
+        ranking = kg.get_project_ranking()
+        projects = db.get_projects()
+
+        # 生成图谱图片
+        graph_image = None
+        try:
+            path = kg.export_graph_image(project_name=project)
+            if path:
+                graph_image = Path(path).name
+        except Exception as e:
+            log.error("图谱可视化失败: %s", e)
+
+        return render_template("graph.html",
+                               stats=stats,
+                               anomalies=anomalies,
+                               ranking=ranking,
+                               projects=projects,
+                               sel_project=project,
+                               graph_image=graph_image)
+
+    # ---- 知识图谱 API：追溯电表 ----
+    @app.route("/api/graph/trace/<meter_number>")
+    def graph_trace(meter_number):
+        from src.knowledge.graph import KnowledgeGraph
+        kg = KnowledgeGraph(db)
+        kg.build()
+        return jsonify(kg.trace_meter(meter_number))
+
+    # ---- 知识图谱 API：项目网络 ----
+    @app.route("/api/graph/project/<project_name>")
+    def graph_project(project_name):
+        from src.knowledge.graph import KnowledgeGraph
+        kg = KnowledgeGraph(db)
+        kg.build()
+        return jsonify(kg.get_project_network(project_name))
+
+    # ---- 知识图谱 API：图谱 JSON（D3.js 用）----
+    @app.route("/api/graph/data")
+    def graph_data():
+        project = request.args.get("project")
+        from src.knowledge.graph import KnowledgeGraph
+        kg = KnowledgeGraph(db)
+        kg.build()
+
+        if project:
+            sub_nodes = kg._get_project_subgraph_nodes(project)
+            G = kg.G.subgraph(sub_nodes)
+        else:
+            G = kg.G
+
+        nodes = []
+        for nid, attrs in G.nodes(data=True):
+            nodes.append({
+                "id": nid,
+                "label": attrs.get("label", nid),
+                "type": attrs.get("type", "unknown"),
+            })
+        edges = []
+        for src, tgt, attrs in G.edges(data=True):
+            edges.append({
+                "source": src,
+                "target": tgt,
+                "relation": attrs.get("relation", ""),
+            })
+
+        return jsonify({"nodes": nodes, "edges": edges})
+
     # ---- CSV 文件下载 ----
     @app.route("/download-csv/<filename>")
     def download_csv(filename):

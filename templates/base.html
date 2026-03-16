@@ -18,6 +18,7 @@
             <li><a href="{{ url_for('bills') }}" class="{% if request.endpoint == 'bills' %}active{% endif %}">账单查询</a></li>
             <li><a href="{{ url_for('archive_index') }}" class="{% if request.endpoint == 'archive_index' %}active{% endif %}">归档浏览</a></li>
             <li><a href="{{ url_for('charts') }}" class="{% if request.endpoint == 'charts' %}active{% endif %}">可视化</a></li>
+            <li><a href="{{ url_for('knowledge_graph') }}" class="{% if request.endpoint == 'knowledge_graph' %}active{% endif %}">知识图谱</a></li>
             <li><a href="{{ url_for('processed_list') }}" class="{% if request.endpoint == 'processed_list' %}active{% endif %}">处理记录</a></li>
         </ul>
     </nav>

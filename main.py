@@ -8,6 +8,7 @@
     python main.py query         # 查询数据
     python main.py export        # 导出 CSV
     python main.py info          # 查看数据库统计
+    python main.py graph         # 知识图谱：构建、检测异常、可视化
 """
 
 import sys
@@ -174,6 +175,115 @@ def info():
             users = db.get_user_ids(project_name=p)
             meters = db.get_meters(project_name=p)
             console.print(f"  - {p}: {len(meters)} 块电表, {len(users)} 个用户")
+
+
+@cli.command()
+@click.option("--project", "-p", default=None, help="按项目筛选图谱")
+@click.option("--anomalies", "-a", is_flag=True, default=False, help="仅显示异常检测结果")
+@click.option("--trace", "-t", default=None, help="追溯指定电表号的完整关系链")
+@click.option("--export-json", "export_json", is_flag=True, default=False, help="导出图谱为 JSON")
+def graph(project, anomalies, trace, export_json):
+    """知识图谱：构建关系网络、检测数据异常、可视化。"""
+    db = Database()
+    from src.knowledge.graph import KnowledgeGraph
+    kg = KnowledgeGraph(db)
+
+    console.print("[bold cyan]构建知识图谱...[/]")
+    stats = kg.build()
+
+    # 图谱统计
+    stat_table = Table(title="知识图谱统计", show_lines=True)
+    stat_table.add_column("指标", style="bold")
+    stat_table.add_column("值", justify="right")
+
+    full_stats = kg.get_stats()
+    stat_table.add_row("总节点数", str(full_stats["total_nodes"]))
+    stat_table.add_row("总关系数", str(full_stats["total_edges"]))
+    for ntype, count in full_stats["node_types"].items():
+        stat_table.add_row(f"  {ntype} 节点", str(count))
+    for rtype, count in full_stats["edge_types"].items():
+        stat_table.add_row(f"  {rtype} 关系", str(count))
+    stat_table.add_row("连通分量数", str(full_stats["connected_components"]))
+    stat_table.add_row("最大分量大小", str(full_stats["largest_component_size"]))
+    stat_table.add_row("孤立节点数", str(full_stats["isolated_nodes"]))
+    console.print(stat_table)
+
+    # 追溯电表
+    if trace:
+        console.print(f"\n[bold]追溯电表: {trace}[/]")
+        info = kg.trace_meter(trace)
+        if "error" in info:
+            console.print(f"[red]{info['error']}[/]")
+        else:
+            console.print(f"  电表号: {info['meter']}")
+            console.print(f"  类型: {info.get('meter_type', '未知')}")
+            console.print(f"  倍率: {info.get('multiplier', 1.0)}")
+            console.print(f"  所属项目: {', '.join(info['projects']) or '无'}")
+            console.print(f"  关联用户: {', '.join(info['users']) or '无'}")
+            console.print(f"  读数月份: {len(info['readings'])} 条")
+            for r in info["readings"]:
+                console.print(f"    {r['month']}: {r['total_kwh']:.1f} kWh")
+            console.print(f"  单价记录: {len(info['prices'])} 条")
+        return
+
+    # 异常检测
+    console.print("\n[bold]数据异常检测...[/]")
+    anomaly_result = kg.detect_anomalies()
+
+    anomaly_names = {
+        "orphan_meters": "孤立电表（缺项目/用户）",
+        "missing_prices": "缺少单价记录",
+        "missing_readings": "缺少读数记录",
+        "reading_spikes": "电量异常突变",
+        "multi_project_users": "用户跨项目关联",
+    }
+
+    total = anomaly_result["total_issues"]
+    if total == 0:
+        console.print("[green]未检测到数据异常[/]")
+    else:
+        console.print(f"[yellow]检测到 {total} 个异常[/]")
+        for key, label in anomaly_names.items():
+            items = anomaly_result.get(key, [])
+            if items:
+                console.print(f"\n  [bold red]{label} ({len(items)})[/]")
+                for item in items[:10]:
+                    issue = item.get("issue", str(item))
+                    meter = item.get("meter", "")
+                    month = item.get("month", "")
+                    prefix = f"{meter} {month}" if meter else ""
+                    console.print(f"    - {prefix} {issue}")
+                if len(items) > 10:
+                    console.print(f"    ... 还有 {len(items) - 10} 条")
+
+    if not anomalies:
+        # 项目排名
+        ranking = kg.get_project_ranking()
+        if ranking:
+            console.print("\n")
+            rank_table = Table(title="项目电量排名", show_lines=True)
+            rank_table.add_column("项目", style="bold")
+            rank_table.add_column("电表数", justify="right")
+            rank_table.add_column("总电量 (kWh)", justify="right")
+            rank_table.add_column("数据月份", justify="right")
+            rank_table.add_column("时间范围")
+            for r in ranking:
+                rank_table.add_row(
+                    r["project"], str(r["meter_count"]),
+                    f"{r['total_kwh']:,.2f}", str(r["month_count"]),
+                    r["month_range"])
+            console.print(rank_table)
+
+        # 导出图谱图片
+        console.print("\n[bold cyan]导出知识图谱可视化...[/]")
+        path = kg.export_graph_image(project_name=project)
+        if path:
+            console.print(f"[green]图谱已保存: {path}[/]")
+
+    # 导出 JSON
+    if export_json:
+        json_path = kg.export_json()
+        console.print(f"[green]JSON 已导出: {json_path}[/]")
 
 
 if __name__ == "__main__":
