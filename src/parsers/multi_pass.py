@@ -126,16 +126,17 @@ class MultiPassExtractor:
         log.info("开始多轮扫描提取")
         log.info("=" * 50)
 
+        # ===== 固定数据（电表档案）=====
         # 第1轮：提取所有电表号
         self._pass1_meter_numbers()
         log.info("第1轮完成: 找到 %d 个电表", len(self.meters))
 
-        # 第2轮：提取资产编号
+        # 第2轮：提取资产编号 → 关联电表
         self._pass2_asset_numbers()
         linked_assets = sum(1 for m in self.meters.values() if m.get("asset_number"))
         log.info("第2轮完成: %d 个电表已关联资产编号", linked_assets)
 
-        # 第3轮：提取用户编号
+        # 第3轮：提取用户编号 → 关联电表
         self._pass3_user_ids()
         linked_users = sum(1 for m in self.meters.values() if m.get("user_id"))
         log.info("第3轮完成: %d 个电表已关联用户编号", linked_users)
@@ -145,12 +146,24 @@ class MultiPassExtractor:
         typed = sum(1 for m in self.meters.values() if m.get("meter_type") != "未知")
         log.info("第4轮完成: %d 个电表已确定类型", typed)
 
-        # 第5轮：提取读数
-        self._pass5_readings()
-        log.info("第5轮完成: %d 条读数记录", len(self.readings))
+        # 第5轮：提取倍率、折扣、项目名（都是固定属性）
+        self._pass5_fixed_attrs()
+        has_mult = sum(1 for m in self.meters.values() if m.get("multiplier"))
+        has_proj = sum(1 for m in self.meters.values() if m.get("project_name"))
+        log.info("第5轮完成: %d 有倍率, %d 有项目名", has_mult, has_proj)
 
-        # 第6轮：补充其他信息（倍率、折扣、项目名、月份）
-        self._pass6_extra_info()
+        # 合并短电表号
+        self._merge_short_meters()
+        log.info("电表档案建立完成: %d 个电表", len(self.meters))
+        for mn, info in self.meters.items():
+            log.info("  %s | 类型=%s | 资产=%s | 用户=%s | 倍率=%s | 项目=%s",
+                     mn, info.get("meter_type"), info.get("asset_number"),
+                     info.get("user_id"), info.get("multiplier"), info.get("project_name"))
+
+        # ===== 动态数据（月度读数）=====
+        # 第6轮：提取每月读数（尖峰平谷）
+        self._pass6_readings()
+        log.info("第6轮完成: %d 条读数记录", len(self.readings))
 
         # 组装最终记录
         return self._build_records()
@@ -456,9 +469,120 @@ class MultiPassExtractor:
                 elif has_rev and not has_fwd:
                     info["meter_type"] = "上网表"
 
-    # ========== 第5轮：提取读数 ==========
+    # ========== 第5轮：提取固定属性（倍率、折扣、项目名）==========
 
-    def _pass5_readings(self):
+    def _pass5_fixed_attrs(self):
+        """扫描所有文件，提取倍率、折扣、项目名等固定属性。"""
+        for df, filepath, sheet_name, source_info in self._sheets:
+            header_idx = self._find_header_row(df)
+            if header_idx is not None:
+                headers = [_cell_str(df.iloc[header_idx, c]) for c in range(len(df.columns))]
+                data_start = header_idx + 1
+            else:
+                headers = []
+                data_start = 0
+
+            # 找表头列
+            meter_cols = []
+            mult_col = None
+            disc_col = None
+            proj_col = None
+            for col_idx, hdr in enumerate(headers):
+                if (self._matches_any(hdr, self._meter_aliases) or
+                    self._matches_any(hdr, self._gen_aliases) or
+                    self._matches_any(hdr, self._grid_aliases)):
+                    meter_cols.append(col_idx)
+                if self._matches_any(hdr, self._multiplier_aliases):
+                    mult_col = col_idx
+                if self._matches_any(hdr, self._discount_aliases):
+                    disc_col = col_idx
+                if self._matches_any(hdr, self._project_aliases):
+                    proj_col = col_idx
+
+            # 从表格行提取
+            for row_idx in range(data_start, len(df)):
+                for mc in meter_cols:
+                    mn = clean_id(_cell_str(df.iloc[row_idx, mc]))
+                    if mn not in self.meters:
+                        continue
+                    info = self.meters[mn]
+                    if mult_col is not None and not info["multiplier"]:
+                        v = _to_float(df.iloc[row_idx, mult_col])
+                        if v and v >= 1:
+                            info["multiplier"] = v
+                    if disc_col is not None and not info["discount"]:
+                        v = _to_float(df.iloc[row_idx, disc_col])
+                        if v:
+                            info["discount"] = v
+                    if proj_col is not None and not info["project_name"]:
+                        v = _cell_str(df.iloc[row_idx, proj_col])
+                        if v and not re.match(r'^\d+$', v):
+                            info["project_name"] = v
+
+            # 标签-值模式
+            for row_idx in range(len(df)):
+                for col_idx in range(len(df.columns)):
+                    cell = _cell_str(df.iloc[row_idx, col_idx])
+                    if self._matches_any(cell, self._multiplier_aliases):
+                        val = _to_float(self._find_value_near(df, row_idx, col_idx))
+                        if val and val >= 1:
+                            nearest = self._find_nearest_meter(df, row_idx, col_idx)
+                            if nearest and not self.meters[nearest]["multiplier"]:
+                                self.meters[nearest]["multiplier"] = val
+                    elif self._matches_any(cell, self._discount_aliases):
+                        val_str = self._find_value_near(df, row_idx, col_idx)
+                        # 折扣可能是 "9折" 或 "0.9"
+                        m = re.search(r'(\d+\.?\d*)', val_str)
+                        if m:
+                            dv = float(m.group(1))
+                            if dv > 1:
+                                dv = dv / 10  # "9折" -> 0.9
+                            nearest = self._find_nearest_meter(df, row_idx, col_idx)
+                            if nearest and not self.meters[nearest]["discount"]:
+                                self.meters[nearest]["discount"] = dv
+                    elif self._matches_any(cell, self._project_aliases):
+                        val = self._find_value_near(df, row_idx, col_idx)
+                        if val and not re.match(r'^\d+$', val) and len(val) >= 2:
+                            nearest = self._find_nearest_meter(df, row_idx, col_idx)
+                            if nearest and not self.meters[nearest]["project_name"]:
+                                self.meters[nearest]["project_name"] = val
+
+            # 从文件名推断项目名
+            fname = filepath.name
+            for mn, info in self.meters.items():
+                if info["source_file"] == fname and not info["project_name"]:
+                    proj = self._extract_project_from_filename(fname)
+                    if proj:
+                        info["project_name"] = proj
+
+        # 同用户编号的电表共享项目名、倍率、折扣
+        by_user = {}
+        for mn, info in self.meters.items():
+            uid = info.get("user_id")
+            if uid:
+                by_user.setdefault(uid, []).append(mn)
+
+        for uid, meter_list in by_user.items():
+            # 找到该用户下有值的属性
+            proj = next((self.meters[mn]["project_name"] for mn in meter_list
+                         if self.meters[mn].get("project_name")), None)
+            mult = next((self.meters[mn]["multiplier"] for mn in meter_list
+                         if self.meters[mn].get("multiplier")), None)
+            disc = next((self.meters[mn]["discount"] for mn in meter_list
+                         if self.meters[mn].get("discount")), None)
+
+            for mn in meter_list:
+                info = self.meters[mn]
+                if not info["project_name"] and proj:
+                    info["project_name"] = proj
+                if not info["multiplier"] and mult:
+                    info["multiplier"] = mult
+                if not info["discount"] and disc:
+                    info["discount"] = disc
+
+    # ========== 第6轮：提取动态读数 ==========
+
+    def _pass6_readings(self):
         """扫描所有文件，为每个电表提取每月的尖峰平谷读数。"""
         for df, filepath, sheet_name, source_info in self._sheets:
             header_idx = self._find_header_row(df)
@@ -756,87 +880,11 @@ class MultiPassExtractor:
 
     # ========== 第6轮：补充信息 ==========
 
-    def _pass6_extra_info(self):
-        """补充倍率、折扣、项目名等额外信息。"""
-        for df, filepath, sheet_name, source_info in self._sheets:
-            header_idx = self._find_header_row(df)
-            if header_idx is not None:
-                headers = [_cell_str(df.iloc[header_idx, c]) for c in range(len(df.columns))]
-                data_start = header_idx + 1
-            else:
-                headers = []
-                data_start = 0
-
-            # 从表格行提取
-            meter_cols = []
-            mult_col = None
-            disc_col = None
-            proj_col = None
-            for col_idx, hdr in enumerate(headers):
-                if (self._matches_any(hdr, self._meter_aliases) or
-                    self._matches_any(hdr, self._gen_aliases) or
-                    self._matches_any(hdr, self._grid_aliases)):
-                    meter_cols.append(col_idx)
-                if self._matches_any(hdr, self._multiplier_aliases):
-                    mult_col = col_idx
-                if self._matches_any(hdr, self._discount_aliases):
-                    disc_col = col_idx
-                if self._matches_any(hdr, self._project_aliases):
-                    proj_col = col_idx
-
-            for row_idx in range(data_start, len(df)):
-                for mc in meter_cols:
-                    mn = clean_id(_cell_str(df.iloc[row_idx, mc]))
-                    if mn not in self.meters:
-                        continue
-                    info = self.meters[mn]
-                    if mult_col is not None and not info["multiplier"]:
-                        v = _to_float(df.iloc[row_idx, mult_col])
-                        if v and v >= 1:
-                            info["multiplier"] = v
-                    if disc_col is not None and not info["discount"]:
-                        v = _to_float(df.iloc[row_idx, disc_col])
-                        if v:
-                            info["discount"] = v
-                    if proj_col is not None and not info["project_name"]:
-                        v = _cell_str(df.iloc[row_idx, proj_col])
-                        if v and not re.match(r'^\d+$', v):
-                            info["project_name"] = v
-
-            # 标签-值模式提取倍率、折扣、项目名
-            for row_idx in range(len(df)):
-                for col_idx in range(len(df.columns)):
-                    cell = _cell_str(df.iloc[row_idx, col_idx])
-                    if self._matches_any(cell, self._multiplier_aliases):
-                        val = _to_float(self._find_value_near(df, row_idx, col_idx))
-                        if val and val >= 1:
-                            nearest = self._find_nearest_meter(df, row_idx, col_idx)
-                            if nearest and not self.meters[nearest]["multiplier"]:
-                                self.meters[nearest]["multiplier"] = val
-                    elif self._matches_any(cell, self._project_aliases):
-                        val = self._find_value_near(df, row_idx, col_idx)
-                        if val and not re.match(r'^\d+$', val) and len(val) >= 2:
-                            nearest = self._find_nearest_meter(df, row_idx, col_idx)
-                            if nearest and not self.meters[nearest]["project_name"]:
-                                self.meters[nearest]["project_name"] = val
-
-            # 从文件名推断项目名
-            fname = filepath.name
-            for mn, info in self.meters.items():
-                if info["source_file"] == fname and not info["project_name"]:
-                    # 尝试从文件名提取项目名
-                    proj = self._extract_project_from_filename(fname)
-                    if proj:
-                        info["project_name"] = proj
-
     # ========== 组装最终记录 ==========
 
     def _build_records(self) -> list[dict]:
         """把 meters + readings 组装成最终记录列表。"""
         records = []
-
-        # 先去重：短号合并到长号
-        self._merge_short_meters()
 
         # 有读数的电表
         for (meter_number, month), reading in self.readings.items():
