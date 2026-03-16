@@ -92,6 +92,7 @@ class KnowledgeGraph:
                 FROM monthly_readings r
                 JOIN meters m ON r.meter_id = m.id
             """).fetchall()
+            rows = [dict(r) for r in rows]
 
         for r in rows:
             meter_id = f"meter:{r['meter_number']}"
@@ -99,17 +100,18 @@ class KnowledgeGraph:
 
             self.G.add_node(month_id, type="month", label=r["reading_month"])
             self.G.add_edge(meter_id, month_id, relation="有读数",
-                            sharp_peak=r["sharp_peak"],
-                            peak=r["peak"],
-                            flat=r["flat"],
-                            valley=r["valley"],
-                            total_kwh=r["total_kwh"],
+                            sharp_peak=r.get("sharp_peak"),
+                            peak=r.get("peak"),
+                            flat=r.get("flat"),
+                            valley=r.get("valley"),
+                            total_kwh=r.get("total_kwh"),
                             source_file=r.get("source_file", ""))
 
     def _add_prices(self):
         """添加单价边：user → month。"""
         with self.db.connection() as conn:
             rows = conn.execute("SELECT * FROM price_records").fetchall()
+            rows = [dict(r) for r in rows]
 
         for r in rows:
             user_id = f"user:{r['user_id']}"

@@ -128,7 +128,44 @@ class Database:
     def _init_schema(self):
         with self.connection() as conn:
             conn.executescript(SCHEMA_SQL)
+            self._migrate(conn)
             log.info("数据库初始化完成: %s", self.db_path)
+
+    def _migrate(self, conn):
+        """兼容旧数据库：确保必要的 UNIQUE 约束存在。"""
+        # 检查 meters.meter_number 是否有 UNIQUE 约束
+        indexes = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='meters'"
+        ).fetchall()
+        index_names = {row[0] for row in indexes}
+
+        # sqlite 自动为 UNIQUE 列创建名为 sqlite_autoindex_meters_1 的索引
+        has_unique = any("autoindex" in name or "meter_number" in name for name in index_names)
+        if not has_unique:
+            log.warning("检测到旧数据库，正在迁移: 重建 meters 表以添加 UNIQUE 约束...")
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS meters_new (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    meter_number    TEXT NOT NULL UNIQUE,
+                    asset_number    TEXT,
+                    user_id         TEXT,
+                    meter_type      TEXT NOT NULL DEFAULT '未知',
+                    multiplier      REAL DEFAULT 1.0,
+                    project_name    TEXT,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT OR IGNORE INTO meters_new
+                    (id, meter_number, asset_number, user_id, meter_type, multiplier, project_name, created_at, updated_at)
+                    SELECT id, meter_number, asset_number, user_id, meter_type, multiplier, project_name, created_at, updated_at
+                    FROM meters;
+                DROP TABLE meters;
+                ALTER TABLE meters_new RENAME TO meters;
+            """)
+            # 重建索引
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_meters_user_id ON meters(user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_meters_project ON meters(project_name)")
+            log.info("meters 表迁移完成")
 
     @contextmanager
     def connection(self):
