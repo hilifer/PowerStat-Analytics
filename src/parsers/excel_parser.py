@@ -92,7 +92,7 @@ class ExcelParser:
 
         # 第一遍：全表扫描提取元信息（用户号、配对关系、项目名等）
         meta = self._scan_meta_info(df, sheet_name, filepath)
-        log.debug("  元信息: %s", {k: v for k, v in meta.items() if v})
+        log.info("  元信息: %s", {k: v for k, v in meta.items() if v})
 
         # 策略1：检测转置表（行=正有功尖峰/峰/平/谷，如发电统计表）
         transposed = self._try_parse_transposed_table(df, sheet_name, filepath, source_info, meta)
@@ -102,16 +102,28 @@ class ExcelParser:
         # 策略2：标准横向表（找到表头行后解析数据行）
         header_row_idx = self._find_header_row(df)
         if header_row_idx is not None:
+            log.info("  策略2: 找到表头行 %d", header_row_idx)
             results = self._parse_standard_table(df, header_row_idx, sheet_name, filepath, source_info, meta)
             if results:
                 return results
+            log.info("  策略2: 标准表解析返回空")
+        else:
+            log.info("  策略2: 未找到表头行")
 
         # 策略3：纵向卡片格式（标签-值配对）
         card_records = self._try_parse_card_layout(df, sheet_name, filepath, source_info, meta)
         if card_records:
             return card_records
 
-        log.debug("  Sheet '%s' 未能提取有效数据", sheet_name)
+        log.warning("  Sheet '%s' 三种策略均未能提取有效数据 (rows=%d, cols=%d)",
+                     sheet_name, len(df), len(df.columns))
+        # 打印前几行帮助调试
+        for i in range(min(8, len(df))):
+            row_vals = [str(df.iloc[i, j]).strip() for j in range(min(12, len(df.columns)))
+                        if df.iloc[i, j] is not None and not pd.isna(df.iloc[i, j])
+                        and str(df.iloc[i, j]).strip()]
+            if row_vals:
+                log.warning("    行%d: %s", i, " | ".join(row_vals[:8]))
         return []
 
     def _parse_standard_table(self, df: pd.DataFrame, header_row_idx: int,
@@ -246,6 +258,7 @@ class ExcelParser:
 
         # 从右侧列提取卡片信息（用户号/发电表号/上网表号等）
         card_info = self._extract_card_from_side_columns(df, meta)
+        log.info("  转置表卡片信息: %s", {k: v for k, v in card_info.items() if v})
 
         # 找到数据列组：正向数据和反向数据
         # 扫描表头区域确定列分组
@@ -322,6 +335,9 @@ class ExcelParser:
 
         # 发电表记录（正向数据）
         gen_meter = card_info.get("gen_meter")
+        # 兜底：从 meta 获取电表号
+        if not gen_meter and meta.get("gen_meters"):
+            gen_meter = list(meta["gen_meters"].keys())[0]
         if gen_meter and any(v is not None for v in forward_readings.values()):
             rec = {**base,
                    "meter_number": gen_meter,
@@ -338,6 +354,8 @@ class ExcelParser:
 
         # 上网表记录（反向数据）
         grid_meter = card_info.get("grid_meter")
+        if not grid_meter and meta.get("grid_meters"):
+            grid_meter = list(meta["grid_meters"].keys())[0]
         if grid_meter and any(v is not None for v in reverse_readings.values()):
             rec = {**base,
                    "meter_number": grid_meter,
@@ -380,8 +398,13 @@ class ExcelParser:
 
         if results:
             log.info("  转置表提取 [%s]: %d 条记录", sheet_name, len(results))
+            return results
 
-        return results
+        # 转置表格式检测到了但未提取到记录 → 不阻塞其他策略
+        log.info("  转置表格式检测到但未提取到有效记录 (gen=%s, grid=%s, meter=%s, fwd_data=%s)",
+                 gen_meter, grid_meter, card_info.get("meter_number"),
+                 any(v is not None for v in forward_readings.values()))
+        return []  # 返回空让其他策略尝试
 
     def _extract_card_from_side_columns(self, df: pd.DataFrame, meta: dict) -> dict:
         """从表格右侧列提取卡片式电表信息。
@@ -1031,13 +1054,23 @@ class ExcelParser:
 
         has_paired = has_gen or has_grid
 
-        # 如果没有任何电表号列 → 跳过
+        # 如果没有任何电表号列 → 尝试自动检测
         if not has_primary and not has_paired:
-            log.debug("  Sheet '%s' 缺少电表号列，跳过", sheet_name)
-            return []
+            auto_col = self._auto_detect_meter_column(df)
+            if auto_col is not None:
+                col_map["meter_number"] = auto_col
+                has_primary = True
+                log.info("  自动检测到电表号列: '%s'", auto_col)
+            else:
+                # 如果 meta 里有电表号，作为全表共用
+                if meta and (meta.get("gen_meters") or meta.get("grid_meters")):
+                    log.info("  Sheet '%s' 无电表号列，但有元信息电表号，尝试用元信息补充", sheet_name)
+                else:
+                    log.info("  Sheet '%s' 缺少电表号列，跳过 (映射: %s)", sheet_name, col_map)
+                    return []
 
-        log.debug("  列映射: %s", col_map)
-        log.debug("  模式: primary=%s, gen=%s, grid=%s, asset_as_meter=%s",
+        log.info("  列映射: %s", col_map)
+        log.info("  模式: primary=%s, gen=%s, grid=%s, asset_as_meter=%s",
                    has_primary, has_gen, has_grid,
                    has_asset and col_map.get("meter_number") == col_map.get("asset_number"))
 
@@ -1054,6 +1087,39 @@ class ExcelParser:
         self._enrich_with_meta(results, meta)
 
         return results
+
+    def _auto_detect_meter_column(self, df: pd.DataFrame) -> Optional[str]:
+        """自动检测哪一列可能是电表号（当配置的别名匹配不到时）。
+
+        扫描数据行，找包含≥6位纯数字且长度合理的列。
+        """
+        import re
+        candidates = {}  # col_name -> count_of_valid_values
+
+        for col in df.columns:
+            count = 0
+            for idx in range(min(len(df), 15)):
+                val = df.iloc[idx][col]
+                if val is None or pd.isna(val):
+                    continue
+                val_str = str(val).strip()
+                # 去除 .0 后缀
+                val_str = re.sub(r'\.0+$', '', val_str)
+                # 电表号特征：6-20位纯数字或字母数字
+                if re.match(r'^[0-9A-Za-z\-\.]{6,20}$', val_str) and not re.search(r'[\u4e00-\u9fff]', val_str):
+                    # 排除像日期的（2026-01）
+                    if re.match(r'^\d{4}-\d{2}$', val_str):
+                        continue
+                    count += 1
+            if count >= 2:
+                candidates[col] = count
+
+        if candidates:
+            # 选匹配数最多的列
+            best = max(candidates, key=candidates.get)
+            log.info("  自动检测电表号列候选: %s", {str(k): v for k, v in candidates.items()})
+            return best
+        return None
 
     def _map_columns(self, columns: list[str]) -> dict:
         """将 DataFrame 列名映射到标准字段名。
