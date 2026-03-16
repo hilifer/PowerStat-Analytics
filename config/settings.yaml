@@ -15,11 +15,12 @@ email:
 
   # 邮件过滤规则
   filter:
-    # 发件人或主题须包含以下任一关键词
-    subject_keywords: ["电费"]
-    sender_keywords: ["电费"]
-    # 收件人须包含
-    recipient_keywords: ["曹先生"]
+    # 发件人须包含以下任一（邮箱地址或名称）
+    sender_keywords: ["2355279143@qq.com", "2355279143"]
+    # 主题须包含以下任一关键词
+    subject_keywords: ["电费", "电量", "抄表", "电表", "电力"]
+    # 收件人过滤（留空不过滤）
+    recipient_keywords: []
     # 拉取邮件的时间范围（可选，留空则拉取全部）
     since_date: null  # 格式: "2024-01-01"
     before_date: null
@@ -148,7 +149,7 @@ visualization:
 
 # --- 日志设置 ---
 logging:
-  level: "DEBUG"
+  level: "INFO"
   log_file: "logs/powerstat.log"
   max_size_mb: 10
   backup_count: 5

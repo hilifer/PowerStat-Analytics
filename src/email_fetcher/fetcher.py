@@ -71,33 +71,34 @@ def _parse_date(msg: Message) -> Optional[datetime]:
 def _matches_filter(msg: Message, filter_cfg: dict) -> bool:
     """判断邮件是否符合过滤规则。
 
-    匹配逻辑：
-    1. 主题/发件人关键词：主题或发件人中包含任一关键词即可
-    2. 收件人关键词：收件人(To/Cc)或主题或发件人中包含即可
-       （因为很多邮件的"曹先生"可能出现在主题而非收件人字段）
+    匹配逻辑（AND 关系）：
+    1. sender_keywords 非空时：发件人(From)或收件人(To/Cc)中须包含任一关键词
+    2. subject_keywords 非空时：主题或正文摘要中须包含任一关键词
+    3. recipient_keywords 非空时：收件人/主题/发件人中须包含任一关键词
+    所有非空条件须同时满足。
     """
     subject = _decode_header_value(msg.get("Subject", ""))
     sender = _decode_header_value(msg.get("From", ""))
     to_addr = _decode_header_value(msg.get("To", ""))
     cc_addr = _decode_header_value(msg.get("Cc", ""))
-    recipients = f"{to_addr} {cc_addr}"
+    all_addresses = f"{sender} {to_addr} {cc_addr}"
+    all_text = f"{subject} {all_addresses}"
 
-    # 将所有文本合并用于宽松匹配
-    all_text = f"{subject} {sender} {recipients}"
-
-    subject_kw = filter_cfg.get("subject_keywords", [])
     sender_kw = filter_cfg.get("sender_keywords", [])
+    subject_kw = filter_cfg.get("subject_keywords", [])
     recipient_kw = filter_cfg.get("recipient_keywords", [])
 
-    # 发件人或主题中须包含关键词
-    subject_match = any(kw in subject for kw in subject_kw) if subject_kw else True
-    sender_match = any(kw in sender for kw in sender_kw) if sender_kw else True
-    keyword_match = subject_match or sender_match
+    # 条件1: 发件人/收件人地址须匹配（锁定特定邮箱）
+    if sender_kw:
+        if not any(kw.lower() in all_addresses.lower() for kw in sender_kw):
+            return False
 
-    if not keyword_match:
-        return False
+    # 条件2: 主题须包含电费相关关键词
+    if subject_kw:
+        if not any(kw in subject for kw in subject_kw):
+            return False
 
-    # 收件人关键词：在收件人、主题、发件人中任意位置出现即可
+    # 条件3: 收件人关键词（可选）
     if recipient_kw:
         if not any(kw in all_text for kw in recipient_kw):
             return False
