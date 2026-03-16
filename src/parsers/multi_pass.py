@@ -84,6 +84,7 @@ class MultiPassExtractor:
         self._sheets = []
         self.meters = {}     # meter_number -> {asset, user_id, type, ...}
         self.readings = {}   # (meter_number, month) -> {sharp_peak, peak, flat, valley, total}
+        self.pairs = []      # [(gen_meter_number, grid_meter_number)]
 
     def load_dataframes(self, sheets: list):
         self._sheets = sheets
@@ -153,21 +154,37 @@ class MultiPassExtractor:
                         meter_cols.append((c, None))
                         has_meter_col = True
 
-                # 从电表号列提取电表，同时同行关联最近的资产编号列
+                # 为每个电表列找最近的资产列
+                meter_asset_map = {}  # mc -> nearest_ac
                 for mc, mtype in meter_cols:
-                    # 找距离此电表列最近的资产列（优先右侧相邻列，表头通常是 电表号|资产编号）
-                    nearest_ac = min(asset_cols, key=lambda ac: (abs(ac - mc), -ac)) if asset_cols else None
-                    for r in range(header_idx + 1, len(df)):
+                    if asset_cols:
+                        meter_asset_map[mc] = min(asset_cols, key=lambda ac: (abs(ac - mc), -ac))
+
+                # 按行提取：同一行的发电表和上网表自动配对
+                for r in range(header_idx + 1, len(df)):
+                    row_gen = None
+                    row_grid = None
+                    for mc, mtype in meter_cols:
                         val = clean_id(_cell_str(df.iloc[r, mc]))
-                        if is_valid_meter_number(val):
-                            self._register_meter(val, filepath.name, sheet_name, mtype)
-                            # 同行最近资产编号
-                            if nearest_ac is not None:
-                                av = clean_id(_cell_str(df.iloc[r, nearest_ac]))
-                                if av and len(av) >= 4 and not _CHINESE_RE.search(av):
-                                    if not self.meters[val]["asset_number"]:
-                                        self.meters[val]["asset_number"] = av
-                                        asset_count += 1
+                        if not is_valid_meter_number(val):
+                            continue
+                        self._register_meter(val, filepath.name, sheet_name, mtype)
+                        # 同行最近资产编号
+                        nearest_ac = meter_asset_map.get(mc)
+                        if nearest_ac is not None:
+                            av = clean_id(_cell_str(df.iloc[r, nearest_ac]))
+                            if av and len(av) >= 4 and not _CHINESE_RE.search(av):
+                                if not self.meters[val]["asset_number"]:
+                                    self.meters[val]["asset_number"] = av
+                                    asset_count += 1
+                        # 记录配对
+                        if mtype == "发电表":
+                            row_gen = val
+                        elif mtype == "上网表":
+                            row_grid = val
+                    # 同行配对
+                    if row_gen and row_grid:
+                        self.pairs.append((row_gen, row_grid))
 
                 # 无电表号列时，资产编号列当电表号
                 if not has_meter_col:
@@ -743,6 +760,32 @@ class MultiPassExtractor:
                 existing["total_kwh"] = total
 
     def _build_records(self) -> list[dict]:
+        # 构建配对索引：meter_number -> paired_meter_number
+        pair_map = {}
+        for gen, grid in self.pairs:
+            pair_map.setdefault(gen, grid)
+            pair_map.setdefault(grid, gen)
+
+        # 配对电表共享用户编号和项目名
+        for gen, grid in self.pairs:
+            gen_info = self.meters.get(gen, {})
+            grid_info = self.meters.get(grid, {})
+            # 传递用户编号
+            if gen_info.get("user_id") and not grid_info.get("user_id"):
+                grid_info["user_id"] = gen_info["user_id"]
+            elif grid_info.get("user_id") and not gen_info.get("user_id"):
+                gen_info["user_id"] = grid_info["user_id"]
+            # 传递项目名
+            if gen_info.get("project_name") and not grid_info.get("project_name"):
+                grid_info["project_name"] = gen_info["project_name"]
+            elif grid_info.get("project_name") and not gen_info.get("project_name"):
+                gen_info["project_name"] = grid_info["project_name"]
+
+        if self.pairs:
+            log.info("  配对关系: %d 对", len(self.pairs))
+            for gen, grid in self.pairs[:5]:
+                log.info("    发电表 %s ↔ 上网表 %s", gen, grid)
+
         records = []
         for (mn, month), reading in self.readings.items():
             if mn not in self.meters:
@@ -756,6 +799,7 @@ class MultiPassExtractor:
                 "multiplier": info.get("multiplier"),
                 "discount": info.get("discount"),
                 "project_name": info.get("project_name"),
+                "paired_meter": pair_map.get(mn),
                 "reading_month": month,
                 "sharp_peak": reading.get("sharp_peak"),
                 "peak": reading.get("peak"),
@@ -778,6 +822,7 @@ class MultiPassExtractor:
                     "multiplier": info.get("multiplier"),
                     "discount": info.get("discount"),
                     "project_name": info.get("project_name"),
+                    "paired_meter": pair_map.get(mn),
                     "reading_month": "unknown",
                     "source_file": info.get("source_file"),
                     "source_sheet": info.get("source_sheet"),

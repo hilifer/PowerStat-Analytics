@@ -478,7 +478,7 @@ class Pipeline:
                 by_user.setdefault(uid, []).append(m)
 
         # 从 all_records 收集配对关系和跨文件信息
-        pairs = []        # (gen_meter, grid_meter)
+        pairs = []        # (meter, paired_meter)
         file_meters = {}  # source_file -> [meter_number]
         file_project = {} # source_file -> project_name
         file_user = {}    # source_file -> user_id
@@ -496,13 +496,10 @@ class Pipeline:
             if rec.get("discount") and rec["discount"] != 1.0:
                 file_discount[sf] = rec["discount"]
 
-            # 配对关系
-            gen = rec.get("gen_meter_number", "").strip()
-            grid = rec.get("grid_meter_number", "").strip()
-            if gen and mn and gen != mn:
-                pairs.append((gen, mn))
-            if grid and mn and grid != mn:
-                pairs.append((mn, grid))
+            # 配对关系（由 multi_pass 提取器产出）
+            paired = rec.get("paired_meter", "").strip() if rec.get("paired_meter") else ""
+            if paired and mn and paired != mn:
+                pairs.append((mn, paired))
 
         updates_count = 0
 
