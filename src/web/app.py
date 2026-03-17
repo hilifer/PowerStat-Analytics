@@ -131,7 +131,30 @@ def _register_routes(app: Flask, db: Database):
                                processed_count=processed_count,
                                refresh_status=refresh_status)
 
-    # ---- 强制刷新（增量重新解析：清除处理记录，UPSERT 补全数据） ----
+    # ---- 全部更新（清空所有数据，从头开始） ----
+    @app.route("/full-reset", methods=["POST"])
+    def full_reset():
+        """清空所有电表、抄表、单价、处理记录，删除已下载附件，然后重新抓取。"""
+        with db.connection() as conn:
+            conn.execute("DELETE FROM monthly_readings")
+            conn.execute("DELETE FROM price_records")
+            conn.execute("DELETE FROM meters")
+            conn.execute("DELETE FROM processed_emails")
+            log.info("全部更新：已清空所有数据表")
+
+        # 删除已下载的附件文件
+        temp_dir = Path(config.get("attachments", "temp_dir",
+                                   default="output/temp_attachments"))
+        if temp_dir.exists():
+            import shutil
+            shutil.rmtree(str(temp_dir), ignore_errors=True)
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            log.info("全部更新：已清空附件目录 %s", temp_dir)
+
+        flash("已清空所有数据和下载文件，正在从头抓取邮件…", "warning")
+        return redirect(url_for("refresh_emails"))
+
+    # ---- 增量更新（只下载新邮件，UPSERT 补全数据） ----
     @app.route("/force-refresh", methods=["POST"])
     def force_refresh():
         """清除已处理邮件记录，重新解析所有邮件。
@@ -141,8 +164,8 @@ def _register_routes(app: Flask, db: Database):
         """
         with db.connection() as conn:
             conn.execute("DELETE FROM processed_emails")
-            log.info("强制刷新：已清除处理记录，将增量重新解析所有邮件")
-        flash("已清除处理记录，正在增量重新解析所有邮件（已有数据不会丢失）…", "info")
+            log.info("增量更新：已清除处理记录，将重新解析所有邮件")
+        flash("已清除处理记录，正在增量更新（已有数据不会丢失，只做更新和新增）…", "info")
         return redirect(url_for("refresh_emails"))
 
     # ---- 刷新邮件（带防重复） ----
