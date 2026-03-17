@@ -26,10 +26,15 @@ QQ邮箱(IMAP) → 附件下载 → 解析引擎 → SQLite数据库 → 归档/
 ### Web 界面（推荐）
 
 ```bash
-# 一键安装依赖
-bash setup.sh
+# 创建虚拟环境并激活
+python3 -m venv venv
+source venv/bin/activate
+
+# 安装依赖
+pip install -r requirements.txt
 
 # 配置邮箱（编辑 .env）
+cp .env.example .env   # 如已有 .env 可跳过
 vim .env
 
 # 启动 Web 服务
@@ -38,6 +43,8 @@ python run_web.py --port 5000
 # 浏览器打开
 # http://localhost:5000
 ```
+
+> **提示**：后续每次使用前需先激活虚拟环境：`source venv/bin/activate`
 
 启动后即可在浏览器中操作，**无需提前运行 `main.py fetch`**。
 首页仪表盘提供「增量更新」和「全部更新」按钮，可直接在页面上触发邮件抓取和数据解析。
@@ -54,6 +61,8 @@ python run_web.py --port 5000
 ### 命令行
 
 ```bash
+# 确保已激活虚拟环境（见上方步骤）
+
 # 抓取邮件并处理
 python main.py fetch
 
