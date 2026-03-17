@@ -9,6 +9,7 @@ import email.header
 import imaplib
 import os
 import re
+import socket
 import time
 import zipfile
 from datetime import datetime
@@ -137,17 +138,40 @@ class EmailFetcher:
 
     def connect(self):
         """连接到 IMAP 服务器。"""
+        # 空凭据提前报错，不要浪费时间尝试连接
+        if (not self.account or self.account.startswith("${")
+                or not self.auth_code or self.auth_code.startswith("${")):
+            raise ConnectionError(
+                "邮箱凭据未配置。请在项目根目录创建 .env 文件并设置:\n"
+                "  EMAIL_ACCOUNT=your_email@qq.com\n"
+                "  EMAIL_AUTH_CODE=your_auth_code"
+            )
+
         log.info("正在连接 IMAP 服务器 %s:%d ...", self.server, self.port)
+        timeout = 15  # 秒
         retries = 3
         for attempt in range(retries):
             try:
-                if self.use_ssl:
-                    self._conn = imaplib.IMAP4_SSL(self.server, self.port)
-                else:
-                    self._conn = imaplib.IMAP4(self.server, self.port)
+                # 设置 socket 超时，防止无限等待
+                prev_timeout = socket.getdefaulttimeout()
+                socket.setdefaulttimeout(timeout)
+                try:
+                    if self.use_ssl:
+                        self._conn = imaplib.IMAP4_SSL(self.server, self.port)
+                    else:
+                        self._conn = imaplib.IMAP4(self.server, self.port)
+                finally:
+                    socket.setdefaulttimeout(prev_timeout)
+
                 self._conn.login(self.account, self.auth_code)
                 log.info("IMAP 登录成功: %s", self.account)
                 return
+            except (socket.timeout, TimeoutError) as e:
+                log.error("IMAP 连接超时 (尝试 %d/%d): %s", attempt + 1, retries, e)
+                if attempt < retries - 1:
+                    time.sleep(2 ** (attempt + 1))
+                else:
+                    raise ConnectionError(f"连接邮箱超时（{timeout}秒），请检查网络和服务器配置") from e
             except imaplib.IMAP4.error as e:
                 log.error("IMAP 登录失败 (尝试 %d/%d): %s", attempt + 1, retries, e)
                 if attempt < retries - 1:
