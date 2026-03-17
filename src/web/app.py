@@ -154,18 +154,15 @@ def _register_routes(app: Flask, db: Database):
         flash("已清空所有数据和下载文件，正在从头抓取邮件…", "warning")
         return redirect(url_for("refresh_emails"))
 
-    # ---- 增量更新（只下载新邮件，UPSERT 补全数据） ----
-    @app.route("/force-refresh", methods=["POST"])
-    def force_refresh():
-        """清除已处理邮件记录，重新解析所有邮件。
+    # ---- 增量更新（只下载未处理的新邮件） ----
+    @app.route("/incremental-refresh", methods=["POST"])
+    def incremental_refresh():
+        """增量更新：只下载没有下载过的邮件，跳过已处理的。
 
-        已有电表数据不会被删除，UPSERT 逻辑会补全缺失字段。
-        锁定的电表不受影响。
+        已有电表数据不会被删除，新数据通过 UPSERT 补全。
         """
-        with db.connection() as conn:
-            conn.execute("DELETE FROM processed_emails")
-            log.info("增量更新：已清除处理记录，将重新解析所有邮件")
-        flash("已清除处理记录，正在增量更新（已有数据不会丢失，只做更新和新增）…", "info")
+        log.info("增量更新：只下载未处理的新邮件")
+        flash("正在增量更新，只下载新邮件…", "info")
         return redirect(url_for("refresh_emails"))
 
     # ---- 刷新邮件（带防重复） ----
