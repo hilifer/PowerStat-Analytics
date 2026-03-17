@@ -95,6 +95,9 @@ class MultiPassExtractor:
         log.info("开始多轮扫描提取（笨方法）")
         log.info("=" * 50)
 
+        # === 预扫描：配对电表块 ===
+        self._pass0_paired_blocks()
+
         # === 固定数据 ===
         self._pass1_meters_and_assets()
         self._pass2_user_ids()
@@ -116,6 +119,217 @@ class MultiPassExtractor:
         log.info("读数提取完成: %d 条记录", len(self.readings))
 
         return self._build_records()
+
+    # ================================================================
+    # 预扫描：配对电表块识别（统计表中的用户号+发电表+上网表块）
+    # ================================================================
+
+    # 块内标签正则：兼容两种格式
+    # 格式1（表格型）: 单元格内容 = "用户号"，相邻单元格 = 值
+    # 格式2（文本型）: 单元格内容 = "用电户号0950000088133431" 或 "发电表号：XXX"
+    _BLOCK_LABEL_PATTERNS = [
+        # (字段名, 正则, 组号)
+        ("user_id", re.compile(
+            r'(?:用户编号|用户号|用电户号|户号|客户编号)\s*[:：]?\s*(\d{6,20})'), 1),
+        ("gen_meter", re.compile(
+            r'(?:发电表号?|发电电表号?|发电表表号)\s*[:：]?\s*(\d{6,16})'), 1),
+        ("grid_meter", re.compile(
+            r'(?:上网表号?|上网电表号?|上网电表)\s*[:：]?\s*(\d{6,16})'), 1),
+        ("gen_asset", re.compile(
+            r'(?:发电表?资产编号?|发电资产[号产]?|发电表资产)\s*[:：]?\s*([0-9A-Za-z]{8,30})'), 1),
+        ("grid_asset", re.compile(
+            r'(?:上网表?资产[号产表]?|上网电表资产表?|上网表资产)\s*[:：]?\s*([0-9A-Za-z]{8,30})'), 1),
+        ("multiplier", re.compile(
+            r'(?:倍率|CT倍率|变比)\s*[:：]?\s*(\d+\.?\d*)'), 1),
+    ]
+
+    # 哪些标签关键字标识块内各字段（用于格式1的 label-then-value 模式）
+    _BLOCK_LABEL_KW = {
+        "user_id":     ["用户编号", "用户号", "用电户号", "户号", "客户编号"],
+        "gen_meter":   ["发电表号", "发电电表号", "发电表", "发电表表号"],
+        "grid_meter":  ["上网表号", "上网电表号", "上网电表", "上网表"],
+        "gen_asset":   ["发电表资产编号", "发电表资产", "发电资产号", "发电资产产号"],
+        "grid_asset":  ["上网表资产号", "上网表资产产", "上网表资产", "上网电表资产表", "上网电表资产"],
+        "multiplier":  ["倍率", "CT倍率", "变比"],
+    }
+
+    def _pass0_paired_blocks(self):
+        """预扫描：识别统计表中用户号+发电表+上网表配对块。
+
+        支持两种格式：
+        格式1（表格型）：标签在一个单元格，值在相邻单元格
+        格式2（文本型）：标签和值在同一单元格内（如"用电户号0950000088133431"）
+
+        配对块的特征：在一个较小区域（约10行内）同时出现用户号、发电表号、上网表号。
+        """
+        log.info("[预扫描] 识别配对电表块...")
+        block_count = 0
+
+        for df, filepath, sheet_name, source_info in self._sheets:
+            # 收集所有标签命中：(row, field_name, value)
+            hits = []
+
+            for r in range(len(df)):
+                for c in range(len(df.columns)):
+                    cell = _cell_str(df.iloc[r, c])
+                    if not cell:
+                        continue
+
+                    # 策略A：内嵌格式（标签+值在同一单元格）
+                    for field_name, pattern, grp in self._BLOCK_LABEL_PATTERNS:
+                        m = pattern.search(cell)
+                        if m:
+                            hits.append((r, field_name, m.group(grp)))
+                            break  # 一个单元格只取第一个匹配
+
+                    # 策略B：标签单元格（纯标签，值在右侧或下方）
+                    # 用最长关键字匹配，避免 "上网表资产产" 被 "上网表" 先匹配到 grid_meter
+                    best_field, best_kw_len = None, 0
+                    for field_name, kws in self._BLOCK_LABEL_KW.items():
+                        for kw in kws:
+                            if cell.strip() == kw:
+                                kw_len = len(kw) + 1000  # 精确匹配最优
+                            elif kw in cell and len(cell) <= len(kw) + 3:
+                                kw_len = len(kw)
+                            else:
+                                continue
+                            if kw_len > best_kw_len:
+                                best_kw_len = kw_len
+                                best_field = field_name
+                    if best_field:
+                        val = self._find_value_near(df, r, c)
+                        if val:
+                            if best_field in ("user_id",) and re.match(r'^\d{6,20}$', val):
+                                hits.append((r, best_field, val))
+                            elif best_field in ("gen_meter", "grid_meter") and _is_meter_like(val):
+                                hits.append((r, best_field, val))
+                            elif best_field in ("gen_asset", "grid_asset") and len(val) >= 8 and not _CHINESE_RE.search(val):
+                                hits.append((r, best_field, val))
+                            elif best_field == "multiplier":
+                                fv = _to_float(val)
+                                if fv and fv >= 1:
+                                    hits.append((r, best_field, val))
+
+                    # 策略C：处理 "上网表7月新装09001SG..." 这类非标准标签
+                    m = re.search(r'(?:上网表|发电表)\d{1,2}月新装\s*[:：]?\s*([0-9A-Za-z]{8,30})', cell)
+                    if m:
+                        # 判断是上网还是发电
+                        if "上网" in cell:
+                            hits.append((r, "grid_asset", m.group(1)))
+                        elif "发电" in cell:
+                            hits.append((r, "gen_asset", m.group(1)))
+
+            if not hits:
+                continue
+
+            # 按行排序
+            hits.sort(key=lambda x: x[0])
+
+            # 用滑动窗口聚合块：在10行范围内的命中归为一个块
+            blocks = self._cluster_hits_into_blocks(hits, max_gap=10)
+
+            # 提取项目名：目录路径 → sheet标题 → 文件名
+            project_name = (self._extract_project_from_path(filepath)
+                            or self._extract_project_from_sheet_title(df)
+                            or self._extract_project_from_filename(filepath.name))
+
+            for block in blocks:
+                user_id = block.get("user_id")
+                gen_meter = block.get("gen_meter")
+                grid_meter = block.get("grid_meter")
+                gen_asset = block.get("gen_asset")
+                grid_asset = block.get("grid_asset")
+                multiplier_str = block.get("multiplier")
+                multiplier = _to_float(multiplier_str) if multiplier_str else None
+
+                # 必须至少有一个电表号才有意义
+                if not gen_meter and not grid_meter:
+                    continue
+
+                block_count += 1
+
+                # 注册发电表
+                if gen_meter and is_valid_meter_number(gen_meter):
+                    self._register_meter(gen_meter, filepath.name, sheet_name, "发电表")
+                    info = self.meters[gen_meter]
+                    if gen_asset and not info["asset_number"]:
+                        info["asset_number"] = gen_asset
+                    if user_id and not info["user_id"]:
+                        info["user_id"] = user_id
+                    if multiplier and not info["multiplier"]:
+                        info["multiplier"] = multiplier
+                    if project_name and not info["project_name"]:
+                        info["project_name"] = project_name
+
+                # 注册上网表
+                if grid_meter and is_valid_meter_number(grid_meter):
+                    self._register_meter(grid_meter, filepath.name, sheet_name, "上网表")
+                    info = self.meters[grid_meter]
+                    if grid_asset and not info["asset_number"]:
+                        info["asset_number"] = grid_asset
+                    if user_id and not info["user_id"]:
+                        info["user_id"] = user_id
+                    if multiplier and not info["multiplier"]:
+                        info["multiplier"] = multiplier
+                    if project_name and not info["project_name"]:
+                        info["project_name"] = project_name
+
+                # 配对
+                if gen_meter and grid_meter and is_valid_meter_number(gen_meter) and is_valid_meter_number(grid_meter):
+                    self.pairs.append((gen_meter, grid_meter))
+                    log.info("  配对块: 用户=%s 发电表=%s 上网表=%s 项目=%s",
+                             user_id, gen_meter, grid_meter, project_name)
+
+        log.info("  预扫描发现 %d 个配对块", block_count)
+
+    def _cluster_hits_into_blocks(self, hits: list, max_gap: int = 10) -> list[dict]:
+        """将按行排序的命中项聚合为块。同一块内行间距不超过 max_gap。"""
+        blocks = []
+        current_block = {}
+        current_max_row = -999
+
+        for row, field, value in hits:
+            if row - current_max_row > max_gap and current_block:
+                # 开始新块
+                blocks.append(current_block)
+                current_block = {}
+
+            # 同一字段取第一个值（不覆盖）
+            if field not in current_block:
+                current_block[field] = value
+            current_max_row = max(current_max_row, row)
+
+        if current_block:
+            blocks.append(current_block)
+
+        return blocks
+
+    def _extract_project_from_path(self, filepath) -> Optional[str]:
+        """从文件路径的目录名提取项目名称。
+
+        遍历路径的各级目录，查找包含中文的目录名作为项目名。
+        跳过常见非项目目录（temp、archive、output 等）。
+        """
+        try:
+            p = Path(filepath) if not isinstance(filepath, Path) else filepath
+            skip_dirs = {"temp", "tmp", "archive", "output", "data", "temp_attachments",
+                         "attachments", "uploads", "download", "downloads", "charts",
+                         "logs", "config", "src", "test", "tests"}
+
+            # 从内到外遍历目录
+            for parent in p.parents:
+                dirname = parent.name
+                if not dirname or dirname in skip_dirs:
+                    continue
+                # 目录名包含中文 → 可能是项目名
+                if _CHINESE_RE.search(dirname):
+                    # 进一步清理：去掉日期后缀等
+                    proj = re.sub(r'\d{4}[-_]\d{1,2}[-_]?\d{0,2}', '', dirname).strip(" -_")
+                    if proj and len(proj) >= 2:
+                        return proj
+        except Exception:
+            pass
+        return None
 
     # ================================================================
     # 第1轮：提取电表号 + 资产编号
@@ -216,11 +430,11 @@ class MultiPassExtractor:
                         if is_valid_meter_number(val):
                             self._register_meter(val, filepath.name, sheet_name, mtype)
 
-                    # 内嵌格式："电表号：12345678"
+                    # 内嵌格式："电表号：12345678" 或 "发电表号0950050038124235"
                     for pattern, mtype in [
-                        (r'(?:电表号|表号|电能表号|表计编号)\s*[:：]\s*(\d{8,16})', None),
-                        (r'(?:发电表号?|发电电表号?)\s*[:：]\s*(\d{8,16})', "发电表"),
-                        (r'(?:上网表号?|上网电表号?)\s*[:：]\s*(\d{8,16})', "上网表"),
+                        (r'(?:电表号|表号|电能表号|表计编号)\s*[:：]?\s*(\d{8,16})', None),
+                        (r'(?:发电表号?|发电电表号?|发电表表号)\s*[:：]?\s*(\d{8,16})', "发电表"),
+                        (r'(?:上网表号?|上网电表号?|上网电表)\s*[:：]?\s*(\d{8,16})', "上网表"),
                     ]:
                         m = re.search(pattern, cell)
                         if m:
@@ -283,8 +497,8 @@ class MultiPassExtractor:
                             self.meters[nearest]["user_id"] = val
                             count += 1
 
-                    # 内嵌格式
-                    m = re.search(r'(?:用户编号|用户号|户号|用电户号)\s*[:：]\s*(\d{6,20})', cell)
+                    # 内嵌格式（兼容冒号可选）
+                    m = re.search(r'(?:用户编号|用户号|户号|用电户号)\s*[:：]?\s*(\d{6,20})', cell)
                     if m:
                         uid = m.group(1)
                         sheet_users.add(uid)
@@ -489,8 +703,10 @@ class MultiPassExtractor:
                                 self.meters[nearest]["project_name"] = val
                                 count += 1
 
-            # C. 项目名兜底：从文件名提取
-            proj = self._extract_project_from_filename(filepath.name)
+            # C. 项目名兜底：目录路径 → sheet标题 → 文件名
+            proj = (self._extract_project_from_path(filepath)
+                    or self._extract_project_from_sheet_title(df)
+                    or self._extract_project_from_filename(filepath.name))
             if proj:
                 for mn, info in self.meters.items():
                     if info["source_file"] == filepath.name and not info["project_name"]:
@@ -1052,6 +1268,39 @@ class MultiPassExtractor:
                 return d.strftime("%Y-%m")
         return "unknown"
 
+    def _extract_project_name(self, text: str) -> Optional[str]:
+        """从文本中提取项目名称（如 "特旺光伏项目"）。
+
+        处理: "2025年4月特旺光伏项目发电统计表" -> "特旺光伏项目"
+        排除: "月" 等日期字符被捕获到项目名开头
+        """
+        # 先用带排除的正则
+        m = re.search(r'(?:[\d月日])([\u4e00-\u9fff]{2,10}(?:项目|电站|光伏))', text)
+        if m:
+            proj = m.group(1)
+            # 去除开头的日期相关字符
+            proj = proj.lstrip('年月日号')
+            if len(proj) >= 2:
+                return proj
+        # 兜底：通用匹配
+        m = re.search(r'([\u4e00-\u9fff]{2,10}(?:项目|电站|光伏))', text)
+        if m:
+            proj = m.group(1).lstrip('年月日号')
+            if len(proj) >= 2:
+                return proj
+        return None
+
     def _extract_project_from_filename(self, filename: str) -> Optional[str]:
-        m = re.search(r'([\u4e00-\u9fff]{2,10}(?:项目|电站|光伏))', filename)
-        return m.group(1) if m else None
+        return self._extract_project_name(filename)
+
+    def _extract_project_from_sheet_title(self, df) -> Optional[str]:
+        """从 sheet 前几行的标题中提取项目名。"""
+        for r in range(min(5, len(df))):
+            for c in range(min(5, len(df.columns))):
+                cell = _cell_str(df.iloc[r, c])
+                if not cell or len(cell) < 4:
+                    continue
+                proj = self._extract_project_name(cell)
+                if proj:
+                    return proj
+        return None
