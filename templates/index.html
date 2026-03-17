@@ -56,11 +56,92 @@ function confirmFullReset() {
 <!-- 刷新进度（JS 控制显示） -->
 <div class="refresh-panel" id="refreshStatus"
      style="{% if not refresh_status.running %}display:none;{% endif %}">
-    <div class="spinner" id="refreshSpinner"></div>
-    <div class="refresh-info" id="refreshProgress">
-        {{ refresh_status.progress if refresh_status.running else "" }}
+    <div style="display:flex; align-items:center; gap:0.5rem; margin-bottom:0.5rem;">
+        <div class="spinner" id="refreshSpinner"></div>
+        <strong id="refreshProgress">
+            {{ refresh_status.progress if refresh_status.running else "" }}
+        </strong>
+    </div>
+    <div id="refreshLogs"
+         style="background:#f8f9fa; border:1px solid #dee2e6; border-radius:6px;
+                padding:0.75rem; max-height:300px; overflow-y:auto;
+                font-family:monospace; font-size:0.85rem; line-height:1.6; color:#333;">
+        {% if refresh_status.logs %}
+            {% for line in refresh_status.logs %}
+                <div>{{ line }}</div>
+            {% endfor %}
+        {% endif %}
     </div>
 </div>
+
+<script>
+(function() {
+    var panel = document.getElementById('refreshStatus');
+    var progress = document.getElementById('refreshProgress');
+    var logsDiv = document.getElementById('refreshLogs');
+    var spinner = document.getElementById('refreshSpinner');
+    var running = {{ 'true' if refresh_status.running else 'false' }};
+    var timer = null;
+
+    function poll() {
+        fetch('/api/refresh-status')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.running) {
+                    panel.style.display = '';
+                    progress.textContent = data.progress || '处理中…';
+                    spinner.style.display = '';
+
+                    // 渲染日志
+                    if (data.logs && data.logs.length) {
+                        logsDiv.innerHTML = data.logs.map(function(l) {
+                            return '<div>' + escapeHtml(l) + '</div>';
+                        }).join('');
+                        logsDiv.scrollTop = logsDiv.scrollHeight;
+                    }
+
+                    running = true;
+                } else if (running) {
+                    // 刚结束，显示最终状态后刷新页面
+                    spinner.style.display = 'none';
+                    progress.textContent = data.progress || '完成';
+                    if (data.logs && data.logs.length) {
+                        logsDiv.innerHTML = data.logs.map(function(l) {
+                            return '<div>' + escapeHtml(l) + '</div>';
+                        }).join('');
+                        logsDiv.scrollTop = logsDiv.scrollHeight;
+                    }
+                    running = false;
+                    clearInterval(timer);
+                    setTimeout(function() { location.reload(); }, 2000);
+                }
+            })
+            .catch(function() {});
+    }
+
+    function escapeHtml(s) {
+        var d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    if (running || panel.style.display !== 'none') {
+        timer = setInterval(poll, 1000);
+    }
+
+    // 点击更新按钮后也启动轮询
+    document.querySelectorAll('form[action*="refresh"], form[action*="reset"]').forEach(function(f) {
+        f.addEventListener('submit', function() {
+            panel.style.display = '';
+            spinner.style.display = '';
+            progress.textContent = '正在启动…';
+            logsDiv.innerHTML = '';
+            running = true;
+            if (!timer) timer = setInterval(poll, 1000);
+        });
+    });
+})();
+</script>
 
 <!-- 统计卡片 -->
 <div class="stats-grid">

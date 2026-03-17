@@ -46,6 +46,8 @@ def create_app() -> Flask:
         "progress": "",
         "last_run": None,
         "result": None,
+        "logs": [],          # 详细进度日志列表
+        "started_at": None,  # 任务开始时间
     }
 
     _register_routes(app, db)
@@ -178,6 +180,14 @@ def _register_routes(app: Flask, db: Database):
         status["running"] = True
         status["progress"] = "正在连接邮箱…"
         status["result"] = None
+        status["logs"] = []
+        status["started_at"] = datetime.now().strftime("%H:%M:%S")
+
+        def _log(msg):
+            """追加一条带时间戳的进度日志。"""
+            ts = datetime.now().strftime("%H:%M:%S")
+            status["logs"].append(f"[{ts}] {msg}")
+            status["progress"] = msg
 
         def _do_refresh():
             try:
@@ -187,12 +197,14 @@ def _register_routes(app: Flask, db: Database):
                 from src.parsers.text_extractor import extract_meters_from_text, read_text_file
                 import re, shutil
 
-                status["progress"] = "正在连接邮箱并搜索邮件…"
+                _log("正在连接邮箱并搜索邮件…")
                 with EmailFetcher() as fetcher:
                     attachments = fetcher.fetch_attachments()
 
+                _log(f"搜索完成，共找到 {len(attachments)} 个附件")
+
                 if not attachments:
-                    status["progress"] = "完成"
+                    _log("没有新附件，完成")
                     status["result"] = {"new": 0, "skipped": 0, "meters_added": 0}
                     status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     return
@@ -218,7 +230,7 @@ def _register_routes(app: Flask, db: Database):
                         continue
 
                     new_attachments.append((att, fp, date_str))
-                    status["progress"] = f"加载 {i}/{len(attachments)}: {att.filename}"
+                    _log(f"加载附件 [{i}/{len(attachments)}] {att.filename}")
                     source_info = {
                         "email_date": att.email_date,
                         "email_subject": att.email_subject,
@@ -264,7 +276,7 @@ def _register_routes(app: Flask, db: Database):
                                 queue.append((sf, sinfo))
 
                 # 第二步：多轮扫描提取
-                status["progress"] = f"多轮扫描提取 ({len(all_sheets)} 个sheet)…"
+                _log(f"开始多轮扫描提取（共 {len(all_sheets)} 个 sheet，{len(new_attachments)} 个新附件，跳过 {skipped} 个已处理）")
                 extractor = MultiPassExtractor()
                 extractor.load_dataframes(all_sheets)
                 all_records = extractor.extract_all()
@@ -274,7 +286,7 @@ def _register_routes(app: Flask, db: Database):
                     all_records.extend(all_text_records)
 
                 # 第三步：入库
-                status["progress"] = "写入数据库…"
+                _log(f"提取到 {len(all_records)} 条记录，开始写入数据库…")
                 for rec in all_records:
                     meter_number = rec.get("meter_number", "").strip()
                     if not meter_number:
@@ -325,7 +337,12 @@ def _register_routes(app: Flask, db: Database):
                         except Exception as e:
                             log.error("单价入库失败: %s", e)
 
+                _log(f"入库完成，写入 {meters_added} 条电表记录")
+                if all_ocr:
+                    _log(f"写入 {len(all_ocr)} 条 OCR 单价记录")
+
                 # 归档
+                _log(f"归档 {len(new_attachments)} 个新附件…")
                 for att, fp, date_str in new_attachments:
                     if not att.is_body:
                         reading_month = None
@@ -356,12 +373,14 @@ def _register_routes(app: Flask, db: Database):
                     new_count += 1
 
                 # 推理补全缺失数据
-                status["progress"] = "推理补全缺失数据…"
+                _log("推理补全缺失数据…")
                 db.infer_missing_data()
 
                 # 清理数据不全的电表
-                status["progress"] = "清理数据不全的电表…"
+                _log("清理数据不全的电表…")
                 cleaned = db.cleanup_incomplete_meters()
+                if cleaned:
+                    _log(f"已清理 {cleaned} 个数据不全的电表")
 
                 status["result"] = {
                     "new": new_count,
@@ -369,12 +388,12 @@ def _register_routes(app: Flask, db: Database):
                     "meters_added": meters_added,
                     "cleaned": cleaned,
                 }
-                status["progress"] = "完成"
+                _log(f"全部完成！新增 {new_count} 个附件，跳过 {skipped} 个，写入 {meters_added} 条记录")
                 status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             except Exception as e:
                 log.error("刷新失败: %s", e, exc_info=True)
-                status["progress"] = f"错误: {e}"
+                _log(f"错误: {e}")
                 status["result"] = {"error": str(e)}
             finally:
                 status["running"] = False
