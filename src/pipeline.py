@@ -11,6 +11,7 @@ from src.config_loader import config
 from src.data.models import Database
 from src.email_fetcher.fetcher import EmailFetcher, EmailAttachment
 from src.parsers.multi_pass import MultiPassExtractor
+from src.parsers.text_extractor import extract_meters_from_text, read_text_file
 from src.ocr.ocr_engine import OCREngine, OCRResult
 from src.archive.archiver import Archiver
 from src.visualization.charts import ChartGenerator
@@ -332,6 +333,7 @@ class Pipeline:
 
         all_sheets = []   # [(df, filepath, sheet_name, source_info), ...]
         all_ocr = []
+        all_text_records = []  # 文本文件提取的电表记录
 
         # 待处理队列（支持递归解压）
         queue = [(att.filepath, {
@@ -363,6 +365,15 @@ class Pipeline:
                 except Exception as e:
                     log.error("  OCR 失败: %s", e)
 
+            # 文本文件尝试提取电表档案信息
+            if file_type in ("text", "unknown") or (file_type in ("html",) and not sheets):
+                try:
+                    text = read_text_file(filepath)
+                    text_records = extract_meters_from_text(text, filepath)
+                    all_text_records.extend(text_records)
+                except Exception as e:
+                    log.error("  文本提取失败 [%s]: %s", filepath, e)
+
             # 压缩包解压后加入队列
             if file_type == "zip":
                 sub_files = self.dispatcher._extract_zip(filepath)
@@ -375,6 +386,11 @@ class Pipeline:
         extractor = MultiPassExtractor()
         extractor.load_dataframes(all_sheets)
         all_records = extractor.extract_all()
+
+        # 合并文本文件提取的记录
+        if all_text_records:
+            log.info("文本提取: %d 条电表记录", len(all_text_records))
+            all_records.extend(all_text_records)
 
         # 写入数据库
         self._save_records(all_records)

@@ -164,6 +164,7 @@ def _register_routes(app: Flask, db: Database):
                 from src.email_fetcher.fetcher import EmailFetcher
                 from src.pipeline import SmartDispatcher
                 from src.parsers.multi_pass import MultiPassExtractor
+                from src.parsers.text_extractor import extract_meters_from_text, read_text_file
                 import re, shutil
 
                 status["progress"] = "正在连接邮箱并搜索邮件…"
@@ -183,6 +184,7 @@ def _register_routes(app: Flask, db: Database):
                 dispatcher = SmartDispatcher()
                 all_sheets = []
                 all_ocr = []
+                all_text_records = []
                 new_attachments = []
 
                 # 第一步：加载所有文件为 DataFrame
@@ -226,6 +228,15 @@ def _register_routes(app: Flask, db: Database):
                             except Exception as e:
                                 log.error("  OCR 失败: %s", e)
 
+                        # 文本文件提取电表档案
+                        if file_type in ("text", "unknown") or (file_type == "html" and not sheets):
+                            try:
+                                text = read_text_file(fpath)
+                                text_records = extract_meters_from_text(text, fpath)
+                                all_text_records.extend(text_records)
+                            except Exception as e:
+                                log.error("  文本提取失败: %s", e)
+
                         # 压缩包
                         if file_type == "zip":
                             sub_files = dispatcher._extract_zip(fpath)
@@ -237,6 +248,10 @@ def _register_routes(app: Flask, db: Database):
                 extractor = MultiPassExtractor()
                 extractor.load_dataframes(all_sheets)
                 all_records = extractor.extract_all()
+
+                # 合并文本提取的记录
+                if all_text_records:
+                    all_records.extend(all_text_records)
 
                 # 第三步：入库
                 status["progress"] = "写入数据库…"
