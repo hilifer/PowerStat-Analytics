@@ -499,6 +499,39 @@ def _register_routes(app: Flask, db: Database):
         flash(f"CSV 已导出到 {csv_dir}", "success")
         return redirect(url_for("index"))
 
+    # ---- 新建电表页面 ----
+    @app.route("/meters/create", methods=["GET", "POST"])
+    def meter_create():
+        if request.method == "POST":
+            data = request.form.to_dict()
+            meter_number = data.get("meter_number", "").strip()
+            if not meter_number:
+                flash("电表号不能为空", "danger")
+                return redirect(url_for("meter_create"))
+            try:
+                multiplier = float(data.get("multiplier") or 1.0)
+                discount = float(data.get("discount") or 1.0)
+                meter_id = db.create_meter(
+                    meter_number=meter_number,
+                    user_id=data.get("user_id", "").strip() or None,
+                    meter_type=data.get("meter_type", "未知"),
+                    asset_number=data.get("asset_number", "").strip() or None,
+                    multiplier=multiplier,
+                    discount=discount,
+                    project_name=data.get("project_name", "").strip() or None,
+                )
+                flash(f"电表 {meter_number} 创建成功", "success")
+                return redirect(url_for("meter_detail", meter_id=meter_id))
+            except ValueError as e:
+                flash(str(e), "danger")
+                return redirect(url_for("meter_create"))
+            except Exception as e:
+                flash(f"创建失败: {e}", "danger")
+                return redirect(url_for("meter_create"))
+
+        projects = db.get_projects()
+        return render_template("meter_create.html", projects=projects)
+
     # ---- 电表编辑页面 ----
     @app.route("/meters/<int:meter_id>/edit")
     def meter_edit(meter_id):
@@ -575,6 +608,18 @@ def _register_routes(app: Flask, db: Database):
 
         return jsonify({"success": True, "count": count,
                         "message": f"已{'锁定' if action == 'lock' else '解锁'} {count} 个电表"})
+
+    # ---- 电表删除 API ----
+    @app.route("/api/meters/<meter_number>/delete", methods=["POST"])
+    def meter_delete_api(meter_number):
+        meter = db.get_meter(meter_number)
+        if not meter:
+            return jsonify({"error": f"电表 {meter_number} 不存在"}), 404
+        ok = db.delete_meter(meter_number)
+        if ok:
+            return jsonify({"success": True, "message": f"电表 {meter_number} 已删除"})
+        else:
+            return jsonify({"error": "删除失败"}), 500
 
     # ---- 电表详情 API ----
     @app.route("/api/meters/<meter_number>")

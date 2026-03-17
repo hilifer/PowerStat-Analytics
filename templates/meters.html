@@ -8,7 +8,10 @@
     <span>电表管理</span>
 </div>
 
-<h1 style="margin-bottom:1rem;">电表管理</h1>
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem;">
+    <h1 style="margin:0;">电表管理</h1>
+    <a href="{{ url_for('meter_create') }}" class="btn btn-primary">新建电表</a>
+</div>
 
 <!-- 筛选栏 -->
 <form method="GET" action="{{ url_for('meters_list') }}" class="filter-bar">
@@ -69,7 +72,10 @@
                     </td>
                     <td class="num">{{ m.multiplier }}</td>
                     <td>{{ m.project_name or '-' }}</td>
-                    <td><a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="btn btn-outline btn-sm">详情</a></td>
+                    <td style="white-space:nowrap;">
+                        <a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="btn btn-outline btn-sm">详情</a>
+                        <button class="btn btn-danger btn-sm" onclick="deleteMeter('{{ m.meter_number }}')">删除</button>
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -82,4 +88,22 @@
     <a href="{{ url_for('index') }}" class="btn btn-primary">返回首页刷新邮件</a>
 </div>
 {% endif %}
+
+<script>
+function deleteMeter(meterNumber) {
+    if (!confirm('确定要删除电表 ' + meterNumber + ' 吗？\n\n该操作将同时删除该电表的所有抄表记录，且不可恢复！')) {
+        return;
+    }
+    fetch('/api/meters/' + meterNumber + '/delete', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (d.success) {
+                location.reload();
+            } else {
+                alert(d.error || '删除失败');
+            }
+        })
+        .catch(e => alert('请求失败: ' + e));
+}
+</script>
 {% endblock %}

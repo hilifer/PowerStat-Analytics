@@ -406,6 +406,54 @@ class Database:
         # 删除旧短号记录
         conn.execute("DELETE FROM meters WHERE id = ?", (old_id,))
 
+    def create_meter(self, meter_number: str, user_id: str = None,
+                     meter_type: str = "未知", asset_number: str = None,
+                     multiplier: float = 1.0, discount: float = 1.0,
+                     project_name: str = None) -> int:
+        """手动创建电表，返回电表 ID。
+
+        与 upsert_meter 不同，此方法用于用户手动添加电表，
+        不做模糊匹配，电表号必须唯一。
+        """
+        if not meter_number or not meter_number.strip():
+            raise ValueError("电表号不能为空")
+        meter_number = meter_number.strip()
+
+        with self.connection() as conn:
+            existing = conn.execute(
+                "SELECT id FROM meters WHERE meter_number = ?", (meter_number,)
+            ).fetchone()
+            if existing:
+                raise ValueError(f"电表号 {meter_number} 已存在")
+
+            conn.execute(
+                """INSERT INTO meters
+                   (meter_number, user_id, meter_type, asset_number, multiplier, discount, project_name)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (meter_number, user_id or '', meter_type, asset_number,
+                 multiplier, discount, project_name),
+            )
+            row = conn.execute(
+                "SELECT id FROM meters WHERE meter_number = ?", (meter_number,)
+            ).fetchone()
+            meter_id = row["id"]
+            log.info("手动创建电表: %s -> id=%d", meter_number, meter_id)
+            return meter_id
+
+    def delete_meter(self, meter_number: str) -> bool:
+        """删除电表及其关联的抄表数据。"""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM meters WHERE meter_number = ?", (meter_number,)
+            ).fetchone()
+            if not row:
+                return False
+            meter_id = row["id"]
+            conn.execute("DELETE FROM monthly_readings WHERE meter_id = ?", (meter_id,))
+            conn.execute("DELETE FROM meters WHERE id = ?", (meter_id,))
+            log.info("删除电表: %s (id=%d) 及其关联数据", meter_number, meter_id)
+            return True
+
     def update_meter(self, meter_number: str, **fields) -> bool:
         """手动更新电表信息（仅限解锁状态，或管理员操作）。
 

@@ -111,8 +111,28 @@
     {% endif %}
 </div>
 
-<div style="margin-top:1rem;">
+<div style="margin-top:1rem; display:flex; gap:0.5rem; align-items:center;">
     <a href="{{ url_for('meters_list') }}" class="btn btn-secondary">返回电表列表</a>
     <a href="{{ url_for('charts', user_id=meter.user_id) }}" class="btn btn-outline">查看该用户图表</a>
+    <button class="btn btn-danger btn-sm" style="margin-left:auto;" onclick="deleteMeter()">删除此电表</button>
 </div>
+
+<script>
+function deleteMeter() {
+    const meterNumber = "{{ meter.meter_number }}";
+    if (!confirm('确定要删除电表 ' + meterNumber + ' 吗？\n\n该操作将同时删除该电表的所有抄表记录，且不可恢复！')) {
+        return;
+    }
+    fetch('/api/meters/' + meterNumber + '/delete', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (d.success) {
+                window.location.href = "{{ url_for('meters_list') }}";
+            } else {
+                alert(d.error || '删除失败');
+            }
+        })
+        .catch(e => alert('请求失败: ' + e));
+}
+</script>
 {% endblock %}
