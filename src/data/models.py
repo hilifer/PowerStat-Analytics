@@ -454,6 +454,46 @@ class Database:
             log.info("删除电表: %s (id=%d) 及其关联数据", meter_number, meter_id)
             return True
 
+    def cleanup_incomplete_meters(self) -> int:
+        """删除数据不全的电表及其关联读数。
+
+        不全的定义：缺少 用户编号、项目名、电表类型（未知）任一关键字段。
+        已锁定的电表不删除（手动维护的数据视为有效）。
+        """
+        with self.connection() as conn:
+            incomplete = conn.execute("""
+                SELECT id, meter_number, user_id, project_name, meter_type
+                FROM meters
+                WHERE is_locked = 0
+                  AND (user_id IS NULL OR user_id = ''
+                       OR project_name IS NULL OR project_name = ''
+                       OR meter_type IS NULL OR meter_type = '未知')
+            """).fetchall()
+
+            if not incomplete:
+                log.info("清理：无数据不全的电表")
+                return 0
+
+            count = 0
+            for row in incomplete:
+                meter_id = row["id"]
+                mn = row["meter_number"]
+                missing = []
+                if not row["user_id"]:
+                    missing.append("用户编号")
+                if not row["project_name"]:
+                    missing.append("项目名")
+                if not row["meter_type"] or row["meter_type"] == "未知":
+                    missing.append("电表类型")
+
+                conn.execute("DELETE FROM monthly_readings WHERE meter_id = ?", (meter_id,))
+                conn.execute("DELETE FROM meters WHERE id = ?", (meter_id,))
+                log.info("  清理: %s (缺少: %s)", mn, ", ".join(missing))
+                count += 1
+
+            log.info("清理完成：删除 %d 个数据不全的电表", count)
+            return count
+
     def update_meter(self, meter_number: str, **fields) -> bool:
         """手动更新电表信息（仅限解锁状态，或管理员操作）。
 

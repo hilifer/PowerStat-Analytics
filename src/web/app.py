@@ -359,10 +359,15 @@ def _register_routes(app: Flask, db: Database):
                 status["progress"] = "推理补全缺失数据…"
                 db.infer_missing_data()
 
+                # 清理数据不全的电表
+                status["progress"] = "清理数据不全的电表…"
+                cleaned = db.cleanup_incomplete_meters()
+
                 status["result"] = {
                     "new": new_count,
                     "skipped": skipped,
                     "meters_added": meters_added,
+                    "cleaned": cleaned,
                 }
                 status["progress"] = "完成"
                 status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
