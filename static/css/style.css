@@ -225,7 +225,7 @@ th {
     top: 0;
 }
 tr:hover { background: #f8fafc; }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 a.row-link { color: var(--primary); text-decoration: none; }
 a.row-link:hover { text-decoration: underline; }
 
