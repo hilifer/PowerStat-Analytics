@@ -208,6 +208,11 @@ def _register_routes(app: Flask, db: Database):
                 from src.parsers.text_extractor import extract_meters_from_text, read_text_file
                 import re, shutil
 
+                # ============================================================
+                # 第一阶段：建立电表档案
+                # 下载新附件 → 提取电表信息 → 入库 → 配对 → 补全 → 清理
+                # ============================================================
+                _log("═══ 第一阶段：建立电表档案 ═══")
                 _log("正在连接邮箱并搜索邮件…")
                 with EmailFetcher() as fetcher:
                     attachments = fetcher.fetch_attachments()
@@ -226,11 +231,10 @@ def _register_routes(app: Flask, db: Database):
 
                 dispatcher = SmartDispatcher()
                 all_sheets = []
-                all_ocr = []
                 all_text_records = []
                 new_attachments = []
 
-                # 第一步：加载所有文件为 DataFrame
+                # 1.1 加载新附件
                 for i, att in enumerate(attachments, 1):
                     date_str = att.email_date.strftime("%Y-%m-%d %H:%M") if att.email_date else ""
                     fp = _email_fingerprint(att.email_subject, att.email_sender,
@@ -241,7 +245,7 @@ def _register_routes(app: Flask, db: Database):
                         continue
 
                     new_attachments.append((att, fp, date_str))
-                    _log(f"加载附件 [{i}/{len(attachments)}] {att.filename}")
+                    _log(f"加载附件 [{len(new_attachments)}/{len(attachments)}] {att.filename}")
                     source_info = {
                         "email_date": att.email_date,
                         "email_subject": att.email_subject,
@@ -257,19 +261,10 @@ def _register_routes(app: Flask, db: Database):
                             continue
                         processed_paths.add(fpath)
 
-                        # 加载为 DataFrame
                         sheets = dispatcher.load_as_dataframes(fpath, sinfo)
                         all_sheets.extend(sheets)
 
-                        # 图片走 OCR
                         file_type = dispatcher.detect_type(fpath)
-                        if file_type == "image":
-                            try:
-                                ocr = dispatcher.ocr_engine.extract_from_image(fpath, sinfo)
-                                if ocr.has_any_data():
-                                    all_ocr.append(ocr)
-                            except Exception as e:
-                                log.error("  OCR 失败: %s", e)
 
                         # 文本文件提取电表档案
                         if file_type in ("text", "unknown") or (file_type == "html" and not sheets):
@@ -280,30 +275,28 @@ def _register_routes(app: Flask, db: Database):
                             except Exception as e:
                                 log.error("  文本提取失败: %s", e)
 
-                        # 压缩包
                         if file_type == "zip":
                             sub_files = dispatcher._extract_zip(fpath)
                             for sf in sub_files:
                                 queue.append((sf, sinfo))
 
-                # 第二步：多轮扫描提取
-                _log(f"开始多轮扫描提取（共 {len(all_sheets)} 个 sheet，{len(new_attachments)} 个新附件，跳过 {skipped} 个已处理）")
+                # 1.2 多轮扫描提取电表档案
+                _log(f"多轮扫描提取电表档案（{len(all_sheets)} 个 sheet，{len(new_attachments)} 个新附件，跳过 {skipped} 个已处理）")
                 extractor = MultiPassExtractor()
                 extractor.load_dataframes(all_sheets)
                 all_records = extractor.extract_all()
 
-                # 合并文本提取的记录
                 if all_text_records:
                     all_records.extend(all_text_records)
 
-                # 第三步：入库
-                _log(f"提取到 {len(all_records)} 条记录，开始写入数据库…")
+                # 1.3 只写入电表档案（不写抄表数据和单价）
+                _log(f"提取到 {len(all_records)} 条记录，写入电表档案…")
                 for rec in all_records:
                     meter_number = rec.get("meter_number", "").strip()
                     if not meter_number:
                         continue
                     try:
-                        meter_id = db.upsert_meter(
+                        db.upsert_meter(
                             meter_number=meter_number,
                             user_id=rec.get("user_id"),
                             meter_type=rec.get("meter_type", "未知"),
@@ -314,51 +307,13 @@ def _register_routes(app: Flask, db: Database):
                         discount = rec.get("discount")
                         if discount and discount != 1.0:
                             db.update_meter(meter_number, discount=discount)
-
-                        month = rec.get("reading_month")
-                        if month and month != "unknown":
-                            db.upsert_reading(
-                                meter_id=meter_id,
-                                reading_month=month,
-                                sharp_peak=rec.get("sharp_peak"),
-                                peak=rec.get("peak"),
-                                flat=rec.get("flat"),
-                                valley=rec.get("valley"),
-                                total_kwh=rec.get("total_kwh"),
-                                source_file=rec.get("source_file"),
-                                source_sheet=rec.get("source_sheet"),
-                            )
                         meters_added += 1
                     except Exception as e:
-                        log.error("入库失败: %s - %s", rec.get("meter_number"), e)
+                        log.error("电表入库失败: %s - %s", rec.get("meter_number"), e)
 
-                # OCR 单价入库
-                price_saved = 0
-                for ocr in all_ocr:
-                    if ocr.user_id and ocr.reading_month:
-                        try:
-                            db.upsert_price(
-                                user_id=ocr.user_id,
-                                reading_month=ocr.reading_month,
-                                sharp_peak_price=ocr.sharp_peak_price,
-                                peak_price=ocr.peak_price,
-                                flat_price=ocr.flat_price,
-                                valley_price=ocr.valley_price,
-                                source_file=ocr.source_file,
-                            )
-                            if ocr.has_price_data():
-                                price_saved += 1
-                                _log(f"OCR 单价: 用户={ocr.user_id}, 月份={ocr.reading_month}, "
-                                     f"尖={ocr.sharp_peak_price}, 峰={ocr.peak_price}, "
-                                     f"平={ocr.flat_price}, 谷={ocr.valley_price}")
-                        except Exception as e:
-                            log.error("单价入库失败: %s", e)
+                _log(f"电表档案写入完成: {meters_added} 条")
 
-                _log(f"入库完成，写入 {meters_added} 条电表记录")
-                if all_ocr:
-                    _log(f"OCR 处理 {len(all_ocr)} 张图片，写入 {price_saved} 条单价记录")
-
-                # 保存电表配对关系
+                # 1.4 保存配对关系
                 if extractor.pairs:
                     _log(f"保存 {len(extractor.pairs)} 组电表配对关系…")
                     for gen_meter, grid_meter in extractor.pairs:
@@ -367,7 +322,7 @@ def _register_routes(app: Flask, db: Database):
                         except Exception as e:
                             log.error("配对保存失败: %s <-> %s: %s", gen_meter, grid_meter, e)
 
-                # 归档
+                # 1.5 归档新附件
                 _log(f"归档 {len(new_attachments)} 个新附件…")
                 for att, fp, date_str in new_attachments:
                     if not att.is_body:
@@ -398,15 +353,26 @@ def _register_routes(app: Flask, db: Database):
                     _mark_processed(db, fp, att.filename, att.email_subject, date_str)
                     new_count += 1
 
-                # 推理补全缺失数据
+                # 1.6 推理补全
                 _log("推理补全缺失数据…")
                 db.infer_missing_data()
 
-                # 清理数据不全的电表
+                # 1.7 清理不完整电表
                 _log("清理数据不全的电表…")
                 cleaned = db.cleanup_incomplete_meters()
                 if cleaned:
                     _log(f"已清理 {cleaned} 个数据不全的电表")
+
+                with db.connection() as conn:
+                    final_meter_count = conn.execute("SELECT COUNT(*) FROM meters").fetchone()[0]
+                _log(f"第一阶段完成，电表档案已定型: {final_meter_count} 块电表")
+
+                # ============================================================
+                # 第二阶段：提取抄表数据和单价
+                # 扫描所有归档文件（新旧都扫）→ 提取读数 + OCR单价 → 关联到已有电表
+                # ============================================================
+                _log("═══ 第二阶段：提取抄表数据和单价 ═══")
+                _do_bill_update(clear_first=False, log_fn=_log)
 
                 status["result"] = {
                     "new": new_count,
@@ -414,7 +380,15 @@ def _register_routes(app: Flask, db: Database):
                     "meters_added": meters_added,
                     "cleaned": cleaned,
                 }
-                _log(f"全部完成！新增 {new_count} 个附件，跳过 {skipped} 个，写入 {meters_added} 条记录")
+                # 合并第二阶段结果
+                bill_result = app.config["BILL_REFRESH_STATUS"].get("result") or {}
+                status["result"]["readings_added"] = bill_result.get("readings_added", 0)
+                status["result"]["prices_added"] = bill_result.get("prices_added", 0)
+
+                _log(f"全部完成！新增 {new_count} 个附件，"
+                     f"电表 {meters_added} 条，清理 {cleaned} 条，"
+                     f"抄表 {bill_result.get('readings_added', 0)} 条，"
+                     f"单价 {bill_result.get('prices_added', 0)} 条")
                 status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             except Exception as e:
@@ -533,7 +507,7 @@ def _register_routes(app: Flask, db: Database):
 
     # ---- 账单数据更新（共用核心逻辑） ----
 
-    def _do_bill_update(clear_first: bool):
+    def _do_bill_update(clear_first: bool, log_fn=None):
         """账单更新核心逻辑。
 
         流程：
@@ -542,13 +516,17 @@ def _register_routes(app: Flask, db: Database):
         3. 扫描所有归档文件（新旧都扫）
         4. 提取抄表数据 + OCR 单价
         5. 写入数据库（不动电表档案）
+
+        log_fn: 可选，外部传入的日志函数。不传则写入 BILL_REFRESH_STATUS。
         """
         status = app.config["BILL_REFRESH_STATUS"]
 
-        def _log(msg):
+        def _default_log(msg):
             ts = datetime.now().strftime("%H:%M:%S")
             status["logs"].append(f"[{ts}] {msg}")
             status["progress"] = msg
+
+        _log = log_fn or _default_log
 
         try:
             from src.email_fetcher.fetcher import EmailFetcher
