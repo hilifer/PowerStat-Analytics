@@ -26,6 +26,7 @@ class OCRResult:
         self.peak_price: Optional[float] = None
         self.flat_price: Optional[float] = None
         self.valley_price: Optional[float] = None
+        self.average_price: Optional[float] = None
         self.reading_month: Optional[str] = None
         self.raw_text: str = ""
         self.source_file: str = ""
@@ -35,7 +36,8 @@ class OCRResult:
 
     def has_price_data(self) -> bool:
         return any(v is not None for v in [
-            self.sharp_peak_price, self.peak_price, self.flat_price, self.valley_price
+            self.sharp_peak_price, self.peak_price, self.flat_price, self.valley_price,
+            self.average_price,
         ])
 
     def has_any_data(self) -> bool:
@@ -48,6 +50,7 @@ class OCRResult:
             "peak_price": self.peak_price,
             "flat_price": self.flat_price,
             "valley_price": self.valley_price,
+            "average_price": self.average_price,
             "reading_month": self.reading_month,
             "source_file": self.source_file,
         }
@@ -152,6 +155,7 @@ class OCREngine:
             result.peak_price = prices.get("peak_price")
             result.flat_price = prices.get("flat_price")
             result.valley_price = prices.get("valley_price")
+            result.average_price = prices.get("average_price")
 
             # 推断月份
             result.reading_month = self._infer_month(raw_text, source_info, filepath.name)
@@ -162,13 +166,15 @@ class OCREngine:
             )
 
             if result.user_id or result.has_price_data():
-                log.info("  OCR 提取 [%s]: 用户=%s, 月份=%s, 尖峰=%.4f, 峰=%.4f, 平=%.4f, 谷=%.4f, 电表记录=%d",
+                log.info("  OCR 提取 [%s]: 用户=%s, 月份=%s, "
+                         "尖峰=%.4f, 峰=%.4f, 平=%.4f, 谷=%.4f, 均价=%.4f, 电表记录=%d",
                          filepath.name, result.user_id or "未识别",
                          result.reading_month or "未知",
                          result.sharp_peak_price or 0,
                          result.peak_price or 0,
                          result.flat_price or 0,
                          result.valley_price or 0,
+                         result.average_price or 0,
                          len(result.meter_records))
             else:
                 log.warning("  OCR [%s]: 未提取到用户编号或单价，原文前300字: %s",
@@ -331,75 +337,42 @@ class OCREngine:
         return None
 
     def _extract_prices(self, text: str) -> dict:
-        """从文本中提取尖峰平谷单价（多级策略）。"""
+        """从电费账单文本中提取单价（智能多策略）。
+
+        支持三类账单格式：
+        1. 工业分时电价（南方电网）：电费信息表中 X期电量电费 行含单价列
+        2. 居民合表 / 单一电价：电量电费行只有一个单价 → average_price
+        3. 大工业用电：多行组件明细 → 提取平均电价
+        """
         prices = {}
-        rules = self.extraction_rules.get("unit_price", {})
 
-        # 策略1：表格行级匹配（同一行内包含标签和价格）
+        # ---- 策略1：电费信息表格 "X期电量电费" 行（工业分时，图2格式） ----
+        prices = self._extract_prices_charge_table(text)
+        if self._has_enough_prices(prices):
+            # 同时提取平均电价作为补充
+            avg = self._extract_average_price(text)
+            if avg is not None:
+                prices["average_price"] = avg
+            return prices
+
+        # ---- 策略2：表格行级匹配（尖/峰/平/谷关键字 + 数字） ----
         prices = self._extract_prices_table_row(text)
-        if len(prices) >= 3:
+        if self._has_enough_prices(prices):
+            avg = self._extract_average_price(text)
+            if avg is not None:
+                prices["average_price"] = avg
             return prices
 
-        # 策略2：专用标签匹配
-        price_fields = {
-            "sharp_peak_price": rules.get("sharp_peak_price", []),
-            "peak_price": rules.get("peak_price", []),
-            "flat_price": rules.get("flat_price", []),
-            "valley_price": rules.get("valley_price", []),
-        }
-
-        for field, patterns in price_fields.items():
-            for pattern in patterns:
-                match = re.search(pattern, text)
-                if match:
-                    try:
-                        val = float(match.group(1))
-                        if self._is_valid_price(val):
-                            prices[field] = val
-                    except (ValueError, IndexError):
-                        pass
-                    break
-
-        if len(prices) >= 3:
+        # ---- 策略3：配置文件和增强标签匹配 ----
+        prices = self._extract_prices_label_match(text)
+        if self._has_enough_prices(prices):
+            avg = self._extract_average_price(text)
+            if avg is not None:
+                prices["average_price"] = avg
             return prices
 
-        # 策略3：增强的标签匹配（处理OCR空格、换行等噪声）
-        enhanced_patterns = {
-            "sharp_peak_price": [
-                r'尖\s*峰?\s*[:：\s价单]*\s*(\d+\.?\d{2,4})',
-                r'尖\s*[:：]\s*(\d+\.\d+)',
-            ],
-            "peak_price": [
-                r'(?<!尖)\s*峰\s*[:：\s价单]*\s*(\d+\.?\d{2,4})',
-                r'(?<![尖a-zA-Z])峰\s*[:：]\s*(\d+\.\d+)',
-            ],
-            "flat_price": [
-                r'平\s*[:：\s价单]*\s*(\d+\.?\d{2,4})',
-                r'平\s*段?\s*[:：]\s*(\d+\.\d+)',
-            ],
-            "valley_price": [
-                r'谷\s*[:：\s价单]*\s*(\d+\.?\d{2,4})',
-                r'谷\s*段?\s*[:：]\s*(\d+\.\d+)',
-            ],
-        }
-        for field, patterns in enhanced_patterns.items():
-            if field in prices:
-                continue
-            for pattern in patterns:
-                match = re.search(pattern, text)
-                if match:
-                    try:
-                        val = float(match.group(1))
-                        if self._is_valid_price(val):
-                            prices[field] = val
-                            break
-                    except (ValueError, IndexError):
-                        pass
-
-        if prices:
-            return prices
-
-        # 策略4：通用模式（连续找到4个价格数字）
+        # ---- 策略4：通用模式（连续4个价格数字） ----
+        rules = self.extraction_rules.get("unit_price", {})
         general_patterns = rules.get("patterns", [])
         for pattern in general_patterns:
             matches = re.findall(pattern, text)
@@ -415,18 +388,94 @@ class OCREngine:
                     pass
                 break
 
-        # 策略5：提取所有看起来像价格的数字（0.2~2.0之间，保留2-4位小数）
+        if self._has_enough_prices(prices):
+            avg = self._extract_average_price(text)
+            if avg is not None:
+                prices["average_price"] = avg
+            return prices
+
+        # ---- 策略5：平均电价 / 单一电价（居民合表、大工业） ----
+        avg = self._extract_average_price(text)
+        if avg is not None:
+            prices["average_price"] = avg
+
+        # 单一电价行：只有"电量电费"（无尖峰平谷前缀）+ 一个单价
         if not prices:
-            price_candidates = re.findall(r'(\d\.\d{2,4})', text)
-            valid = [float(p) for p in price_candidates if self._is_valid_price(float(p))]
+            single = self._extract_single_price(text)
+            if single is not None:
+                prices["average_price"] = single
+
+        # ---- 策略6：兜底 - 提取所有像价格的数字（降序 → 尖 > 峰 > 平 > 谷） ----
+        if not prices:
+            price_candidates = re.findall(r'(\d\.\d{2,8})', text)
+            valid = sorted(set(
+                float(p) for p in price_candidates if self._is_valid_price(float(p))
+            ), reverse=True)
             if len(valid) >= 4:
-                # 按从大到小排序（通常 尖 > 峰 > 平 > 谷）
-                valid_sorted = sorted(set(valid), reverse=True)
-                if len(valid_sorted) >= 4:
-                    prices["sharp_peak_price"] = valid_sorted[0]
-                    prices["peak_price"] = valid_sorted[1]
-                    prices["flat_price"] = valid_sorted[2]
-                    prices["valley_price"] = valid_sorted[3]
+                prices["sharp_peak_price"] = valid[0]
+                prices["peak_price"] = valid[1]
+                prices["flat_price"] = valid[2]
+                prices["valley_price"] = valid[3]
+
+        return prices
+
+    def _has_enough_prices(self, prices: dict) -> bool:
+        """至少有2个分时段价格或有平均电价即认为足够。"""
+        period_count = sum(1 for k in ["sharp_peak_price", "peak_price", "flat_price", "valley_price"]
+                          if prices.get(k) is not None)
+        return period_count >= 2 or prices.get("average_price") is not None
+
+    def _extract_prices_charge_table(self, text: str) -> dict:
+        """从「电费信息 Charge Information」表格中提取分时段单价。
+
+        匹配格式（南方电网工业分时）：
+          尖期电量电费  0       0         0
+          峰期电量电费  5725    0.95786875  5483.81
+          平期电量电费  7870    0.71406875  5619.72
+          谷期电量电费  7145    0.22636875  1617.42
+
+        每行: 标签  计费电量  单价  金额 — 单价是第2个小数（8位精度）
+        """
+        prices = {}
+        lines = text.split("\n")
+
+        # X期电量电费 行匹配
+        period_map = {
+            "sharp_peak_price": [r'尖\s*期?\s*电量电费', r'尖\s*期?\s*电[量费]'],
+            "peak_price":       [r'(?<!尖)\s*峰\s*期?\s*电量电费', r'(?<!尖)\s*峰\s*期?\s*电[量费]'],
+            "flat_price":       [r'平\s*期?\s*电量电费', r'平\s*期?\s*电[量费]'],
+            "valley_price":     [r'谷\s*期?\s*电量电费', r'谷\s*期?\s*电[量费]'],
+        }
+
+        for line in lines:
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+
+            for field, patterns in period_map.items():
+                if field in prices:
+                    continue
+                for pat in patterns:
+                    if re.search(pat, line_clean):
+                        # 特殊处理：peak 行不能含"尖"
+                        if field == "peak_price" and "尖" in line_clean:
+                            continue
+                        # 提取该行所有数字
+                        nums = re.findall(r'(\d+\.?\d*)', line_clean)
+                        float_nums = []
+                        for n in nums:
+                            try:
+                                float_nums.append(float(n))
+                            except ValueError:
+                                pass
+                        # 单价通常是有多位小数的数字（区别于电量和金额的整数/2位小数）
+                        price_candidates = [v for v in float_nums if self._is_valid_price(v)]
+                        # 优先选小数位数最多的（单价精度高于电量和金额）
+                        if price_candidates:
+                            best = max(price_candidates,
+                                       key=lambda v: len(str(v).split('.')[-1]) if '.' in str(v) else 0)
+                            prices[field] = best
+                        break
 
         return prices
 
@@ -434,9 +483,9 @@ class OCREngine:
         """从表格行结构中提取价格（每行一个时段）。
 
         支持多种表格格式：
-        - 每行一个时段: "尖峰 1.2345"
-        - 表格列: "尖峰 | 峰 | 平 | 谷" + "1.23 | 0.98 | 0.56 | 0.32"
+        - 每行一个时段: "尖峰 1.2345" 或 "尖 0.95786875"
         - 合并行: "尖峰1.2345峰0.9876平0.5678谷0.3210"
+        - 表格列标题行 + 数据行
         """
         prices = {}
         lines = text.split("\n")
@@ -459,11 +508,9 @@ class OCREngine:
                     continue
                 for kw in keywords:
                     if kw in line_clean:
-                        # 特殊处理：「峰」不能匹配「尖峰」行
                         if field == "peak_price" and "尖" in line_clean:
                             continue
-                        # 在该行中找价格数字
-                        nums = re.findall(r'(\d+\.\d{2,4})', line_clean)
+                        nums = re.findall(r'(\d+\.\d{2,8})', line_clean)
                         for n in nums:
                             val = float(n)
                             if self._is_valid_price(val):
@@ -477,10 +524,10 @@ class OCREngine:
         # 策略B：单行内连续出现"尖峰X.XXXX峰X.XXXX平X.XXXX谷X.XXXX"
         full_text = text.replace("\n", " ")
         m = re.search(
-            r'尖峰?\s*[:：]?\s*(\d+\.\d{2,6})\s*[元/度kWh]*\s*'
-            r'(?:(?!尖)峰)\s*[:：]?\s*(\d+\.\d{2,6})\s*[元/度kWh]*\s*'
-            r'平\s*[:：]?\s*(\d+\.\d{2,6})\s*[元/度kWh]*\s*'
-            r'谷\s*[:：]?\s*(\d+\.\d{2,6})',
+            r'尖峰?\s*[:：]?\s*(\d+\.\d{2,8})\s*[元/度kWh]*\s*'
+            r'(?:(?!尖)峰)\s*[:：]?\s*(\d+\.\d{2,8})\s*[元/度kWh]*\s*'
+            r'平\s*[:：]?\s*(\d+\.\d{2,8})\s*[元/度kWh]*\s*'
+            r'谷\s*[:：]?\s*(\d+\.\d{2,8})',
             full_text
         )
         if m:
@@ -496,15 +543,12 @@ class OCREngine:
         # 策略C：表格列标题行 + 数据行（标题和值在相邻行）
         for i, line in enumerate(lines):
             line_clean = line.strip()
-            # 检查是否是标题行（包含多个时段关键字）
             kw_hits = sum(1 for kw in ["尖", "峰", "平", "谷"] if kw in line_clean)
             if kw_hits >= 3 and i + 1 < len(lines):
-                # 下一行可能是数据行
                 data_line = lines[i + 1].strip()
-                nums = re.findall(r'(\d+\.\d{2,6})', data_line)
+                nums = re.findall(r'(\d+\.\d{2,8})', data_line)
                 valid = [float(n) for n in nums if self._is_valid_price(float(n))]
                 if len(valid) >= 3:
-                    # 按标题行中关键字出现的顺序映射
                     positions = []
                     for field, kws in field_map.items():
                         for kw in kws:
@@ -522,6 +566,120 @@ class OCREngine:
                         return prices
 
         return prices
+
+    def _extract_prices_label_match(self, text: str) -> dict:
+        """配置文件正则 + 增强标签匹配。"""
+        prices = {}
+        rules = self.extraction_rules.get("unit_price", {})
+
+        # 配置文件中的专用标签
+        price_fields = {
+            "sharp_peak_price": rules.get("sharp_peak_price", []),
+            "peak_price": rules.get("peak_price", []),
+            "flat_price": rules.get("flat_price", []),
+            "valley_price": rules.get("valley_price", []),
+        }
+        for field, patterns in price_fields.items():
+            for pattern in patterns:
+                match = re.search(pattern, text)
+                if match:
+                    try:
+                        val = float(match.group(1))
+                        if self._is_valid_price(val):
+                            prices[field] = val
+                    except (ValueError, IndexError):
+                        pass
+                    break
+
+        if len(prices) >= 3:
+            return prices
+
+        # 增强模式（处理 OCR 噪声、8位小数）
+        enhanced_patterns = {
+            "sharp_peak_price": [
+                r'尖\s*峰?\s*[:：\s价单]*\s*(\d+\.?\d{2,8})',
+                r'尖\s*[:：]\s*(\d+\.\d+)',
+            ],
+            "peak_price": [
+                r'(?<!尖)\s*峰\s*[:：\s价单]*\s*(\d+\.?\d{2,8})',
+                r'(?<![尖a-zA-Z])峰\s*[:：]\s*(\d+\.\d+)',
+            ],
+            "flat_price": [
+                r'平\s*[:：\s价单]*\s*(\d+\.?\d{2,8})',
+                r'平\s*段?\s*[:：]\s*(\d+\.\d+)',
+            ],
+            "valley_price": [
+                r'谷\s*[:：\s价单]*\s*(\d+\.?\d{2,8})',
+                r'谷\s*段?\s*[:：]\s*(\d+\.\d+)',
+            ],
+        }
+        for field, patterns in enhanced_patterns.items():
+            if field in prices:
+                continue
+            for pattern in patterns:
+                match = re.search(pattern, text)
+                if match:
+                    try:
+                        val = float(match.group(1))
+                        if self._is_valid_price(val):
+                            prices[field] = val
+                            break
+                    except (ValueError, IndexError):
+                        pass
+
+        return prices
+
+    def _extract_average_price(self, text: str) -> Optional[float]:
+        """提取平均电价 / 综合电价。
+
+        匹配格式：
+          平均电价  0.76133230
+          平均电价: 0.76133230 (元/千瓦时)
+          平均电价  0.69986875
+        """
+        patterns = [
+            r'平均电价\s*[:：]?\s*(\d+\.\d{2,8})',
+            r'(?:综合|平均)\s*(?:电价|单价)\s*[:：]?\s*(\d+\.\d{2,8})',
+            r'平均电价\s*[:：]?\s*(\d+\.\d+)\s*(?:\(|（|元)',
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, text)
+            if m:
+                try:
+                    val = float(m.group(1))
+                    if self._is_valid_price(val):
+                        return val
+                except (ValueError, IndexError):
+                    pass
+        return None
+
+    def _extract_single_price(self, text: str) -> Optional[float]:
+        """提取单一电价（居民合表等无分时段账单）。
+
+        匹配格式：
+          电量电费  6066.6  0.69986875  4245.82
+          → 单价是第2个带多位小数的数字
+        """
+        lines = text.split("\n")
+        for line in lines:
+            line_clean = line.strip()
+            # 匹配"电量电费"但不含"尖/峰/平/谷"前缀
+            if "电量电费" not in line_clean:
+                continue
+            if any(kw in line_clean for kw in ["尖", "峰", "平", "谷"]):
+                continue
+            # 这行是单一电价行，提取单价（多位小数的那个数字）
+            nums = re.findall(r'(\d+\.\d{2,8})', line_clean)
+            # 单价通常在 0.1~3.0 之间，选精度最高的
+            candidates = []
+            for n in nums:
+                val = float(n)
+                if self._is_valid_price(val):
+                    candidates.append((len(n.split('.')[-1]), val))
+            if candidates:
+                candidates.sort(reverse=True)  # 小数位数最多的优先
+                return candidates[0][1]
+        return None
 
     def _is_valid_price(self, val: float) -> bool:
         """判断是否为合理的电价（元/kWh）。"""

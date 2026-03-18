@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS price_records (
     peak_price          REAL,
     flat_price          REAL,
     valley_price        REAL,
+    average_price       REAL,
     source_file         TEXT,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, reading_month)
@@ -100,16 +101,25 @@ SELECT
     p.peak_price,
     p.flat_price,
     p.valley_price,
+    p.average_price,
     ROUND(COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0) * COALESCE(m.discount, 1.0), 2) AS sharp_peak_amount,
     ROUND(COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0) * COALESCE(m.discount, 1.0), 2)             AS peak_amount,
     ROUND(COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0) * COALESCE(m.discount, 1.0), 2)              AS flat_amount,
     ROUND(COALESCE(r.valley, 0) * m.multiplier * COALESCE(p.valley_price, 0) * COALESCE(m.discount, 1.0), 2)          AS valley_amount,
     ROUND(
-        (COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0) +
-         COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0) +
-         COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0) +
-         COALESCE(r.valley, 0) * m.multiplier * COALESCE(p.valley_price, 0))
-        * COALESCE(m.discount, 1.0),
+        CASE
+            WHEN (p.sharp_peak_price IS NOT NULL OR p.peak_price IS NOT NULL
+                  OR p.flat_price IS NOT NULL OR p.valley_price IS NOT NULL)
+            THEN
+                (COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0) +
+                 COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0) +
+                 COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0) +
+                 COALESCE(r.valley, 0) * m.multiplier * COALESCE(p.valley_price, 0))
+                * COALESCE(m.discount, 1.0)
+            WHEN p.average_price IS NOT NULL
+            THEN COALESCE(r.total_kwh, 0) * m.multiplier * p.average_price * COALESCE(m.discount, 1.0)
+            ELSE 0
+        END,
     2) AS total_amount,
     r.source_file AS reading_source,
     p.source_file AS price_source
@@ -161,6 +171,12 @@ class Database:
             log.info("迁移: 添加 meters.paired_meter_id 列")
             conn.execute("ALTER TABLE meters ADD COLUMN paired_meter_id INTEGER")
 
+        # 添加 average_price 列（如果缺失）
+        price_columns = {row[1] for row in conn.execute("PRAGMA table_info(price_records)").fetchall()}
+        if "average_price" not in price_columns:
+            log.info("迁移: 添加 price_records.average_price 列")
+            conn.execute("ALTER TABLE price_records ADD COLUMN average_price REAL")
+
         # 重建视图（确保包含新字段）
         conn.execute("DROP VIEW IF EXISTS v_monthly_bill")
         conn.execute("""
@@ -183,16 +199,25 @@ class Database:
                 p.peak_price,
                 p.flat_price,
                 p.valley_price,
+                p.average_price,
                 ROUND(COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0) * COALESCE(m.discount, 1.0), 2) AS sharp_peak_amount,
                 ROUND(COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0) * COALESCE(m.discount, 1.0), 2)             AS peak_amount,
                 ROUND(COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0) * COALESCE(m.discount, 1.0), 2)              AS flat_amount,
                 ROUND(COALESCE(r.valley, 0) * m.multiplier * COALESCE(p.valley_price, 0) * COALESCE(m.discount, 1.0), 2)          AS valley_amount,
                 ROUND(
-                    (COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0) +
-                     COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0) +
-                     COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0) +
-                     COALESCE(r.valley, 0) * m.multiplier * COALESCE(p.valley_price, 0))
-                    * COALESCE(m.discount, 1.0),
+                    CASE
+                        WHEN (p.sharp_peak_price IS NOT NULL OR p.peak_price IS NOT NULL
+                              OR p.flat_price IS NOT NULL OR p.valley_price IS NOT NULL)
+                        THEN
+                            (COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0) +
+                             COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0) +
+                             COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0) +
+                             COALESCE(r.valley, 0) * m.multiplier * COALESCE(p.valley_price, 0))
+                            * COALESCE(m.discount, 1.0)
+                        WHEN p.average_price IS NOT NULL
+                        THEN COALESCE(r.total_kwh, 0) * m.multiplier * p.average_price * COALESCE(m.discount, 1.0)
+                        ELSE 0
+                    END,
                 2) AS total_amount,
                 r.source_file AS reading_source,
                 p.source_file AS price_source
@@ -603,21 +628,24 @@ class Database:
     def upsert_price(self, user_id: str, reading_month: str,
                      sharp_peak_price: float = None, peak_price: float = None,
                      flat_price: float = None, valley_price: float = None,
-                     source_file: str = None):
+                     average_price: float = None, source_file: str = None):
         """插入或更新单价记录。"""
         with self.connection() as conn:
             conn.execute(
                 """INSERT INTO price_records
-                   (user_id, reading_month, sharp_peak_price, peak_price, flat_price, valley_price, source_file)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   (user_id, reading_month, sharp_peak_price, peak_price, flat_price, valley_price,
+                    average_price, source_file)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(user_id, reading_month) DO UPDATE SET
                        sharp_peak_price = COALESCE(excluded.sharp_peak_price, price_records.sharp_peak_price),
                        peak_price = COALESCE(excluded.peak_price, price_records.peak_price),
                        flat_price = COALESCE(excluded.flat_price, price_records.flat_price),
                        valley_price = COALESCE(excluded.valley_price, price_records.valley_price),
+                       average_price = COALESCE(excluded.average_price, price_records.average_price),
                        source_file = COALESCE(excluded.source_file, price_records.source_file)
                 """,
-                (user_id, reading_month, sharp_peak_price, peak_price, flat_price, valley_price, source_file),
+                (user_id, reading_month, sharp_peak_price, peak_price, flat_price, valley_price,
+                 average_price, source_file),
             )
 
     # ---- 查询 ----

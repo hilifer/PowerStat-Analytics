@@ -691,7 +691,8 @@ def _register_routes(app: Flask, db: Database):
                             _log(f"  OCR 单价: {fname} → 用户={ocr.user_id or '?'}, "
                                  f"月={ocr.reading_month or '?'}, "
                                  f"尖={ocr.sharp_peak_price}, 峰={ocr.peak_price}, "
-                                 f"平={ocr.flat_price}, 谷={ocr.valley_price}")
+                                 f"平={ocr.flat_price}, 谷={ocr.valley_price}, "
+                                 f"均价={ocr.average_price}")
                         elif ocr.user_id:
                             _log(f"  OCR: {fname} → 用户={ocr.user_id}, 未提取到单价")
                 except Exception as e:
@@ -709,6 +710,7 @@ def _register_routes(app: Flask, db: Database):
                             peak_price=ocr.peak_price,
                             flat_price=ocr.flat_price,
                             valley_price=ocr.valley_price,
+                            average_price=ocr.average_price,
                             source_file=ocr.source_file,
                         )
                         if ocr.has_price_data():

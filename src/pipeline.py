@@ -469,6 +469,7 @@ class Pipeline:
                         peak_price=ocr.peak_price,
                         flat_price=ocr.flat_price,
                         valley_price=ocr.valley_price,
+                        average_price=ocr.average_price,
                         source_file=ocr.source_file,
                     )
                 except Exception as e:
