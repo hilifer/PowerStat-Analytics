@@ -49,8 +49,12 @@ def clean_id(val) -> str:
 
 
 def is_valid_meter_number(val: str) -> bool:
-    """验证电表号是否合法：纯数字字母，长度≥6，不含中文。"""
-    if not val or len(val) < 6:
+    """验证电表号是否合法：纯数字字母，长度6-16，不含中文。
+
+    电表号通常为8-16位纯数字。资产编号（如09001SF...）通常>18位，
+    加长度上限可避免资产号被误识别为电表号。
+    """
+    if not val or len(val) < 6 or len(val) > 16:
         return False
     if _HAS_CHINESE_RE.search(val):
         return False

@@ -86,6 +86,7 @@ class MultiPassExtractor:
         self._sheets = []
         self.meters = {}     # meter_number -> {asset, user_id, type, ...}
         self.readings = {}   # (meter_number, month) -> {sharp_peak, peak, flat, valley, total}
+        self.prices = {}     # (user_id, month) -> {sharp_peak_price, peak_price, ...}
         self.pairs = []      # [(gen_meter_number, grid_meter_number)]
         self._pass0_user_ids = set()  # pass0 识别的用户编号，防止 pass1 误注册为电表
 
@@ -381,8 +382,11 @@ class MultiPassExtractor:
                     continue
                 # 目录名包含中文 → 可能是项目名
                 if _CHINESE_RE.search(dirname):
-                    # 进一步清理：去掉日期后缀等
-                    proj = re.sub(r'\d{4}[-_]\d{1,2}[-_]?\d{0,2}', '', dirname).strip(" -_")
+                    # 进一步清理：去掉日期前缀/后缀
+                    # 匹配 20260309_、2026-01、2025_04 等日期格式
+                    proj = re.sub(r'\d{6,8}', '', dirname)  # 连续6-8位数字
+                    proj = re.sub(r'\d{4}[-_]\d{1,2}[-_]?\d{0,2}', '', proj)  # 2025-04 格式
+                    proj = proj.strip(" -_")
                     if proj and len(proj) >= 2:
                         return proj
         except Exception:
@@ -441,6 +445,8 @@ class MultiPassExtractor:
                         if not is_valid_meter_number(val):
                             continue
                         self._register_meter(val, filepath.name, sheet_name, mtype)
+                        if val not in self.meters:
+                            continue  # pass0 blocked this value as user_id
                         # 同行最近资产编号
                         nearest_ac = meter_asset_map.get(mc)
                         if nearest_ac is not None:
@@ -934,46 +940,147 @@ class MultiPassExtractor:
                                  filepath.name, sheet_name)
 
     def _readings_from_transposed(self, df, filepath, sheet_name, source_info):
-        """从转置表（行=尖峰平谷）提取读数。"""
+        """从转置表（行=尖峰平谷）提取读数。
+
+        支持多块（同一 sheet 内多个统计表块，如华尔特/新丰）。
+        每个块以标题行（含"统计表"或"电费单"）开头，后跟表头和数据行。
+        """
         period_keywords = {
             "尖峰": "sharp_peak", "尖": "sharp_peak",
             "正有功尖峰": "sharp_peak", "正有功尖": "sharp_peak",
-            "峰": "peak", "正有功峰": "peak",
+            "正有功尖峰1": "sharp_peak",
+            "峰": "peak", "正有功峰": "peak", "正有功峰2": "peak",
             "平": "flat", "正有功平": "flat",
             "谷": "valley", "正有功谷": "valley",
             "总": "total", "正有功总": "total", "合计": "total",
         }
 
-        category_col = None
-        period_rows = {}
+        # 扫描整个 sheet，找出所有块的边界
+        blocks = self._find_transposed_blocks(df, period_keywords)
+        if not blocks:
+            return
+
+        for block in blocks:
+            self._extract_one_transposed_block(
+                df, filepath, sheet_name, source_info,
+                block, period_keywords)
+
+    def _find_transposed_blocks(self, df, period_keywords):
+        """在 sheet 中找出所有转置表块。
+
+        每个块 = {
+            'title_row': int,       # 标题行索引
+            'category_col': int,    # 类别列索引
+            'period_rows': dict,    # {row_idx: period_key}
+        }
+
+        块边界识别：每当出现新的标题行（含"统计表"/"电费单"），或
+        连续出现 ≥3 个 period 关键字行，就开始一个新块。
+        """
+        blocks = []
+        max_rows = len(df)
+
+        # 策略：找所有 period 行簇，按簇分块
+        all_period_hits = []  # [(row_idx, col_idx, period_key)]
         for col_idx in range(min(3, len(df.columns))):
-            temp = {}
-            for row_idx in range(min(len(df), 30)):
+            for row_idx in range(max_rows):
                 cell = _cell_str(df.iloc[row_idx, col_idx])
                 for kw, pkey in period_keywords.items():
                     if cell == kw or cell.startswith(kw):
-                        temp[row_idx] = pkey
+                        all_period_hits.append((row_idx, col_idx, pkey))
                         break
-            if len(temp) >= 3:
-                period_rows = temp
-                category_col = col_idx
-                break
-        if len(period_rows) < 3:
-            return
 
-        # 数据列
-        data_cols = {}
-        for row_idx in range(min(8, len(df))):
+        if not all_period_hits:
+            return []
+
+        # 按行排序，聚合为块（连续行间隔 ≤ 3）
+        all_period_hits.sort(key=lambda x: x[0])
+        current_cluster = [all_period_hits[0]]
+        clusters = []
+
+        for hit in all_period_hits[1:]:
+            if hit[0] - current_cluster[-1][0] <= 3 and hit[1] == current_cluster[0][1]:
+                current_cluster.append(hit)
+            else:
+                if len(current_cluster) >= 3:
+                    clusters.append(current_cluster)
+                current_cluster = [hit]
+        if len(current_cluster) >= 3:
+            clusters.append(current_cluster)
+
+        # 转化为块定义
+        for cluster in clusters:
+            category_col = cluster[0][1]
+            period_rows = {}
+            for row_idx, col_idx, pkey in cluster:
+                if pkey not in period_rows.values():  # 同一周期只取第一个
+                    period_rows[row_idx] = pkey
+            # 找标题行（在 period 行上方 1-5 行内，包含中文项目名或"统计表"）
+            first_period_row = min(period_rows.keys())
+            title_row = max(0, first_period_row - 5)
+            for r in range(first_period_row - 1, max(-1, first_period_row - 6), -1):
+                if r < 0:
+                    break
+                cell = _cell_str(df.iloc[r, 0]) if len(df.columns) > 0 else ""
+                if any(kw in cell for kw in ("统计表", "电费单", "项目", "光伏")):
+                    title_row = r
+                    break
+
+            blocks.append({
+                'title_row': title_row,
+                'category_col': category_col,
+                'period_rows': period_rows,
+            })
+
+        return blocks
+
+    def _extract_one_transposed_block(self, df, filepath, sheet_name, source_info,
+                                      block, period_keywords):
+        """从一个转置表块中提取读数、电价、折扣。"""
+        category_col = block['category_col']
+        period_rows = block['period_rows']
+        title_row = block['title_row']
+
+        # 找数据列：优先 "发电量"/"用电量"，其次 "上网电量"/"反向用电量"
+        # 注意：必须在 period_rows 上方的表头行搜索
+        first_period = min(period_rows.keys())
+        header_search_range = range(max(title_row, 0), first_period)
+
+        # 高优先级关键字（已乘倍率的电量）
+        fwd_kw_high = ("发电量", "用电量")
+        fwd_kw_low = ("电表用理", "电表用量", "正向用电量")
+        rev_kw_high = ("上网电量", "反向用电量", "上网用电量")
+        rev_kw_low = ("反向用量",)
+        price_kw = ("电价", "优惠后电价")
+        amount_kw = ("金额",)
+        actual_usage_kw = ("实际用电数",)
+
+        data_cols = {}  # forward, reverse, price, amount, actual_usage
+        for row_idx in header_search_range:
             for col_idx in range(len(df.columns)):
                 if col_idx == category_col:
                     continue
                 cell = _cell_str(df.iloc[row_idx, col_idx])
-                if cell in ("发电量", "用电量", "正向用电量", "电表用量", "电表用理"):
-                    data_cols.setdefault("forward", col_idx)
-                elif cell in ("上网电量", "上网用电量", "反向用电量"):
-                    data_cols.setdefault("reverse", col_idx)
+                if not cell:
+                    continue
+                # 高优先级覆盖低优先级
+                if cell in fwd_kw_high:
+                    data_cols["forward"] = col_idx  # 覆盖
+                elif cell in fwd_kw_low and "forward" not in data_cols:
+                    data_cols["forward"] = col_idx
+                if cell in rev_kw_high:
+                    data_cols["reverse"] = col_idx
+                elif cell in rev_kw_low and "reverse" not in data_cols:
+                    data_cols["reverse"] = col_idx
+                if cell in price_kw:
+                    data_cols["price"] = col_idx  # 取最后一个（优惠后电价 > 原电价）
+                if cell in amount_kw:
+                    data_cols.setdefault("amount", col_idx)
+                if cell in actual_usage_kw:
+                    data_cols.setdefault("actual_usage", col_idx)
 
-        if not data_cols.get("forward"):
+        # 兜底：如果没找到 forward 列，用第一个有数值的列
+        if "forward" not in data_cols:
             for col_idx in range(category_col + 1, min(len(df.columns), 15)):
                 for row_idx in period_rows:
                     if _to_float(df.iloc[row_idx, col_idx]) is not None:
@@ -982,53 +1089,134 @@ class MultiPassExtractor:
                 if "forward" in data_cols:
                     break
 
-        # 月份
-        month = self._infer_month(filepath.name, sheet_name, source_info)
-        for r in range(min(5, len(df))):
-            for c in range(min(5, len(df.columns))):
-                m = _MONTH_RE.search(_cell_str(df.iloc[r, c]))
+        # 月份：优先从标题行提取
+        month = None
+        for r in range(title_row, min(title_row + 3, len(df))):
+            for c in range(min(10, len(df.columns))):
+                cell_text = _cell_str(df.iloc[r, c])
+                m = _MONTH_RE.search(cell_text)
                 if m:
                     y, mo = int(m.group(1)), int(m.group(2))
                     if 2015 <= y <= 2035 and 1 <= mo <= 12:
                         month = f"{y}-{str(mo).zfill(2)}"
                         break
+            if month:
+                break
+        if not month:
+            month = self._infer_month(filepath.name, sheet_name, source_info)
         if not month or month == "unknown":
             return
 
-        # 对应的电表
-        sheet_meters = [mn for mn, info in self.meters.items()
-                        if info["source_file"] == filepath.name]
-        gen_meter = grid_meter = None
-        for mn in sheet_meters:
-            mt = self.meters[mn]["meter_type"]
-            if mt == "发电表" and not gen_meter:
-                gen_meter = mn
-            elif mt == "上网表" and not grid_meter:
-                grid_meter = mn
-            elif not gen_meter:
-                gen_meter = mn
+        # 在块的 metadata 行中搜索电表号/用户号
+        # 搜索范围：period 行上方（title_row → first_period）+ 下方（last_period+1 → +10）
+        first_period = min(period_rows.keys())
+        last_period = max(period_rows.keys())
+        search_ranges = list(range(title_row, first_period)) + \
+                         list(range(last_period + 1, min(last_period + 10, len(df))))
+        block_gen_meter = block_grid_meter = block_user_id = None
+        block_discount = None
+        for r in search_ranges:
+            row_text = " ".join(_cell_str(df.iloc[r, c])
+                                for c in range(min(len(df.columns), 18)))
+            if not row_text.strip():
+                continue
 
+            # 用户号
+            um = re.search(r'(?:用户编号|用户号|用电户号)\s*[:：]?\s*[\'"]?(\d{6,20})', row_text)
+            if um and not block_user_id:
+                block_user_id = um.group(1)
+
+            # 发电表号
+            gm = re.search(r'(?:发电表号?|发电表)\s*[:：]?\s*(\d{8,16})', row_text)
+            if gm and not block_gen_meter:
+                block_gen_meter = gm.group(1)
+
+            # 上网表号
+            nm = re.search(r'(?:上网表号?|上网电表号?|上网表)\s*[:：]?\s*(\d{8,16})', row_text)
+            if nm and not block_grid_meter:
+                block_grid_meter = nm.group(1)
+
+            # 折扣
+            dm = re.search(r'(\d+\.?\d*)\s*折', row_text)
+            if dm:
+                dv = float(dm.group(1))
+                if dv > 1:
+                    dv = dv / 10
+                if 0 < dv <= 1:
+                    block_discount = dv
+
+        # 如果块内发现新电表号，注册并配对
+        if block_gen_meter and is_valid_meter_number(block_gen_meter):
+            self._register_meter(block_gen_meter, filepath.name, sheet_name, "发电表")
+            if block_user_id and not self.meters[block_gen_meter].get("user_id"):
+                self.meters[block_gen_meter]["user_id"] = block_user_id
+        if block_grid_meter and is_valid_meter_number(block_grid_meter):
+            self._register_meter(block_grid_meter, filepath.name, sheet_name, "上网表")
+            if block_user_id and not self.meters[block_grid_meter].get("user_id"):
+                self.meters[block_grid_meter]["user_id"] = block_user_id
+        if block_gen_meter and block_grid_meter:
+            if is_valid_meter_number(block_gen_meter) and is_valid_meter_number(block_grid_meter):
+                self.pairs.append((block_gen_meter, block_grid_meter))
+
+        # 确定使用哪个电表：块内 > 文件级
+        gen_meter = block_gen_meter
+        grid_meter = block_grid_meter
+        if not gen_meter or not grid_meter:
+            file_meters = [mn for mn, info in self.meters.items()
+                           if info["source_file"] == filepath.name]
+            for mn in file_meters:
+                mt = self.meters[mn]["meter_type"]
+                if mt == "发电表" and not gen_meter:
+                    gen_meter = mn
+                elif mt == "上网表" and not grid_meter:
+                    grid_meter = mn
+
+        # 提取读数
         fwd_r, rev_r = {}, {}
         fwd_total = rev_total = None
+        prices = {}  # period -> price
+        amounts = {}  # period -> amount
         for row_idx, period in period_rows.items():
             fv = _to_float(df.iloc[row_idx, data_cols["forward"]]) if "forward" in data_cols else None
             rv = _to_float(df.iloc[row_idx, data_cols["reverse"]]) if "reverse" in data_cols else None
+            pv = _to_float(df.iloc[row_idx, data_cols["price"]]) if "price" in data_cols else None
+            av = _to_float(df.iloc[row_idx, data_cols["amount"]]) if "amount" in data_cols else None
             if period == "total":
                 fwd_total, rev_total = fv, rv
             elif period in ("sharp_peak", "peak", "flat", "valley"):
                 fwd_r[period] = fv
                 rev_r[period] = rv
+                if pv is not None:
+                    prices[period] = pv
+                if av is not None:
+                    amounts[period] = av
 
-        if gen_meter and any(v is not None for v in fwd_r.values()):
+        # 写入读数
+        if gen_meter and gen_meter in self.meters and any(v is not None for v in fwd_r.values()):
             parts = [v for v in fwd_r.values() if v is not None]
             self._upsert_reading(gen_meter, month, fwd_r,
                                  fwd_total or (sum(parts) if parts else None),
                                  filepath.name, sheet_name)
-        if grid_meter and any(v is not None for v in rev_r.values()):
+            # 设置折扣
+            if block_discount and not self.meters[gen_meter].get("discount"):
+                self.meters[gen_meter]["discount"] = block_discount
+        if grid_meter and grid_meter in self.meters and any(v is not None for v in rev_r.values()):
             parts = [v for v in rev_r.values() if v is not None]
             self._upsert_reading(grid_meter, month, rev_r,
                                  rev_total or (sum(parts) if parts else None),
                                  filepath.name, sheet_name)
+
+        # 记录电价信息（存入 self.prices 供后续入库）
+        if prices and block_user_id:
+            price_key = (block_user_id, month)
+            if price_key not in self.prices:
+                self.prices[price_key] = {
+                    "sharp_peak_price": prices.get("sharp_peak"),
+                    "peak_price": prices.get("peak"),
+                    "flat_price": prices.get("flat"),
+                    "valley_price": prices.get("valley"),
+                    "source_file": filepath.name,
+                }
 
     # ================================================================
     # 组装 + 合并
@@ -1087,10 +1275,13 @@ class MultiPassExtractor:
             if mn not in self.meters:
                 continue
             info = self.meters[mn]
+            uid = info.get("user_id")
+            # 查找对应的价格数据
+            price_data = self.prices.get((uid, month), {}) if uid else {}
             records.append({
                 "meter_number": mn,
                 "asset_number": info.get("asset_number"),
-                "user_id": info.get("user_id"),
+                "user_id": uid,
                 "meter_type": info.get("meter_type", "未知"),
                 "multiplier": info.get("multiplier"),
                 "discount": info.get("discount"),
@@ -1102,6 +1293,10 @@ class MultiPassExtractor:
                 "flat": reading.get("flat"),
                 "valley": reading.get("valley"),
                 "total_kwh": reading.get("total_kwh"),
+                "sharp_peak_price": price_data.get("sharp_peak_price"),
+                "peak_price": price_data.get("peak_price"),
+                "flat_price": price_data.get("flat_price"),
+                "valley_price": price_data.get("valley_price"),
                 "source_file": reading.get("source_file"),
                 "source_sheet": reading.get("source_sheet"),
             })
