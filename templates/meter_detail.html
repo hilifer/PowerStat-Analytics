@@ -106,13 +106,9 @@
                     <td class="num">{{ "%.4f"|format(p.flat_price) if p.flat_price is not none else '-' }}</td>
                     <td class="num">{{ "%.4f"|format(p.valley_price) if p.valley_price is not none else '-' }}</td>
                     <td style="font-size:0.75rem;">
-                        {% if p.source_file and p.source_file.lower().endswith(('.jpg','.jpeg','.png','.gif','.webp','.bmp')) %}
-                        <span class="source-thumb" data-filename="{{ p.source_file }}" title="{{ p.source_file }}">
-                            <span class="thumb-placeholder">载入中…</span>
-                        </span>
-                        {% else %}
-                        {{ p.source_file or '-' }}
-                        {% endif %}
+                        {% if p.source_file %}
+                        <a href="javascript:void(0)" class="source-link" data-filename="{{ p.source_file }}">{{ p.source_file }}</a>
+                        {% else %}-{% endif %}
                     </td>
                 </tr>
                 {% endfor %}
@@ -160,7 +156,11 @@
                     <td class="num">{{ "%.4f"|format(r.peak_price) if r.peak_price is not none else '-' }}</td>
                     <td class="num">{{ "%.4f"|format(r.flat_price) if r.flat_price is not none else '-' }}</td>
                     <td class="num">{{ "%.4f"|format(r.valley_price) if r.valley_price is not none else '-' }}</td>
-                    <td style="font-size:0.75rem;">{{ r.source_file or '-' }}</td>
+                    <td style="font-size:0.75rem;">
+                        {% if r.source_file %}
+                        <a href="javascript:void(0)" class="source-link" data-filename="{{ r.source_file }}">{{ r.source_file }}</a>
+                        {% else %}-{% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -177,56 +177,179 @@
     <button class="btn btn-danger btn-sm" style="margin-left:auto;" onclick="deleteMeter()">删除此电表</button>
 </div>
 
-<!-- 图片灯箱 -->
-<div id="lightbox" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.85);
-    align-items:center;justify-content:center;cursor:zoom-out;" onclick="this.style.display='none'">
-    <img id="lightbox-img" style="max-width:92vw;max-height:92vh;border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,0.5);">
+<!-- 文件预览弹窗 -->
+<div id="file-modal" class="file-modal-overlay" onclick="if(event.target===this)closeModal()">
+    <div class="file-modal">
+        <div class="file-modal-header">
+            <span id="modal-title" class="file-modal-title"></span>
+            <div style="display:flex;gap:0.5rem;align-items:center;">
+                <a id="modal-download" href="#" class="btn btn-primary btn-sm" download>下载文件</a>
+                <button class="file-modal-close" onclick="closeModal()">&times;</button>
+            </div>
+        </div>
+        <div id="modal-body" class="file-modal-body">
+            <div class="file-modal-loading">加载中…</div>
+        </div>
+    </div>
 </div>
 
 <style>
-.source-thumb img {
-    height: 40px;
-    border-radius: 4px;
-    border: 1px solid #e0e0e0;
-    cursor: zoom-in;
-    transition: transform 0.15s;
-    vertical-align: middle;
+.source-link {
+    color: var(--primary);
+    text-decoration: none;
+    cursor: pointer;
+    word-break: break-all;
 }
-.source-thumb img:hover {
-    transform: scale(1.1);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+.source-link:hover {
+    text-decoration: underline;
 }
-.thumb-placeholder {
-    display: inline-block;
-    height: 40px;
-    line-height: 40px;
+.file-modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: rgba(0,0,0,0.6);
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+}
+.file-modal {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.3);
+    max-width: 95vw;
+    max-height: 90vh;
+    width: 900px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.file-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #eee;
+    flex-shrink: 0;
+}
+.file-modal-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: #333;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 60%;
+}
+.file-modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    color: #999;
+    cursor: pointer;
+    padding: 0 0.3rem;
+    line-height: 1;
+}
+.file-modal-close:hover { color: #333; }
+.file-modal-body {
+    overflow: auto;
+    padding: 1.5rem;
+    flex: 1;
+    min-height: 200px;
+}
+.file-modal-body img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+}
+.file-modal-body iframe {
+    width: 100%;
+    height: 70vh;
+    border: none;
+    border-radius: 6px;
+}
+.file-modal-loading {
+    text-align: center;
+    padding: 3rem;
     color: var(--text-secondary);
-    font-size: 0.7rem;
+}
+.file-modal-body .preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+}
+.file-modal-body .preview-table th {
+    background: #f5f7fa;
+    padding: 6px 10px;
+    text-align: left;
+    border-bottom: 2px solid #e0e0e0;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+}
+.file-modal-body .preview-table td {
+    padding: 5px 10px;
+    border-bottom: 1px solid #f0f0f0;
+}
+.file-modal-body .preview-table tr:hover td {
+    background: #f8f9ff;
 }
 </style>
 
 <script>
-// 加载来源图片缩略图
-document.querySelectorAll('.source-thumb[data-filename]').forEach(function(el) {
-    var filename = el.dataset.filename;
-    fetch('/api/archive/find-image/' + encodeURIComponent(filename))
+function openSourcePreview(filename) {
+    var modal = document.getElementById('file-modal');
+    var body = document.getElementById('modal-body');
+    var title = document.getElementById('modal-title');
+    var dlBtn = document.getElementById('modal-download');
+
+    title.textContent = filename;
+    body.innerHTML = '<div class="file-modal-loading">加载中…</div>';
+    dlBtn.style.display = 'none';
+    modal.style.display = 'flex';
+
+    fetch('/api/archive/preview/' + encodeURIComponent(filename))
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            if (d.found) {
-                el.innerHTML = '<img src="' + d.url + '" alt="' + filename + '" title="' + filename + '">';
-                el.querySelector('img').addEventListener('click', function(e) {
-                    e.stopPropagation();
-                    var lb = document.getElementById('lightbox');
-                    document.getElementById('lightbox-img').src = d.url;
-                    lb.style.display = 'flex';
-                });
+            if (!d.found) {
+                body.innerHTML = '<div class="file-modal-loading" style="color:#e74c3c;">文件未找到: ' + filename + '</div>';
+                return;
+            }
+            dlBtn.href = d.download_url;
+            dlBtn.style.display = 'inline-flex';
+
+            if (d.type === 'image') {
+                body.innerHTML = '<img src="' + d.url + '" alt="' + d.filename + '">';
+            } else if (d.type === 'excel') {
+                body.innerHTML = d.html;
+            } else if (d.type === 'pdf') {
+                body.innerHTML = '<iframe src="' + d.url + '"></iframe>';
+            } else if (d.type === 'error') {
+                body.innerHTML = '<div class="file-modal-loading" style="color:#e74c3c;">' + d.message + '</div>';
             } else {
-                el.innerHTML = '<span style="font-size:0.7rem;">' + filename + '</span>';
+                body.innerHTML = '<div class="file-modal-loading">此文件类型不支持预览，请下载查看</div>';
             }
         })
-        .catch(function() {
-            el.innerHTML = '<span style="font-size:0.7rem;">' + filename + '</span>';
+        .catch(function(e) {
+            body.innerHTML = '<div class="file-modal-loading" style="color:#e74c3c;">加载失败: ' + e + '</div>';
         });
+}
+
+function closeModal() {
+    document.getElementById('file-modal').style.display = 'none';
+    document.getElementById('modal-body').innerHTML = '';
+}
+
+// ESC 关闭弹窗
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeModal();
+});
+
+// 绑定所有来源链接
+document.querySelectorAll('.source-link[data-filename]').forEach(function(el) {
+    el.addEventListener('click', function() {
+        openSourcePreview(this.dataset.filename);
+    });
 });
 
 function deleteMeter() {

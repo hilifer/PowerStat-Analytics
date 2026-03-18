@@ -911,6 +911,97 @@ def _register_routes(app: Flask, db: Database):
                     return jsonify({"found": True, "url": url_for("archive_image", filepath=str(rel))})
         return jsonify({"found": False})
 
+    @app.route("/api/archive/preview/<filename>")
+    def archive_file_preview(filename):
+        """预览归档文件：图片返回 URL，Excel/PDF 转 HTML 表格。"""
+        archive_root = Path(config.get("storage", "archive_root",
+                                       default="output/archive"))
+        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
+        EXCEL_EXTS = {".xlsx", ".xls", ".csv"}
+
+        # 查找文件
+        found = None
+        if archive_root.exists():
+            for f in archive_root.rglob("*"):
+                if f.is_file() and f.name == filename:
+                    found = f
+                    break
+            if not found:
+                stem = Path(filename).stem
+                for f in archive_root.rglob("*"):
+                    if f.is_file() and stem in f.stem:
+                        found = f
+                        break
+
+        if not found:
+            return jsonify({"found": False})
+
+        rel = found.relative_to(archive_root)
+        ext = found.suffix.lower()
+        download_url = url_for("archive_download", filepath=str(rel))
+
+        if ext in IMAGE_EXTS:
+            return jsonify({
+                "found": True,
+                "type": "image",
+                "url": url_for("archive_image", filepath=str(rel)),
+                "download_url": download_url,
+                "filename": found.name,
+            })
+
+        if ext in EXCEL_EXTS:
+            try:
+                import pandas as pd
+                if ext == ".csv":
+                    df = pd.read_csv(str(found))
+                    sheets = {"Sheet1": df}
+                else:
+                    xls = pd.ExcelFile(str(found))
+                    sheets = {}
+                    for name in xls.sheet_names[:10]:  # 最多10个sheet
+                        sheets[name] = pd.read_excel(xls, sheet_name=name, nrows=200)
+
+                html_parts = []
+                for name, df in sheets.items():
+                    df = df.fillna("")
+                    html_parts.append(
+                        f'<h4 style="margin:1rem 0 0.5rem;color:var(--primary);">{name}</h4>'
+                        + df.to_html(index=False, classes="preview-table", border=0,
+                                     max_rows=200, max_cols=20)
+                    )
+
+                return jsonify({
+                    "found": True,
+                    "type": "excel",
+                    "html": "\n".join(html_parts),
+                    "download_url": download_url,
+                    "filename": found.name,
+                })
+            except Exception as e:
+                return jsonify({
+                    "found": True,
+                    "type": "error",
+                    "message": f"无法预览: {e}",
+                    "download_url": download_url,
+                    "filename": found.name,
+                })
+
+        if ext == ".pdf":
+            return jsonify({
+                "found": True,
+                "type": "pdf",
+                "url": url_for("archive_image", filepath=str(rel)),
+                "download_url": download_url,
+                "filename": found.name,
+            })
+
+        return jsonify({
+            "found": True,
+            "type": "unsupported",
+            "download_url": download_url,
+            "filename": found.name,
+        })
+
     # ---- 可视化 ----
     @app.route("/charts")
     def charts():
