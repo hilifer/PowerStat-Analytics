@@ -798,6 +798,48 @@ def _register_routes(app: Flask, db: Database):
     def bill_refresh_status_api():
         return jsonify(app.config["BILL_REFRESH_STATUS"])
 
+    # ---- 单价关联诊断 API ----
+    @app.route("/api/bills/price-diagnosis")
+    def price_diagnosis():
+        """诊断单价记录为什么没有关联到账单。"""
+        with db.connection() as conn:
+            # 单价记录中的 user_id
+            price_users = conn.execute(
+                "SELECT DISTINCT user_id, reading_month FROM price_records ORDER BY user_id"
+            ).fetchall()
+            # 电表中的 user_id
+            meter_users = conn.execute(
+                "SELECT DISTINCT user_id FROM meters WHERE user_id IS NOT NULL ORDER BY user_id"
+            ).fetchall()
+            # 已成功关联的
+            matched = conn.execute("""
+                SELECT COUNT(*) FROM v_monthly_bill
+                WHERE sharp_peak_price IS NOT NULL OR peak_price IS NOT NULL
+                   OR flat_price IS NOT NULL OR valley_price IS NOT NULL
+                   OR average_price IS NOT NULL
+            """).fetchone()[0]
+            # 未关联的单价记录
+            unmatched = conn.execute("""
+                SELECT p.user_id, p.reading_month, p.sharp_peak_price, p.peak_price,
+                       p.flat_price, p.valley_price, p.average_price, p.source_file
+                FROM price_records p
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM meters m WHERE m.user_id = p.user_id
+                )
+            """).fetchall()
+
+        return jsonify({
+            "price_user_ids": [{"user_id": r["user_id"], "month": r["reading_month"]} for r in price_users],
+            "meter_user_ids": [r["user_id"] for r in meter_users],
+            "matched_bills": matched,
+            "unmatched_prices": [dict(r) for r in unmatched],
+            "diagnosis": (
+                "所有单价记录的 user_id 在 meters 表中都找不到匹配" if len(unmatched) == len(price_users)
+                else f"{len(unmatched)}/{len(price_users)} 条单价记录未匹配"
+                if unmatched else "全部匹配成功"
+            ),
+        })
+
     # ---- 归档浏览（按年月分类） ----
     @app.route("/archive")
     def archive_index():
