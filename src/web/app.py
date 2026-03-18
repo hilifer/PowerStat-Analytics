@@ -878,6 +878,39 @@ def _register_routes(app: Flask, db: Database):
         return send_from_directory(str(full_path.parent), full_path.name,
                                   as_attachment=True)
 
+    # ---- 归档图片内联显示（用于缩略图/灯箱） ----
+    @app.route("/archive/image/<path:filepath>")
+    def archive_image(filepath):
+        archive_root = Path(config.get("storage", "archive_root",
+                                       default="output/archive"))
+        full_path = archive_root / filepath
+        if not full_path.exists() or not full_path.is_file():
+            abort(404)
+        try:
+            full_path.resolve().relative_to(archive_root.resolve())
+        except ValueError:
+            abort(403)
+        return send_from_directory(str(full_path.parent), full_path.name)
+
+    @app.route("/api/archive/find-image/<filename>")
+    def find_archive_image(filename):
+        """根据文件名在归档目录中查找图片，返回内联显示 URL。"""
+        archive_root = Path(config.get("storage", "archive_root",
+                                       default="output/archive"))
+        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
+        if archive_root.exists():
+            for f in archive_root.rglob("*"):
+                if f.is_file() and f.name == filename and f.suffix.lower() in IMAGE_EXTS:
+                    rel = f.relative_to(archive_root)
+                    return jsonify({"found": True, "url": url_for("archive_image", filepath=str(rel))})
+            # 模糊匹配
+            stem = Path(filename).stem
+            for f in archive_root.rglob("*"):
+                if f.is_file() and stem in f.stem and f.suffix.lower() in IMAGE_EXTS:
+                    rel = f.relative_to(archive_root)
+                    return jsonify({"found": True, "url": url_for("archive_image", filepath=str(rel))})
+        return jsonify({"found": False})
+
     # ---- 可视化 ----
     @app.route("/charts")
     def charts():

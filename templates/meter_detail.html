@@ -105,7 +105,15 @@
                     <td class="num">{{ "%.4f"|format(p.peak_price) if p.peak_price is not none else '-' }}</td>
                     <td class="num">{{ "%.4f"|format(p.flat_price) if p.flat_price is not none else '-' }}</td>
                     <td class="num">{{ "%.4f"|format(p.valley_price) if p.valley_price is not none else '-' }}</td>
-                    <td style="font-size:0.75rem;">{{ p.source_file or '-' }}</td>
+                    <td style="font-size:0.75rem;">
+                        {% if p.source_file and p.source_file.lower().endswith(('.jpg','.jpeg','.png','.gif','.webp','.bmp')) %}
+                        <span class="source-thumb" data-filename="{{ p.source_file }}" title="{{ p.source_file }}">
+                            <span class="thumb-placeholder">载入中…</span>
+                        </span>
+                        {% else %}
+                        {{ p.source_file or '-' }}
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -169,7 +177,58 @@
     <button class="btn btn-danger btn-sm" style="margin-left:auto;" onclick="deleteMeter()">删除此电表</button>
 </div>
 
+<!-- 图片灯箱 -->
+<div id="lightbox" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.85);
+    align-items:center;justify-content:center;cursor:zoom-out;" onclick="this.style.display='none'">
+    <img id="lightbox-img" style="max-width:92vw;max-height:92vh;border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,0.5);">
+</div>
+
+<style>
+.source-thumb img {
+    height: 40px;
+    border-radius: 4px;
+    border: 1px solid #e0e0e0;
+    cursor: zoom-in;
+    transition: transform 0.15s;
+    vertical-align: middle;
+}
+.source-thumb img:hover {
+    transform: scale(1.1);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+.thumb-placeholder {
+    display: inline-block;
+    height: 40px;
+    line-height: 40px;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+}
+</style>
+
 <script>
+// 加载来源图片缩略图
+document.querySelectorAll('.source-thumb[data-filename]').forEach(function(el) {
+    var filename = el.dataset.filename;
+    fetch('/api/archive/find-image/' + encodeURIComponent(filename))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (d.found) {
+                el.innerHTML = '<img src="' + d.url + '" alt="' + filename + '" title="' + filename + '">';
+                el.querySelector('img').addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    var lb = document.getElementById('lightbox');
+                    document.getElementById('lightbox-img').src = d.url;
+                    lb.style.display = 'flex';
+                });
+            } else {
+                el.innerHTML = '<span style="font-size:0.7rem;">' + filename + '</span>';
+            }
+        })
+        .catch(function() {
+            el.innerHTML = '<span style="font-size:0.7rem;">' + filename + '</span>';
+        });
+});
+
 function deleteMeter() {
     const meterNumber = "{{ meter.meter_number }}";
     if (!confirm('确定要删除电表 ' + meterNumber + ' 吗？\n\n该操作将同时删除该电表的所有抄表记录，且不可恢复！')) {
