@@ -170,6 +170,9 @@ class OCREngine:
                          result.flat_price or 0,
                          result.valley_price or 0,
                          len(result.meter_records))
+            else:
+                log.warning("  OCR [%s]: 未提取到用户编号或单价，原文前300字: %s",
+                            filepath.name, raw_text[:300].replace('\n', ' | '))
 
         except Exception as e:
             log.error("OCR 处理失败 [%s]: %s", filepath, e, exc_info=True)
@@ -428,7 +431,13 @@ class OCREngine:
         return prices
 
     def _extract_prices_table_row(self, text: str) -> dict:
-        """从表格行结构中提取价格（每行一个时段）。"""
+        """从表格行结构中提取价格（每行一个时段）。
+
+        支持多种表格格式：
+        - 每行一个时段: "尖峰 1.2345"
+        - 表格列: "尖峰 | 峰 | 平 | 谷" + "1.23 | 0.98 | 0.56 | 0.32"
+        - 合并行: "尖峰1.2345峰0.9876平0.5678谷0.3210"
+        """
         prices = {}
         lines = text.split("\n")
 
@@ -439,6 +448,7 @@ class OCREngine:
             "valley_price": ["谷"],
         }
 
+        # 策略A：逐行匹配
         for line in lines:
             line_clean = line.strip()
             if not line_clean:
@@ -460,6 +470,56 @@ class OCREngine:
                                 prices[field] = val
                                 break
                         break
+
+        if len(prices) >= 3:
+            return prices
+
+        # 策略B：单行内连续出现"尖峰X.XXXX峰X.XXXX平X.XXXX谷X.XXXX"
+        full_text = text.replace("\n", " ")
+        m = re.search(
+            r'尖峰?\s*[:：]?\s*(\d+\.\d{2,6})\s*[元/度kWh]*\s*'
+            r'(?:(?!尖)峰)\s*[:：]?\s*(\d+\.\d{2,6})\s*[元/度kWh]*\s*'
+            r'平\s*[:：]?\s*(\d+\.\d{2,6})\s*[元/度kWh]*\s*'
+            r'谷\s*[:：]?\s*(\d+\.\d{2,6})',
+            full_text
+        )
+        if m:
+            vals = [float(m.group(i)) for i in range(1, 5)]
+            if all(self._is_valid_price(v) for v in vals):
+                return {
+                    "sharp_peak_price": vals[0],
+                    "peak_price": vals[1],
+                    "flat_price": vals[2],
+                    "valley_price": vals[3],
+                }
+
+        # 策略C：表格列标题行 + 数据行（标题和值在相邻行）
+        for i, line in enumerate(lines):
+            line_clean = line.strip()
+            # 检查是否是标题行（包含多个时段关键字）
+            kw_hits = sum(1 for kw in ["尖", "峰", "平", "谷"] if kw in line_clean)
+            if kw_hits >= 3 and i + 1 < len(lines):
+                # 下一行可能是数据行
+                data_line = lines[i + 1].strip()
+                nums = re.findall(r'(\d+\.\d{2,6})', data_line)
+                valid = [float(n) for n in nums if self._is_valid_price(float(n))]
+                if len(valid) >= 3:
+                    # 按标题行中关键字出现的顺序映射
+                    positions = []
+                    for field, kws in field_map.items():
+                        for kw in kws:
+                            pos = line_clean.find(kw)
+                            if pos >= 0:
+                                if field == "peak_price" and "尖" in line_clean[:pos+1]:
+                                    continue
+                                positions.append((pos, field))
+                                break
+                    positions.sort()
+                    for idx, (_, field) in enumerate(positions):
+                        if idx < len(valid):
+                            prices[field] = valid[idx]
+                    if len(prices) >= 3:
+                        return prices
 
         return prices
 

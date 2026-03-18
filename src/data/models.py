@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS meters (
     multiplier      REAL DEFAULT 1.0,                -- 倍率
     discount        REAL DEFAULT 1.0,                -- 折扣系数
     is_locked       INTEGER DEFAULT 0,               -- 锁定标志 (1=锁定, 0=未锁定)
+    paired_meter_id INTEGER,                         -- 配对电表ID（发电表↔上网表）
     project_name    TEXT,                            -- 所属项目
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -155,6 +156,11 @@ class Database:
             log.info("迁移: 添加 meters.is_locked 列")
             conn.execute("ALTER TABLE meters ADD COLUMN is_locked INTEGER DEFAULT 0")
 
+        # 添加 paired_meter_id 列（如果缺失）
+        if "paired_meter_id" not in columns:
+            log.info("迁移: 添加 meters.paired_meter_id 列")
+            conn.execute("ALTER TABLE meters ADD COLUMN paired_meter_id INTEGER")
+
         # 重建视图（确保包含新字段）
         conn.execute("DROP VIEW IF EXISTS v_monthly_bill")
         conn.execute("""
@@ -213,6 +219,7 @@ class Database:
                     multiplier      REAL DEFAULT 1.0,
                     discount        REAL DEFAULT 1.0,
                     is_locked       INTEGER DEFAULT 0,
+                    paired_meter_id INTEGER,
                     project_name    TEXT,
                     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -539,6 +546,29 @@ class Database:
             )
             log.info("电表 %s 已解锁", meter_number)
             return True
+
+    def set_meter_pair(self, meter_number_a: str, meter_number_b: str) -> bool:
+        """设置两个电表的配对关系（发电表↔上网表）。"""
+        with self.connection() as conn:
+            a = conn.execute("SELECT id FROM meters WHERE meter_number = ?", (meter_number_a,)).fetchone()
+            b = conn.execute("SELECT id FROM meters WHERE meter_number = ?", (meter_number_b,)).fetchone()
+            if not a or not b:
+                return False
+            conn.execute("UPDATE meters SET paired_meter_id = ? WHERE id = ?", (b["id"], a["id"]))
+            conn.execute("UPDATE meters SET paired_meter_id = ? WHERE id = ?", (a["id"], b["id"]))
+            log.info("配对电表: %s <-> %s", meter_number_a, meter_number_b)
+            return True
+
+    def get_paired_meter(self, meter_id: int) -> Optional[dict]:
+        """获取配对电表信息。"""
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT m2.* FROM meters m1
+                   JOIN meters m2 ON m1.paired_meter_id = m2.id
+                   WHERE m1.id = ?""",
+                (meter_id,)
+            ).fetchone()
+            return dict(row) if row else None
 
     def upsert_reading(self, meter_id: int, reading_month: str,
                        sharp_peak: float = None, peak: float = None,

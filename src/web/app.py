@@ -322,6 +322,7 @@ def _register_routes(app: Flask, db: Database):
                         log.error("入库失败: %s - %s", rec.get("meter_number"), e)
 
                 # OCR 单价入库
+                price_saved = 0
                 for ocr in all_ocr:
                     if ocr.user_id and ocr.reading_month:
                         try:
@@ -334,12 +335,26 @@ def _register_routes(app: Flask, db: Database):
                                 valley_price=ocr.valley_price,
                                 source_file=ocr.source_file,
                             )
+                            if ocr.has_price_data():
+                                price_saved += 1
+                                _log(f"OCR 单价: 用户={ocr.user_id}, 月份={ocr.reading_month}, "
+                                     f"尖={ocr.sharp_peak_price}, 峰={ocr.peak_price}, "
+                                     f"平={ocr.flat_price}, 谷={ocr.valley_price}")
                         except Exception as e:
                             log.error("单价入库失败: %s", e)
 
                 _log(f"入库完成，写入 {meters_added} 条电表记录")
                 if all_ocr:
-                    _log(f"写入 {len(all_ocr)} 条 OCR 单价记录")
+                    _log(f"OCR 处理 {len(all_ocr)} 张图片，写入 {price_saved} 条单价记录")
+
+                # 保存电表配对关系
+                if extractor.pairs:
+                    _log(f"保存 {len(extractor.pairs)} 组电表配对关系…")
+                    for gen_meter, grid_meter in extractor.pairs:
+                        try:
+                            db.set_meter_pair(gen_meter, grid_meter)
+                        except Exception as e:
+                            log.error("配对保存失败: %s <-> %s: %s", gen_meter, grid_meter, e)
 
                 # 归档
                 _log(f"归档 {len(new_attachments)} 个新附件…")
@@ -416,10 +431,23 @@ def _register_routes(app: Flask, db: Database):
         project = request.args.get("project")
         user_id = request.args.get("user_id")
         meters = db.get_meters(project_name=project, user_id=user_id)
+
+        # 按用户编号分组，体现发电表/上网表配对关系
+        meter_groups = {}
+        ungrouped = []
+        for m in meters:
+            uid = m.get("user_id") or ""
+            if uid:
+                meter_groups.setdefault(uid, []).append(m)
+            else:
+                ungrouped.append(m)
+
         projects = db.get_projects()
         user_ids = db.get_user_ids(project_name=project)
         return render_template("meters.html",
-                               meters=meters, projects=projects,
+                               meters=meters, meter_groups=meter_groups,
+                               ungrouped=ungrouped,
+                               projects=projects,
                                user_ids=user_ids,
                                sel_project=project, sel_user_id=user_id)
 
@@ -440,7 +468,35 @@ def _register_routes(app: Flask, db: Database):
                 (meter["user_id"], meter_id)
             ).fetchall()
             readings = [dict(r) for r in readings]
-        return render_template("meter_detail.html", meter=meter, readings=readings)
+
+            # 查找配对电表（通过 paired_meter_id 或同用户编号不同类型）
+            paired_meter = None
+            if meter.get("paired_meter_id"):
+                row = conn.execute("SELECT * FROM meters WHERE id = ?",
+                                   (meter["paired_meter_id"],)).fetchone()
+                if row:
+                    paired_meter = dict(row)
+            if not paired_meter and meter.get("user_id"):
+                # 同用户编号下找配对类型
+                pair_type = "上网表" if meter["meter_type"] == "发电表" else "发电表"
+                row = conn.execute(
+                    "SELECT * FROM meters WHERE user_id = ? AND meter_type = ? AND id != ?",
+                    (meter["user_id"], pair_type, meter_id)
+                ).fetchone()
+                if row:
+                    paired_meter = dict(row)
+
+            # 查找该用户的单价记录
+            price_records = []
+            if meter.get("user_id"):
+                rows = conn.execute(
+                    "SELECT * FROM price_records WHERE user_id = ? ORDER BY reading_month",
+                    (meter["user_id"],)
+                ).fetchall()
+                price_records = [dict(r) for r in rows]
+
+        return render_template("meter_detail.html", meter=meter, readings=readings,
+                               paired_meter=paired_meter, price_records=price_records)
 
     # ---- 账单查询 ----
     @app.route("/bills")

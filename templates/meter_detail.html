@@ -59,8 +59,60 @@
             <span class="kv-label">项目</span>
             <span class="kv-value">{{ meter.project_name or '-' }}</span>
         </div>
+        <div class="kv-item">
+            <span class="kv-label">配对电表</span>
+            <span class="kv-value">
+                {% if paired_meter %}
+                <a href="{{ url_for('meter_detail', meter_id=paired_meter.id) }}" style="color:var(--primary);">
+                    {% if paired_meter.meter_type == '发电表' %}
+                    <span class="tag tag-gen" style="font-size:0.7rem;">发电表</span>
+                    {% else %}
+                    <span class="tag tag-grid" style="font-size:0.7rem;">上网表</span>
+                    {% endif %}
+                    {{ paired_meter.meter_number }}
+                </a>
+                {% else %}
+                <span style="color:var(--text-secondary);">未配对</span>
+                {% endif %}
+            </span>
+        </div>
     </div>
 </div>
+
+<!-- 单价记录 -->
+{% if price_records %}
+<div class="card">
+    <div class="card-header">
+        <h2>单价记录 ({{ price_records|length }} 条)</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>月份</th>
+                    <th>尖峰价</th>
+                    <th>峰价</th>
+                    <th>平价</th>
+                    <th>谷价</th>
+                    <th>来源</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in price_records %}
+                <tr>
+                    <td>{{ p.reading_month }}</td>
+                    <td class="num">{{ "%.4f"|format(p.sharp_peak_price) if p.sharp_peak_price is not none else '-' }}</td>
+                    <td class="num">{{ "%.4f"|format(p.peak_price) if p.peak_price is not none else '-' }}</td>
+                    <td class="num">{{ "%.4f"|format(p.flat_price) if p.flat_price is not none else '-' }}</td>
+                    <td class="num">{{ "%.4f"|format(p.valley_price) if p.valley_price is not none else '-' }}</td>
+                    <td style="font-size:0.75rem;">{{ p.source_file or '-' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
 
 <!-- 抄表记录 -->
 <div class="card">

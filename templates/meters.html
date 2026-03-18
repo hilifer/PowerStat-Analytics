@@ -38,16 +38,102 @@
 </form>
 
 {% if meters %}
-<div class="card">
+<div class="card-header" style="border:none; padding:0; margin-bottom:0.5rem;">
+    <h2>共 {{ meters|length }} 块电表，{{ meter_groups|length }} 个用户</h2>
+</div>
+
+{% for uid, group in meter_groups|items %}
+<div class="card" style="margin-bottom:1rem;">
     <div class="card-header">
-        <h2>共 {{ meters|length }} 块电表</h2>
+        <h2 style="font-size:0.95rem;">
+            用户编号: <strong>{{ uid }}</strong>
+            <span style="color:var(--text-secondary); font-weight:normal; margin-left:0.5rem;">
+                {{ group[0].project_name or '' }}
+            </span>
+        </h2>
+        <span style="font-size:0.8rem; color:var(--text-secondary);">
+            {% set gen_count = group|selectattr('meter_type', 'equalto', '发电表')|list|length %}
+            {% set grid_count = group|selectattr('meter_type', 'equalto', '上网表')|list|length %}
+            {% if gen_count > 0 and grid_count > 0 %}
+            <span class="tag tag-gen" style="font-size:0.7rem;">发电表 {{ gen_count }}</span>
+            <span style="margin:0 0.25rem;">+</span>
+            <span class="tag tag-grid" style="font-size:0.7rem;">上网表 {{ grid_count }}</span>
+            {% elif gen_count > 0 %}
+            <span class="tag tag-gen" style="font-size:0.7rem;">发电表 {{ gen_count }}</span>
+            {% elif grid_count > 0 %}
+            <span class="tag tag-grid" style="font-size:0.7rem;">上网表 {{ grid_count }}</span>
+            {% endif %}
+        </span>
     </div>
     <div class="table-wrap">
         <table>
             <thead>
                 <tr>
                     <th>电表号</th>
-                    <th>用户编号</th>
+                    <th>资产编号</th>
+                    <th>类型</th>
+                    <th>倍率</th>
+                    <th>折扣</th>
+                    <th>配对电表</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for m in group|sort(attribute='meter_type') %}
+                <tr>
+                    <td><a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="row-link">{{ m.meter_number or '-' }}</a></td>
+                    <td style="font-size:0.8rem;">{{ m.asset_number or '-' }}</td>
+                    <td>
+                        {% if m.meter_type == '上网表' %}
+                        <span class="tag tag-grid">上网表</span>
+                        {% elif m.meter_type == '发电表' %}
+                        <span class="tag tag-gen">发电表</span>
+                        {% else %}
+                        <span class="tag tag-unknown">{{ m.meter_type }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="num">{{ m.multiplier }}</td>
+                    <td class="num">{{ m.discount or 1.0 }}{% if m.discount and m.discount != 1.0 %} ({{ "%.1f"|format(m.discount * 10) }}折){% endif %}</td>
+                    <td style="font-size:0.8rem;">
+                        {% set paired = group|rejectattr('id', 'equalto', m.id)|list %}
+                        {% if m.meter_type == '发电表' %}
+                            {% set partner = paired|selectattr('meter_type', 'equalto', '上网表')|first %}
+                        {% elif m.meter_type == '上网表' %}
+                            {% set partner = paired|selectattr('meter_type', 'equalto', '发电表')|first %}
+                        {% else %}
+                            {% set partner = none %}
+                        {% endif %}
+                        {% if partner %}
+                        <a href="{{ url_for('meter_detail', meter_id=partner.id) }}" style="color:var(--primary);">
+                            {% if partner.meter_type == '发电表' %}发电{% else %}上网{% endif %}
+                            {{ partner.meter_number[-6:] }}
+                        </a>
+                        {% else %}
+                        <span style="color:var(--text-secondary);">-</span>
+                        {% endif %}
+                    </td>
+                    <td style="white-space:nowrap;">
+                        <a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="btn btn-outline btn-sm">详情</a>
+                        <button class="btn btn-danger btn-sm" onclick="deleteMeter('{{ m.meter_number }}')">删除</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endfor %}
+
+{% if ungrouped %}
+<div class="card" style="margin-bottom:1rem;">
+    <div class="card-header">
+        <h2 style="font-size:0.95rem;">未关联用户编号</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>电表号</th>
                     <th>资产编号</th>
                     <th>类型</th>
                     <th>倍率</th>
@@ -56,11 +142,10 @@
                 </tr>
             </thead>
             <tbody>
-                {% for m in meters %}
+                {% for m in ungrouped %}
                 <tr>
                     <td><a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="row-link">{{ m.meter_number or '-' }}</a></td>
-                    <td>{{ m.user_id or '-' }}</td>
-                    <td>{{ m.asset_number or '-' }}</td>
+                    <td style="font-size:0.8rem;">{{ m.asset_number or '-' }}</td>
                     <td>
                         {% if m.meter_type == '上网表' %}
                         <span class="tag tag-grid">上网表</span>
@@ -82,6 +167,8 @@
         </table>
     </div>
 </div>
+{% endif %}
+
 {% else %}
 <div class="empty-state">
     <p>暂无电表数据</p>
