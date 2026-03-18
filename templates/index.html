@@ -24,8 +24,9 @@
     </div>
     <div class="refresh-info" style="margin-top:0.5rem;">
         <small style="color:#666;">
-            <strong>增量更新</strong>：下载新邮件 → 建立电表档案 → 补全/清理 → 扫描所有文件提取抄表和单价<br>
-            <strong>全部更新</strong>：清空所有数据 → 从头下载 → 建立电表档案 → 补全/清理 → 扫描所有文件提取抄表和单价
+            <strong>增量更新</strong>：下载新邮件 → 建立电表档案 → 交叉验证 → 补全/清理<br>
+            <strong>全部更新</strong>：清空所有数据 → 从头下载 → 建立电表档案 → 交叉验证 → 补全/清理<br>
+            <small style="color:#999;">抄表数据和单价请在「账单查询」页面单独操作</small>
         </small>
     </div>
     <div class="refresh-info">
@@ -43,7 +44,7 @@
 
 <script>
 function confirmFullReset() {
-    if (!confirm('⚠ 全部更新将执行以下操作：\n\n1. 清空所有电表数据\n2. 清空所有抄表记录\n3. 清空所有电价记录\n4. 删除已下载的附件文件\n5. 从头重新抓取和解析邮件\n\n此操作不可恢复！确定继续？')) {
+    if (!confirm('⚠ 全部更新将执行以下操作：\n\n1. 清空所有电表数据\n2. 清空所有抄表记录\n3. 清空所有电价记录\n4. 删除已下载的附件文件\n5. 从头重新抓取并建立电表档案\n\n此操作不可恢复！确定继续？')) {
         return;
     }
     if (!confirm('再次确认：真的要清空所有数据从头开始吗？')) {

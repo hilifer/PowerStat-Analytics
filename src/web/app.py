@@ -280,11 +280,11 @@ def _register_routes(app: Flask, db: Database):
                             for sf in sub_files:
                                 queue.append((sf, sinfo))
 
-                # 1.2 多轮扫描提取电表档案
+                # 1.2 多轮扫描提取电表档案（仅电表信息，不提取读数）
                 _log(f"多轮扫描提取电表档案（{len(all_sheets)} 个 sheet，{len(new_attachments)} 个新附件，跳过 {skipped} 个已处理）")
                 extractor = MultiPassExtractor()
                 extractor.load_dataframes(all_sheets)
-                all_records = extractor.extract_all()
+                all_records = extractor.extract_meters_only()
 
                 if all_text_records:
                     all_records.extend(all_text_records)
@@ -365,14 +365,7 @@ def _register_routes(app: Flask, db: Database):
 
                 with db.connection() as conn:
                     final_meter_count = conn.execute("SELECT COUNT(*) FROM meters").fetchone()[0]
-                _log(f"第一阶段完成，电表档案已定型: {final_meter_count} 块电表")
-
-                # ============================================================
-                # 第二阶段：提取抄表数据和单价
-                # 扫描所有归档文件（新旧都扫）→ 提取读数 + OCR单价 → 关联到已有电表
-                # ============================================================
-                _log("═══ 第二阶段：提取抄表数据和单价 ═══")
-                _do_bill_update(clear_first=False, log_fn=_log)
+                _log(f"完成！电表档案已定型: {final_meter_count} 块电表")
 
                 status["result"] = {
                     "new": new_count,
@@ -380,15 +373,8 @@ def _register_routes(app: Flask, db: Database):
                     "meters_added": meters_added,
                     "cleaned": cleaned,
                 }
-                # 合并第二阶段结果
-                bill_result = app.config["BILL_REFRESH_STATUS"].get("result") or {}
-                status["result"]["readings_added"] = bill_result.get("readings_added", 0)
-                status["result"]["prices_added"] = bill_result.get("prices_added", 0)
 
-                _log(f"全部完成！新增 {new_count} 个附件，"
-                     f"电表 {meters_added} 条，清理 {cleaned} 条，"
-                     f"抄表 {bill_result.get('readings_added', 0)} 条，"
-                     f"单价 {bill_result.get('prices_added', 0)} 条")
+                _log(f"新增 {new_count} 个附件，电表 {meters_added} 条，清理 {cleaned} 条")
                 status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             except Exception as e:

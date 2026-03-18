@@ -90,11 +90,30 @@ class MultiPassExtractor:
         self._sheets = sheets
         log.info("多轮扫描: 加载 %d 个 sheet", len(sheets))
 
-    def extract_all(self) -> list[dict]:
+    def extract_meters_only(self) -> list[dict]:
+        """仅提取电表档案（不提取读数），用于首页刷新。"""
         log.info("=" * 50)
-        log.info("开始多轮扫描提取（笨方法）")
+        log.info("开始多轮扫描提取（仅电表档案）")
         log.info("=" * 50)
 
+        self._extract_meter_info()
+        return self._build_records()
+
+    def extract_all(self) -> list[dict]:
+        log.info("=" * 50)
+        log.info("开始多轮扫描提取（完整模式）")
+        log.info("=" * 50)
+
+        self._extract_meter_info()
+
+        # === 动态数据 ===
+        self._pass5_readings()
+        log.info("读数提取完成: %d 条记录", len(self.readings))
+
+        return self._build_records()
+
+    def _extract_meter_info(self):
+        """提取电表档案信息（pass0-pass4 + 交叉验证）。"""
         # === 预扫描：配对电表块 ===
         self._pass0_paired_blocks()
 
@@ -107,18 +126,15 @@ class MultiPassExtractor:
         # 合并短电表号
         self._merge_short_meters()
 
+        # === 交叉验证：检测并清除冲突数据 ===
+        self._pass6_cross_validate()
+
         # 打印电表档案
         log.info("电表档案建立完成: %d 个电表", len(self.meters))
         for mn, info in self.meters.items():
             log.info("  %s | 类型=%s | 资产=%s | 用户=%s | 倍率=%s | 项目=%s",
                      mn, info.get("meter_type"), info.get("asset_number"),
                      info.get("user_id"), info.get("multiplier"), info.get("project_name"))
-
-        # === 动态数据 ===
-        self._pass5_readings()
-        log.info("读数提取完成: %d 条记录", len(self.readings))
-
-        return self._build_records()
 
     # ================================================================
     # 预扫描：配对电表块识别（统计表中的用户号+发电表+上网表块）
@@ -1089,6 +1105,63 @@ class MultiPassExtractor:
                     del self.readings[key]
             del self.meters[short]
             log.info("  合并: %s -> %s", short, long)
+
+    # ================================================================
+    # 交叉验证
+    # ================================================================
+
+    def _pass6_cross_validate(self):
+        """交叉验证：检测字段之间的冲突并清除可疑数据。
+
+        规则：
+        1. user_id 不能等于自身或任何其他已知 meter_number
+        2. asset_number 不能等于自身或任何其他已知 meter_number
+        3. user_id 和 asset_number 不能相同
+        4. user_id 不应满足电表号特征（8-16位纯数字且已注册）
+        """
+        log.info("[交叉验证] 检查字段冲突…")
+        all_meter_numbers = set(self.meters.keys())
+        cleared = 0
+
+        for mn, info in self.meters.items():
+            uid = info.get("user_id") or ""
+            asset = info.get("asset_number") or ""
+
+            # 规则1：user_id 不能是任何已知电表号
+            if uid and uid in all_meter_numbers:
+                log.warning("  电表 %s: user_id '%s' 与已知电表号冲突，已清除",
+                            mn, uid)
+                info["user_id"] = ""
+                cleared += 1
+
+            # 规则2：asset_number 不能是任何已知电表号
+            if asset and asset in all_meter_numbers:
+                log.warning("  电表 %s: asset_number '%s' 与已知电表号冲突，已清除",
+                            mn, asset)
+                info["asset_number"] = ""
+                cleared += 1
+
+            # 规则3：user_id 和 asset_number 不能相同
+            uid = info.get("user_id") or ""
+            asset = info.get("asset_number") or ""
+            if uid and asset and uid == asset:
+                log.warning("  电表 %s: user_id 和 asset_number 相同 ('%s')，清除 user_id",
+                            mn, uid)
+                info["user_id"] = ""
+                cleared += 1
+
+            # 规则4：user_id 满足电表号格式特征（8-16位纯数字）时标记警告
+            uid = info.get("user_id") or ""
+            if uid and _is_meter_like(uid):
+                log.warning("  电表 %s: user_id '%s' 格式类似电表号（8-16位纯数字），已清除",
+                            mn, uid)
+                info["user_id"] = ""
+                cleared += 1
+
+        if cleared:
+            log.info("  交叉验证清除 %d 个可疑值（留待人工审核填写）", cleared)
+        else:
+            log.info("  交叉验证通过，无冲突")
 
     # ================================================================
     # 工具方法
