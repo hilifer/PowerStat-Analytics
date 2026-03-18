@@ -355,6 +355,14 @@ class OCREngine:
                 prices["average_price"] = avg
             return prices
 
+        # ---- 策略1.5：大工业组件费用行求和（电度电费+输配电费+上网环节+系统运行） ----
+        prices = self._extract_prices_industrial_components(text)
+        if self._has_enough_prices(prices):
+            avg = self._extract_average_price(text)
+            if avg is not None:
+                prices["average_price"] = avg
+            return prices
+
         # ---- 策略2：表格行级匹配（尖/峰/平/谷关键字 + 数字） ----
         prices = self._extract_prices_table_row(text)
         if self._has_enough_prices(prices):
@@ -429,22 +437,27 @@ class OCREngine:
         """从「电费信息 Charge Information」表格中提取分时段单价。
 
         匹配格式（南方电网工业分时）：
-          尖期电量电费  0       0         0
-          峰期电量电费  5725    0.95786875  5483.81
-          平期电量电费  7870    0.71406875  5619.72
-          谷期电量电费  7145    0.22636875  1617.42
+          格式A: 尖期电量电费  0       0         0
+                 峰期电量电费  5725    0.95786875  5483.81
+          格式B: 电度电费(尖)  0       0         0
+                 电度电费(峰)  17550   0.62779000  11017.72
+          格式C: 电脑电费(峰)  17550   0.62779000  11017.72  (OCR误读)
 
         每行: 标签  计费电量  单价  金额 — 单价是第2个小数（8位精度）
         """
         prices = {}
         lines = text.split("\n")
 
-        # X期电量电费 行匹配
+        # X期电量电费 行匹配 + 电度电费(X) / 电脑电费(X) 括号格式
         period_map = {
-            "sharp_peak_price": [r'尖\s*期?\s*电量电费', r'尖\s*期?\s*电[量费]'],
-            "peak_price":       [r'(?<!尖)\s*峰\s*期?\s*电量电费', r'(?<!尖)\s*峰\s*期?\s*电[量费]'],
-            "flat_price":       [r'平\s*期?\s*电量电费', r'平\s*期?\s*电[量费]'],
-            "valley_price":     [r'谷\s*期?\s*电量电费', r'谷\s*期?\s*电[量费]'],
+            "sharp_peak_price": [r'尖\s*期?\s*电量电费', r'尖\s*期?\s*电[量费]',
+                                 r'电[度脑]\s*电费\s*[(\(]\s*尖'],
+            "peak_price":       [r'(?<!尖)\s*峰\s*期?\s*电量电费', r'(?<!尖)\s*峰\s*期?\s*电[量费]',
+                                 r'电[度脑]\s*电费\s*[(\(]\s*峰'],
+            "flat_price":       [r'平\s*期?\s*电量电费', r'平\s*期?\s*电[量费]',
+                                 r'电[度脑]\s*电费\s*[(\(]\s*平'],
+            "valley_price":     [r'谷\s*期?\s*电量电费', r'谷\s*期?\s*电[量费]',
+                                 r'电[度脑]\s*电费\s*[(\(]\s*谷'],
         }
 
         for line in lines:
@@ -479,6 +492,73 @@ class OCREngine:
 
         return prices
 
+    def _extract_prices_industrial_components(self, text: str) -> dict:
+        """大工业用电：从组件费用行提取并求和各时段单价。
+
+        大工业电费账单包含多个组件行（电度电费、输配电费、上网环节线损、系统运行费用），
+        每个组件分别列出尖/峰/平/谷的单价。总单价 = 各组件单价之和。
+
+        典型格式：
+          电度电费(峰)   17550.00  0.62779000  11017.72
+          输配电费(峰)   17550.00  0.21420000   3759.21
+          上网环节线损电费(峰) 17550.00 0.02750000 482.63
+          系统运行费用(峰) 17550.00  0.11730000  2058.62
+        """
+        lines = text.split("\n")
+
+        # 时段关键字
+        period_keys = {
+            "sharp_peak_price": ["尖"],
+            "peak_price": ["峰"],
+            "flat_price": ["平"],
+            "valley_price": ["谷"],
+        }
+
+        # 组件行关键字（只匹配包含这些关键字的行）
+        component_keywords = ["电度电费", "电脑电费", "输配电费", "输配电",
+                              "上网环节", "环节线损", "系统运行", "运行费用"]
+
+        # 每个时段的组件单价列表
+        period_components: dict[str, list[float]] = {k: [] for k in period_keys}
+
+        for line in lines:
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+
+            # 必须包含至少一个组件关键字
+            if not any(kw in line_clean for kw in component_keywords):
+                continue
+
+            # 判断属于哪个时段
+            for field, kws in period_keys.items():
+                for kw in kws:
+                    # 用括号格式 "(峰)" 或 "峰期" 匹配
+                    if re.search(rf'[(\(]\s*{kw}\s*[)\)]', line_clean) or \
+                       re.search(rf'{kw}\s*期', line_clean):
+                        # 排除 peak 行含 "尖"
+                        if field == "peak_price" and "尖" in line_clean:
+                            continue
+                        # 提取该行中像单价的数字（0.x 范围，高精度）
+                        nums = re.findall(r'(\d+\.\d{2,8})', line_clean)
+                        for n in nums:
+                            val = float(n)
+                            # 单价通常 < 3.0，排除电量和金额（通常 > 10）
+                            if 0.001 <= val <= 3.0:
+                                period_components[field].append(val)
+                                break  # 每行只取一个单价
+                        break
+
+        # 求和得到各时段总单价
+        prices = {}
+        for field, components in period_components.items():
+            if components:
+                total = sum(components)
+                if self._is_valid_price(total):
+                    prices[field] = round(total, 8)
+
+        return prices
+
     def _extract_prices_table_row(self, text: str) -> dict:
         """从表格行结构中提取价格（每行一个时段）。
 
@@ -501,6 +581,7 @@ class OCREngine:
         _fee_component_keywords = [
             "电输电费", "输配电费", "上网环节", "系统运行", "线损",
             "力调电费", "环节线损", "运行费用", "基金及附加",
+            "输配电", "配电费", "市场化分摊",
         ]
 
         # 策略A：逐行匹配

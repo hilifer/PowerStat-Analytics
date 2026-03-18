@@ -959,16 +959,21 @@ def _register_routes(app: Flask, db: Database):
                     xls = pd.ExcelFile(str(found))
                     sheets = {}
                     for name in xls.sheet_names[:10]:  # 最多10个sheet
-                        sheets[name] = pd.read_excel(xls, sheet_name=name, nrows=200)
+                        sheets[name] = pd.read_excel(xls, sheet_name=name,
+                                                     nrows=200, header=None)
 
                 html_parts = []
                 for name, df in sheets.items():
                     df = df.fillna("")
-                    html_parts.append(
-                        f'<h4 style="margin:1rem 0 0.5rem;color:var(--primary);">{name}</h4>'
-                        + df.to_html(index=False, classes="preview-table", border=0,
-                                     max_rows=200, max_cols=20)
-                    )
+                    # 使用 header=None 保留原始行（含合并单元格标题等）
+                    table_html = df.to_html(index=False, header=False,
+                                            classes="preview-table", border=0)
+                    if len(sheets) > 1:
+                        html_parts.append(
+                            f'<h4 style="margin:1rem 0 0.5rem;color:var(--primary);">{name}</h4>'
+                            + table_html)
+                    else:
+                        html_parts.append(table_html)
 
                 return jsonify({
                     "found": True,
