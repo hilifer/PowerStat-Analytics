@@ -424,9 +424,35 @@ a.row-link:hover { text-decoration: underline; }
     .filter-group select,
     .filter-group input { min-width: 0; width: 100%; }
 
-    /* KV grid (电表详情) */
-    .kv-grid { grid-template-columns: 1fr; gap: 0.5rem; }
-    .kv-value { word-break: break-all; }
+    /* KV grid (电表详情) — 横向紧凑列表 */
+    .kv-grid {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+    }
+    .kv-item {
+        flex-direction: row;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 0.75rem;
+        padding: 0.5rem 0.75rem;
+        background: transparent;
+        border-bottom: 1px solid var(--border);
+        border-radius: 0;
+    }
+    .kv-item:last-child { border-bottom: none; }
+    .kv-label {
+        flex-shrink: 0;
+        min-width: 4em;
+        text-transform: none;
+        font-size: 0.8rem;
+    }
+    .kv-value {
+        font-size: 0.9rem;
+        text-align: right;
+        word-break: break-all;
+        min-width: 0;
+    }
 
     /* Tables: 允许横滑，长内容可换行 */
     .table-wrap { margin: 0 -1rem; padding: 0 0; }
