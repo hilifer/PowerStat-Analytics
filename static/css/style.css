@@ -240,6 +240,7 @@ a.row-link:hover { text-decoration: underline; }
 .tag-grid { background: #dbeafe; color: #1e40af; }
 .tag-gen { background: #fef3c7; color: #92400e; }
 .tag-unknown { background: #f1f5f9; color: var(--text-secondary); }
+.tag-lock { margin-left: 0.35rem; font-size: 0.75rem; cursor: help; opacity: 0.7; }
 
 /* ---- Refresh Panel ---- */
 .refresh-panel {

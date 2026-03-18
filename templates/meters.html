@@ -81,7 +81,10 @@
             <tbody>
                 {% for m in group|sort(attribute='meter_type') %}
                 <tr>
-                    <td><a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="row-link">{{ m.meter_number or '-' }}</a></td>
+                    <td>
+                        <a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="row-link">{{ m.meter_number or '-' }}</a>
+                        {% if m.is_locked %}<span class="tag-lock" title="已锁定，不会被自动更新">&#128274;</span>{% endif %}
+                    </td>
                     <td style="font-size:0.8rem;">{{ m.asset_number or '-' }}</td>
                     <td>
                         {% if m.meter_type == '上网表' %}
@@ -95,11 +98,8 @@
                     <td class="num">{{ m.multiplier }}</td>
                     <td class="num">{{ m.discount or 1.0 }}{% if m.discount and m.discount != 1.0 %} ({{ "%.1f"|format(m.discount * 10) }}折){% endif %}</td>
                     <td style="font-size:0.8rem;">
-                        {% set paired = group|rejectattr('id', 'equalto', m.id)|list %}
-                        {% if m.meter_type == '发电表' %}
-                            {% set partner = paired|selectattr('meter_type', 'equalto', '上网表')|first %}
-                        {% elif m.meter_type == '上网表' %}
-                            {% set partner = paired|selectattr('meter_type', 'equalto', '发电表')|first %}
+                        {% if m.paired_meter_id %}
+                            {% set partner = meters|selectattr('id', 'equalto', m.paired_meter_id)|first %}
                         {% else %}
                             {% set partner = none %}
                         {% endif %}
@@ -144,7 +144,10 @@
             <tbody>
                 {% for m in ungrouped %}
                 <tr>
-                    <td><a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="row-link">{{ m.meter_number or '-' }}</a></td>
+                    <td>
+                        <a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="row-link">{{ m.meter_number or '-' }}</a>
+                        {% if m.is_locked %}<span class="tag-lock" title="已锁定，不会被自动更新">&#128274;</span>{% endif %}
+                    </td>
                     <td style="font-size:0.8rem;">{{ m.asset_number or '-' }}</td>
                     <td>
                         {% if m.meter_type == '上网表' %}
