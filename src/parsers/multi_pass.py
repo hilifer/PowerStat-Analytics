@@ -1,12 +1,14 @@
 """多轮扫描提取器：笨方法版。
 
 每轮单独扫描所有文件的所有单元格，只关注一种数据：
+  第0轮：预扫描配对电表块（用户号+发电表+上网表）
   第1轮：提取电表号 + 资产编号（同行直接关联）
   第2轮：提取用户编号，关联到最近的电表
   第3轮：判定电表类型
   第4轮：提取倍率、折扣、项目名
   合并短电表号
-  第5轮：提取月度读数（尖峰平谷）
+  第5轮：交叉验证（清理冲突数据）
+  第6轮：提取月度读数（尖峰平谷）
 
 固定数据全部找完，再找动态数据。文件全部在内存中，不会反复打开文件。
 """
@@ -107,7 +109,7 @@ class MultiPassExtractor:
         self._extract_meter_info()
 
         # === 动态数据 ===
-        self._pass5_readings()
+        self._pass6_readings()
         log.info("读数提取完成: %d 条记录", len(self.readings))
 
         return self._build_records()
@@ -127,7 +129,7 @@ class MultiPassExtractor:
         self._merge_short_meters()
 
         # === 交叉验证：检测并清除冲突数据 ===
-        self._pass6_cross_validate()
+        self._pass5_cross_validate()
 
         # 打印电表档案
         log.info("电表档案建立完成: %d 个电表", len(self.meters))
@@ -782,10 +784,10 @@ class MultiPassExtractor:
         log.info("  关联 %d 个固定属性", count)
 
     # ================================================================
-    # 第5轮：提取月度读数
+    # 第6轮：提取月度读数
     # ================================================================
 
-    def _pass5_readings(self):
+    def _pass6_readings(self):
         """扫描所有文件，提取每个电表每月的尖峰平谷读数。"""
         log.info("[第5轮] 提取月度读数...")
 
@@ -1121,10 +1123,10 @@ class MultiPassExtractor:
             log.info("  合并: %s -> %s", short, long)
 
     # ================================================================
-    # 交叉验证
+    # 第5轮：交叉验证
     # ================================================================
 
-    def _pass6_cross_validate(self):
+    def _pass5_cross_validate(self):
         """交叉验证：检测字段冲突，从候选列表中选替代值修复。
 
         规则：
