@@ -407,6 +407,8 @@ class MultiPassExtractor:
                         if nearest_ac is not None:
                             av = clean_id(_cell_str(df.iloc[r, nearest_ac]))
                             if av and len(av) >= 4 and not _CHINESE_RE.search(av):
+                                if av not in self.meters[val]["_asset_candidates"]:
+                                    self.meters[val]["_asset_candidates"].append(av)
                                 if not self.meters[val]["asset_number"]:
                                     self.meters[val]["asset_number"] = av
                                     asset_count += 1
@@ -440,9 +442,12 @@ class MultiPassExtractor:
                         val = clean_id(self._find_value_near(df, r, c))
                         if val and len(val) >= 4 and not _CHINESE_RE.search(val):
                             nearest = self._find_nearest_meter(df, r, c, filepath.name)
-                            if nearest and not self.meters[nearest]["asset_number"]:
-                                self.meters[nearest]["asset_number"] = val
-                                asset_count += 1
+                            if nearest:
+                                if val not in self.meters[nearest]["_asset_candidates"]:
+                                    self.meters[nearest]["_asset_candidates"].append(val)
+                                if not self.meters[nearest]["asset_number"]:
+                                    self.meters[nearest]["asset_number"] = val
+                                    asset_count += 1
                     elif cat in ("meter", "gen_meter", "grid_meter"):
                         mtype = {"gen_meter": "发电表", "grid_meter": "上网表"}.get(cat)
                         val = clean_id(self._find_value_near(df, r, c))
@@ -499,12 +504,16 @@ class MultiPassExtractor:
                             continue
                         for uc in user_cols:
                             uv = clean_id(_cell_str(df.iloc[r, uc]))
-                            if uv and len(uv) >= 6 and re.match(r'^\d+$', uv) and not self._is_known_meter_number(uv):
-                                if not self.meters[mn]["user_id"]:
-                                    self.meters[mn]["user_id"] = uv
-                                    count += 1
-                                sheet_users.add(uv)
-                                break
+                            if uv and len(uv) >= 6 and re.match(r'^\d+$', uv):
+                                # 收集所有候选值
+                                if uv not in self.meters[mn]["_user_id_candidates"]:
+                                    self.meters[mn]["_user_id_candidates"].append(uv)
+                                if not self._is_known_meter_number(uv):
+                                    if not self.meters[mn]["user_id"]:
+                                        self.meters[mn]["user_id"] = uv
+                                        count += 1
+                                    sheet_users.add(uv)
+                                    break
 
             # B. 标签配对
             for r in range(len(df)):
@@ -513,20 +522,27 @@ class MultiPassExtractor:
                     if not cell or not self._matches_any(cell, self._user_aliases):
                         continue
                     val = clean_id(self._find_value_near(df, r, c))
-                    if val and len(val) >= 6 and re.match(r'^\d+$', val) and not self._is_known_meter_number(val):
-                        sheet_users.add(val)
+                    if val and len(val) >= 6 and re.match(r'^\d+$', val):
                         nearest = self._find_nearest_meter(df, r, c, filepath.name)
-                        if nearest and not self.meters[nearest]["user_id"]:
-                            self.meters[nearest]["user_id"] = val
-                            count += 1
+                        if nearest:
+                            if val not in self.meters[nearest]["_user_id_candidates"]:
+                                self.meters[nearest]["_user_id_candidates"].append(val)
+                        if not self._is_known_meter_number(val):
+                            sheet_users.add(val)
+                            if nearest and not self.meters[nearest]["user_id"]:
+                                self.meters[nearest]["user_id"] = val
+                                count += 1
 
                     # 内嵌格式（兼容冒号可选）
                     m = re.search(r'(?:用户编号|用户号|户号|用电户号)\s*[:：]?\s*(\d{6,20})', cell)
                     if m:
                         uid = m.group(1)
+                        nearest = self._find_nearest_meter(df, r, c, filepath.name)
+                        if nearest:
+                            if uid not in self.meters[nearest]["_user_id_candidates"]:
+                                self.meters[nearest]["_user_id_candidates"].append(uid)
                         if not self._is_known_meter_number(uid):
                             sheet_users.add(uid)
-                            nearest = self._find_nearest_meter(df, r, c, filepath.name)
                             if nearest and not self.meters[nearest]["user_id"]:
                                 self.meters[nearest]["user_id"] = uid
                                 count += 1
@@ -1111,17 +1127,43 @@ class MultiPassExtractor:
     # ================================================================
 
     def _pass6_cross_validate(self):
-        """交叉验证：检测字段之间的冲突并清除可疑数据。
+        """交叉验证：检测字段冲突，从候选列表中选替代值修复。
 
         规则：
-        1. user_id 不能等于自身或任何其他已知 meter_number
-        2. asset_number 不能等于自身或任何其他已知 meter_number
+        1. user_id 不能等于任何已知 meter_number
+        2. asset_number 不能等于任何已知 meter_number
         3. user_id 和 asset_number 不能相同
-        4. user_id 不应满足电表号特征（8-16位纯数字且已注册）
+        4. user_id 不应满足电表号格式特征（8-16位纯数字）
+
+        冲突时从 _user_id_candidates / _asset_candidates 中选下一个合格值。
         """
         log.info("[交叉验证] 检查字段冲突…")
         all_meter_numbers = set(self.meters.keys())
+        fixed = 0
         cleared = 0
+
+        def _pick_valid_user_id(info):
+            """从候选列表中选第一个合格的 user_id。"""
+            for candidate in info.get("_user_id_candidates", []):
+                if candidate in all_meter_numbers:
+                    continue
+                if _is_meter_like(candidate):
+                    continue
+                # 不能和 asset_number 相同
+                if candidate == (info.get("asset_number") or ""):
+                    continue
+                return candidate
+            return ""
+
+        def _pick_valid_asset(info):
+            """从候选列表中选第一个合格的 asset_number。"""
+            for candidate in info.get("_asset_candidates", []):
+                if candidate in all_meter_numbers:
+                    continue
+                if candidate == (info.get("user_id") or ""):
+                    continue
+                return candidate
+            return ""
 
         for mn, info in self.meters.items():
             uid = info.get("user_id") or ""
@@ -1129,37 +1171,65 @@ class MultiPassExtractor:
 
             # 规则1：user_id 不能是任何已知电表号
             if uid and uid in all_meter_numbers:
-                log.warning("  电表 %s: user_id '%s' 与已知电表号冲突，已清除",
-                            mn, uid)
-                info["user_id"] = ""
-                cleared += 1
+                new_uid = _pick_valid_user_id(info)
+                if new_uid:
+                    log.info("  电表 %s: user_id '%s' 与电表号冲突，替换为候选值 '%s'",
+                             mn, uid, new_uid)
+                    fixed += 1
+                else:
+                    log.warning("  电表 %s: user_id '%s' 与电表号冲突，无合格候选值，已清除",
+                                mn, uid)
+                    cleared += 1
+                info["user_id"] = new_uid
 
             # 规则2：asset_number 不能是任何已知电表号
             if asset and asset in all_meter_numbers:
-                log.warning("  电表 %s: asset_number '%s' 与已知电表号冲突，已清除",
-                            mn, asset)
-                info["asset_number"] = ""
-                cleared += 1
+                new_asset = _pick_valid_asset(info)
+                if new_asset:
+                    log.info("  电表 %s: asset_number '%s' 与电表号冲突，替换为候选值 '%s'",
+                             mn, asset, new_asset)
+                    fixed += 1
+                else:
+                    log.warning("  电表 %s: asset_number '%s' 与电表号冲突，无合格候选值，已清除",
+                                mn, asset)
+                    cleared += 1
+                info["asset_number"] = new_asset
 
-            # 规则3：user_id 和 asset_number 不能相同
+            # 重新读取（可能已被上面修改）
             uid = info.get("user_id") or ""
             asset = info.get("asset_number") or ""
-            if uid and asset and uid == asset:
-                log.warning("  电表 %s: user_id 和 asset_number 相同 ('%s')，清除 user_id",
-                            mn, uid)
-                info["user_id"] = ""
-                cleared += 1
 
-            # 规则4：user_id 满足电表号格式特征（8-16位纯数字）时标记警告
+            # 规则3：user_id 和 asset_number 不能相同
+            if uid and asset and uid == asset:
+                new_uid = _pick_valid_user_id(info)
+                if new_uid and new_uid != asset:
+                    log.info("  电表 %s: user_id 与 asset_number 相同 ('%s')，user_id 替换为 '%s'",
+                             mn, uid, new_uid)
+                    info["user_id"] = new_uid
+                    fixed += 1
+                else:
+                    log.warning("  电表 %s: user_id 与 asset_number 相同 ('%s')，user_id 已清除",
+                                mn, uid)
+                    info["user_id"] = ""
+                    cleared += 1
+
+            # 规则4：user_id 格式像电表号（8-16位纯数字）
             uid = info.get("user_id") or ""
             if uid and _is_meter_like(uid):
-                log.warning("  电表 %s: user_id '%s' 格式类似电表号（8-16位纯数字），已清除",
-                            mn, uid)
-                info["user_id"] = ""
-                cleared += 1
+                new_uid = _pick_valid_user_id(info)
+                if new_uid:
+                    log.info("  电表 %s: user_id '%s' 格式像电表号，替换为候选值 '%s'",
+                             mn, uid, new_uid)
+                    info["user_id"] = new_uid
+                    fixed += 1
+                else:
+                    log.warning("  电表 %s: user_id '%s' 格式像电表号，无合格候选值，已清除",
+                                mn, uid)
+                    info["user_id"] = ""
+                    cleared += 1
 
-        if cleared:
-            log.info("  交叉验证清除 %d 个可疑值（留待人工审核填写）", cleared)
+        if fixed or cleared:
+            log.info("  交叉验证: 修复 %d 个, 清除 %d 个（留待人工审核）", fixed, cleared)
         else:
             log.info("  交叉验证通过，无冲突")
 
@@ -1175,6 +1245,8 @@ class MultiPassExtractor:
                 "meter_type": meter_type or "未知",
                 "multiplier": None, "discount": None, "project_name": None,
                 "source_file": source_file, "source_sheet": source_sheet,
+                "_user_id_candidates": [],
+                "_asset_candidates": [],
             }
         elif meter_type and self.meters[meter_number]["meter_type"] == "未知":
             self.meters[meter_number]["meter_type"] = meter_type
