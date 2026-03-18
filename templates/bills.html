@@ -21,8 +21,8 @@
 
 <!-- 更新说明 -->
 <div style="font-size:0.8rem; color:var(--text-secondary); margin-bottom:0.75rem;">
-    <strong>增量更新</strong>：下载新邮件附件，提取抄表数据和单价（不修改电表档案）&nbsp;|&nbsp;
-    <strong>全量更新</strong>：清空所有抄表和单价，从归档文件重新提取
+    <strong>增量更新</strong>：下载新邮件 + 扫描所有归档文件，提取抄表和单价（不清空已有数据，不动电表档案）<br>
+    <strong>全量更新</strong>：先清空抄表和单价，再下载新邮件 + 扫描所有归档文件重新提取（不动电表档案）
 </div>
 
 <!-- 更新进度面板 -->
@@ -190,7 +190,7 @@
 /* === 账单数据更新（不离开页面） === */
 function startBillUpdate(mode) {
     if (mode === 'full') {
-        if (!confirm('全量更新将执行以下操作：\n\n1. 清空所有抄表数据\n2. 清空所有单价记录\n3. 从归档文件重新提取\n\n电表档案不受影响。确定继续？')) {
+        if (!confirm('全量更新将执行以下操作：\n\n1. 清空所有抄表数据（monthly_readings）\n2. 清空所有单价记录（price_records）\n3. 下载新邮件附件\n4. 扫描所有归档文件重新提取\n\n电表档案不受影响。确定继续？')) {
             return;
         }
     }

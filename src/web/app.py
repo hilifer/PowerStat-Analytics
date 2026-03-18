@@ -531,156 +531,61 @@ def _register_routes(app: Flask, db: Database):
                                sel_meter=meter, sel_from=month_from, sel_to=month_to,
                                refresh_status=refresh_status)
 
-    # ---- 账单数据：增量更新 ----
-    @app.route("/api/bills/incremental-update", methods=["POST"])
-    def bill_incremental_update():
-        """增量更新抄表数据和单价：下载新邮件附件，只提取读数和OCR单价，不修改电表档案。"""
-        lock = app.config["BILL_REFRESH_LOCK"]
+    # ---- 账单数据更新（共用核心逻辑） ----
+
+    def _do_bill_update(clear_first: bool):
+        """账单更新核心逻辑。
+
+        流程：
+        1. (全量) 清空 monthly_readings + price_records
+        2. 下载新邮件附件并归档
+        3. 扫描所有归档文件（新旧都扫）
+        4. 提取抄表数据 + OCR 单价
+        5. 写入数据库（不动电表档案）
+        """
         status = app.config["BILL_REFRESH_STATUS"]
-
-        if not lock.acquire(blocking=False):
-            return jsonify({"error": "账单更新任务正在执行中"}), 409
-
-        status["running"] = True
-        status["progress"] = "正在准备…"
-        status["result"] = None
-        status["logs"] = []
-        status["started_at"] = datetime.now().strftime("%H:%M:%S")
 
         def _log(msg):
             ts = datetime.now().strftime("%H:%M:%S")
             status["logs"].append(f"[{ts}] {msg}")
             status["progress"] = msg
 
-        def _do_bill_incremental():
-            try:
-                from src.email_fetcher.fetcher import EmailFetcher
-                from src.pipeline import SmartDispatcher
-                from src.parsers.multi_pass import MultiPassExtractor
-                import re, shutil
+        try:
+            from src.email_fetcher.fetcher import EmailFetcher
+            from src.pipeline import SmartDispatcher
+            from src.parsers.multi_pass import MultiPassExtractor
+            import re, shutil
 
-                _log("正在连接邮箱搜索新附件…")
+            mode_label = "全量" if clear_first else "增量"
+
+            # ---- 步骤 1：全量时先清空 ----
+            if clear_first:
+                _log("清空抄表数据和单价记录…")
+                with db.connection() as conn:
+                    rc = conn.execute("SELECT COUNT(*) FROM monthly_readings").fetchone()[0]
+                    pc = conn.execute("SELECT COUNT(*) FROM price_records").fetchone()[0]
+                    conn.execute("DELETE FROM monthly_readings")
+                    conn.execute("DELETE FROM price_records")
+                _log(f"已清空 {rc} 条抄表数据、{pc} 条单价记录")
+
+            # ---- 步骤 2：下载新邮件附件 ----
+            _log("正在连接邮箱搜索新附件…")
+            new_email_count = 0
+            try:
                 with EmailFetcher() as fetcher:
                     attachments = fetcher.fetch_attachments()
-
-                _log(f"共找到 {len(attachments)} 个附件")
-
-                if not attachments:
-                    _log("没有新附件，完成")
-                    status["result"] = {"readings_added": 0, "prices_added": 0, "skipped": 0}
-                    status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    return
-
-                dispatcher = SmartDispatcher()
-                all_sheets = []
-                all_ocr = []
-                new_attachments = []
-                skipped = 0
+                _log(f"邮箱中共 {len(attachments)} 个附件")
 
                 for i, att in enumerate(attachments, 1):
                     date_str = att.email_date.strftime("%Y-%m-%d %H:%M") if att.email_date else ""
                     fp = _email_fingerprint(att.email_subject, att.email_sender, date_str, att.filename)
 
                     if _is_already_processed(db, fp):
-                        skipped += 1
                         continue
 
-                    new_attachments.append((att, fp, date_str))
-                    _log(f"加载附件 [{i}/{len(attachments)}] {att.filename}")
-                    source_info = {
-                        "email_date": att.email_date,
-                        "email_subject": att.email_subject,
-                        "filename": att.filename,
-                    }
+                    _log(f"  新附件 [{new_email_count + 1}] {att.filename}")
 
-                    queue = [(att.filepath, source_info)]
-                    processed_paths = set()
-                    while queue:
-                        fpath, sinfo = queue.pop(0)
-                        if fpath in processed_paths:
-                            continue
-                        processed_paths.add(fpath)
-
-                        sheets = dispatcher.load_as_dataframes(fpath, sinfo)
-                        all_sheets.extend(sheets)
-
-                        file_type = dispatcher.detect_type(fpath)
-                        if file_type == "image":
-                            try:
-                                ocr = dispatcher.ocr_engine.extract_from_image(fpath, sinfo)
-                                if ocr.has_any_data():
-                                    all_ocr.append(ocr)
-                                    _log(f"  OCR: {att.filename} → 用户={ocr.user_id or '?'}, 单价={'有' if ocr.has_price_data() else '无'}")
-                            except Exception as e:
-                                log.error("  OCR 失败: %s", e)
-
-                        if file_type == "zip":
-                            sub_files = dispatcher._extract_zip(fpath)
-                            for sf in sub_files:
-                                queue.append((sf, sinfo))
-
-                # 多轮扫描提取
-                _log(f"开始多轮扫描提取（{len(all_sheets)} 个 sheet）…")
-                extractor = MultiPassExtractor()
-                extractor.load_dataframes(all_sheets)
-                all_records = extractor.extract_all()
-
-                # 只入库抄表数据（不动电表档案）
-                readings_added = 0
-                _log(f"提取到 {len(all_records)} 条记录，写入抄表数据…")
-                for rec in all_records:
-                    meter_number = rec.get("meter_number", "").strip()
-                    if not meter_number:
-                        continue
-                    month = rec.get("reading_month")
-                    if not month or month == "unknown":
-                        continue
-                    try:
-                        with db.connection() as conn:
-                            row = conn.execute("SELECT id FROM meters WHERE meter_number = ?",
-                                               (meter_number,)).fetchone()
-                        if not row:
-                            continue
-                        meter_id = row["id"]
-                        db.upsert_reading(
-                            meter_id=meter_id,
-                            reading_month=month,
-                            sharp_peak=rec.get("sharp_peak"),
-                            peak=rec.get("peak"),
-                            flat=rec.get("flat"),
-                            valley=rec.get("valley"),
-                            total_kwh=rec.get("total_kwh"),
-                            source_file=rec.get("source_file"),
-                            source_sheet=rec.get("source_sheet"),
-                        )
-                        readings_added += 1
-                    except Exception as e:
-                        log.error("抄表入库失败: %s - %s", meter_number, e)
-
-                # OCR 单价入库
-                price_saved = 0
-                for ocr in all_ocr:
-                    if ocr.user_id and ocr.reading_month:
-                        try:
-                            db.upsert_price(
-                                user_id=ocr.user_id,
-                                reading_month=ocr.reading_month,
-                                sharp_peak_price=ocr.sharp_peak_price,
-                                peak_price=ocr.peak_price,
-                                flat_price=ocr.flat_price,
-                                valley_price=ocr.valley_price,
-                                source_file=ocr.source_file,
-                            )
-                            if ocr.has_price_data():
-                                price_saved += 1
-                                _log(f"  单价: 用户={ocr.user_id}, {ocr.reading_month}, "
-                                     f"尖={ocr.sharp_peak_price}, 峰={ocr.peak_price}, "
-                                     f"平={ocr.flat_price}, 谷={ocr.valley_price}")
-                        except Exception as e:
-                            log.error("单价入库失败: %s", e)
-
-                # 归档新附件
-                for att, fp, date_str in new_attachments:
+                    # 归档到月份目录
                     if not att.is_body:
                         reading_month = None
                         for month_match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})', att.filename):
@@ -703,198 +608,179 @@ def _register_routes(app: Flask, db: Database):
                             shutil.copy2(str(src_path), str(dest_path))
 
                     _mark_processed(db, fp, att.filename, att.email_subject, date_str)
-
-                _log(f"完成！新增 {readings_added} 条抄表数据，{price_saved} 条单价，跳过 {skipped} 个已处理")
-                status["result"] = {"readings_added": readings_added, "prices_added": price_saved, "skipped": skipped}
-                status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    new_email_count += 1
 
             except Exception as e:
-                log.error("账单增量更新失败: %s", e, exc_info=True)
-                _log(f"错误: {e}")
-                status["result"] = {"error": str(e)}
-            finally:
-                status["running"] = False
-                lock.release()
+                _log(f"邮箱连接失败（继续处理已有文件）: {e}")
+                log.error("邮箱连接失败: %s", e)
 
-        t = threading.Thread(target=_do_bill_incremental, daemon=True)
-        t.start()
-        return jsonify({"success": True, "message": "账单增量更新已启动"})
+            if new_email_count > 0:
+                _log(f"已下载并归档 {new_email_count} 个新附件")
+            else:
+                _log("没有新邮件附件")
 
-    # ---- 账单数据：全量更新 ----
-    @app.route("/api/bills/full-update", methods=["POST"])
-    def bill_full_update():
-        """全量更新：清空抄表数据和单价，从归档文件重新提取（不动电表档案）。"""
+            # ---- 步骤 3：扫描所有归档文件 ----
+            archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
+            IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
+            EXCEL_EXTS = {".xlsx", ".xls", ".csv"}
+            ALL_EXTS = IMAGE_EXTS | EXCEL_EXTS | {".pdf", ".html", ".htm", ".txt", ".zip"}
+
+            archive_files = []
+            if archive_root.exists():
+                for f in sorted(archive_root.rglob("*")):
+                    if f.is_file() and f.suffix.lower() in ALL_EXTS:
+                        month_dir = f.parent.name
+                        source_info = {"filename": f.name, "archive_month": month_dir}
+                        archive_files.append((str(f), source_info))
+
+            _log(f"归档目录共 {len(archive_files)} 个文件，开始扫描…")
+
+            if not archive_files:
+                _log("没有文件可处理，完成")
+                status["result"] = {"readings_added": 0, "prices_added": 0, "new_emails": new_email_count}
+                status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                return
+
+            # ---- 步骤 4：加载文件并提取 ----
+            dispatcher = SmartDispatcher()
+            all_sheets = []
+            all_ocr = []
+
+            for i, (fpath, sinfo) in enumerate(archive_files, 1):
+                fname = Path(fpath).name
+                if i <= 3 or i % 10 == 0 or i == len(archive_files):
+                    _log(f"处理文件 [{i}/{len(archive_files)}] {fname}")
+
+                try:
+                    sheets = dispatcher.load_as_dataframes(fpath, sinfo)
+                    all_sheets.extend(sheets)
+                except Exception as e:
+                    log.error("加载文件失败 %s: %s", fname, e)
+
+                file_type = dispatcher.detect_type(fpath)
+                if file_type == "image":
+                    try:
+                        ocr = dispatcher.ocr_engine.extract_from_image(fpath, sinfo)
+                        if ocr.has_any_data():
+                            all_ocr.append(ocr)
+                            if ocr.has_price_data():
+                                _log(f"  OCR 单价: {fname} → 用户={ocr.user_id or '?'}, "
+                                     f"月={ocr.reading_month or '?'}, "
+                                     f"尖={ocr.sharp_peak_price}, 峰={ocr.peak_price}, "
+                                     f"平={ocr.flat_price}, 谷={ocr.valley_price}")
+                            elif ocr.user_id:
+                                _log(f"  OCR: {fname} → 用户={ocr.user_id}, 未提取到单价")
+                    except Exception as e:
+                        log.error("OCR 失败 %s: %s", fname, e)
+
+            # ---- 步骤 5：多轮扫描提取抄表数据 ----
+            _log(f"多轮扫描提取（{len(all_sheets)} 个 sheet）…")
+            extractor = MultiPassExtractor()
+            extractor.load_dataframes(all_sheets)
+            all_records = extractor.extract_all()
+
+            # ---- 步骤 6：写入抄表数据（不动电表档案） ----
+            readings_added = 0
+            _log(f"提取到 {len(all_records)} 条记录，写入抄表数据…")
+            for rec in all_records:
+                meter_number = rec.get("meter_number", "").strip()
+                if not meter_number:
+                    continue
+                month = rec.get("reading_month")
+                if not month or month == "unknown":
+                    continue
+                try:
+                    with db.connection() as conn:
+                        row = conn.execute("SELECT id FROM meters WHERE meter_number = ?",
+                                           (meter_number,)).fetchone()
+                    if not row:
+                        continue
+                    meter_id = row["id"]
+                    db.upsert_reading(
+                        meter_id=meter_id,
+                        reading_month=month,
+                        sharp_peak=rec.get("sharp_peak"),
+                        peak=rec.get("peak"),
+                        flat=rec.get("flat"),
+                        valley=rec.get("valley"),
+                        total_kwh=rec.get("total_kwh"),
+                        source_file=rec.get("source_file"),
+                        source_sheet=rec.get("source_sheet"),
+                    )
+                    readings_added += 1
+                except Exception as e:
+                    log.error("抄表入库失败: %s - %s", meter_number, e)
+
+            # ---- 步骤 7：写入 OCR 单价 ----
+            price_saved = 0
+            for ocr in all_ocr:
+                if ocr.user_id and ocr.reading_month:
+                    try:
+                        db.upsert_price(
+                            user_id=ocr.user_id,
+                            reading_month=ocr.reading_month,
+                            sharp_peak_price=ocr.sharp_peak_price,
+                            peak_price=ocr.peak_price,
+                            flat_price=ocr.flat_price,
+                            valley_price=ocr.valley_price,
+                            source_file=ocr.source_file,
+                        )
+                        if ocr.has_price_data():
+                            price_saved += 1
+                    except Exception as e:
+                        log.error("单价入库失败: %s", e)
+
+            _log(f"{mode_label}更新完成！抄表数据 {readings_added} 条，单价 {price_saved} 条"
+                 f"（扫描 {len(archive_files)} 个文件，OCR {len(all_ocr)} 张图片，新邮件 {new_email_count} 个）")
+            status["result"] = {
+                "readings_added": readings_added,
+                "prices_added": price_saved,
+                "new_emails": new_email_count,
+                "files_scanned": len(archive_files),
+                "ocr_images": len(all_ocr),
+            }
+            status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        except Exception as e:
+            log.error("账单更新失败: %s", e, exc_info=True)
+            _log(f"错误: {e}")
+            status["result"] = {"error": str(e)}
+
+    def _start_bill_update(clear_first: bool):
+        """启动账单更新后台任务。"""
         lock = app.config["BILL_REFRESH_LOCK"]
         status = app.config["BILL_REFRESH_STATUS"]
 
         if not lock.acquire(blocking=False):
             return jsonify({"error": "账单更新任务正在执行中"}), 409
 
+        mode = "全量" if clear_first else "增量"
         status["running"] = True
-        status["progress"] = "正在准备全量更新…"
+        status["progress"] = f"正在启动{mode}更新…"
         status["result"] = None
         status["logs"] = []
         status["started_at"] = datetime.now().strftime("%H:%M:%S")
 
-        def _log(msg):
-            ts = datetime.now().strftime("%H:%M:%S")
-            status["logs"].append(f"[{ts}] {msg}")
-            status["progress"] = msg
-
-        def _do_bill_full():
+        def _worker():
             try:
-                from src.pipeline import SmartDispatcher
-                from src.parsers.multi_pass import MultiPassExtractor
-
-                # 第一步：清空抄表数据和单价（保留电表档案）
-                _log("清空抄表数据和单价记录…")
-                with db.connection() as conn:
-                    reading_count = conn.execute("SELECT COUNT(*) FROM monthly_readings").fetchone()[0]
-                    price_count = conn.execute("SELECT COUNT(*) FROM price_records").fetchone()[0]
-                    conn.execute("DELETE FROM monthly_readings")
-                    conn.execute("DELETE FROM price_records")
-                _log(f"已清空 {reading_count} 条抄表数据、{price_count} 条单价记录")
-
-                # 第二步：扫描归档目录中的所有文件
-                archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
-                if not archive_root.exists():
-                    _log("归档目录不存在，尝试从邮箱重新下载…")
-                    # fallback: 重新下载邮件
-                    from src.email_fetcher.fetcher import EmailFetcher
-                    import shutil
-
-                    with EmailFetcher() as fetcher:
-                        attachments = fetcher.fetch_attachments()
-                    _log(f"从邮箱下载 {len(attachments)} 个附件")
-
-                    archive_files = []
-                    for att in attachments:
-                        if att.filepath and Path(att.filepath).exists():
-                            archive_files.append((
-                                str(att.filepath),
-                                {"email_date": att.email_date, "email_subject": att.email_subject, "filename": att.filename}
-                            ))
-                else:
-                    # 收集归档目录下所有文件
-                    IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
-                    EXCEL_EXTS = {".xlsx", ".xls", ".csv"}
-                    ALL_EXTS = IMAGE_EXTS | EXCEL_EXTS | {".pdf", ".html", ".htm", ".txt", ".zip"}
-
-                    archive_files = []
-                    for f in sorted(archive_root.rglob("*")):
-                        if f.is_file() and f.suffix.lower() in ALL_EXTS:
-                            # 从目录名推断月份
-                            month_dir = f.parent.name
-                            source_info = {"filename": f.name, "archive_month": month_dir}
-                            archive_files.append((str(f), source_info))
-
-                    _log(f"在归档目录找到 {len(archive_files)} 个文件")
-
-                if not archive_files:
-                    _log("没有文件可处理，完成")
-                    status["result"] = {"readings_added": 0, "prices_added": 0}
-                    status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    return
-
-                # 第三步：加载并提取
-                dispatcher = SmartDispatcher()
-                all_sheets = []
-                all_ocr = []
-
-                for i, (fpath, sinfo) in enumerate(archive_files, 1):
-                    fname = Path(fpath).name
-                    if i % 10 == 1 or i == len(archive_files):
-                        _log(f"处理文件 [{i}/{len(archive_files)}] {fname}")
-
-                    try:
-                        sheets = dispatcher.load_as_dataframes(fpath, sinfo)
-                        all_sheets.extend(sheets)
-                    except Exception as e:
-                        log.error("加载文件失败 %s: %s", fname, e)
-
-                    file_type = dispatcher.detect_type(fpath)
-                    if file_type == "image":
-                        try:
-                            ocr = dispatcher.ocr_engine.extract_from_image(fpath, sinfo)
-                            if ocr.has_any_data():
-                                all_ocr.append(ocr)
-                                if ocr.has_price_data():
-                                    _log(f"  OCR 单价: {fname} → 用户={ocr.user_id or '?'}, 月={ocr.reading_month or '?'}")
-                        except Exception as e:
-                            log.error("OCR 失败 %s: %s", fname, e)
-
-                # 第四步：多轮扫描提取
-                _log(f"多轮扫描提取（{len(all_sheets)} 个 sheet）…")
-                extractor = MultiPassExtractor()
-                extractor.load_dataframes(all_sheets)
-                all_records = extractor.extract_all()
-
-                # 第五步：只入库抄表数据（不动电表档案）
-                readings_added = 0
-                _log(f"提取到 {len(all_records)} 条记录，写入抄表数据…")
-                for rec in all_records:
-                    meter_number = rec.get("meter_number", "").strip()
-                    if not meter_number:
-                        continue
-                    month = rec.get("reading_month")
-                    if not month or month == "unknown":
-                        continue
-                    try:
-                        with db.connection() as conn:
-                            row = conn.execute("SELECT id FROM meters WHERE meter_number = ?",
-                                               (meter_number,)).fetchone()
-                        if not row:
-                            continue
-                        meter_id = row["id"]
-                        db.upsert_reading(
-                            meter_id=meter_id,
-                            reading_month=month,
-                            sharp_peak=rec.get("sharp_peak"),
-                            peak=rec.get("peak"),
-                            flat=rec.get("flat"),
-                            valley=rec.get("valley"),
-                            total_kwh=rec.get("total_kwh"),
-                            source_file=rec.get("source_file"),
-                            source_sheet=rec.get("source_sheet"),
-                        )
-                        readings_added += 1
-                    except Exception as e:
-                        log.error("抄表入库失败: %s - %s", meter_number, e)
-
-                # OCR 单价入库
-                price_saved = 0
-                for ocr in all_ocr:
-                    if ocr.user_id and ocr.reading_month:
-                        try:
-                            db.upsert_price(
-                                user_id=ocr.user_id,
-                                reading_month=ocr.reading_month,
-                                sharp_peak_price=ocr.sharp_peak_price,
-                                peak_price=ocr.peak_price,
-                                flat_price=ocr.flat_price,
-                                valley_price=ocr.valley_price,
-                                source_file=ocr.source_file,
-                            )
-                            if ocr.has_price_data():
-                                price_saved += 1
-                        except Exception as e:
-                            log.error("单价入库失败: %s", e)
-
-                _log(f"完成！写入 {readings_added} 条抄表数据，{price_saved} 条单价记录")
-                status["result"] = {"readings_added": readings_added, "prices_added": price_saved}
-                status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            except Exception as e:
-                log.error("账单全量更新失败: %s", e, exc_info=True)
-                _log(f"错误: {e}")
-                status["result"] = {"error": str(e)}
+                _do_bill_update(clear_first)
             finally:
                 status["running"] = False
                 lock.release()
 
-        t = threading.Thread(target=_do_bill_full, daemon=True)
+        t = threading.Thread(target=_worker, daemon=True)
         t.start()
-        return jsonify({"success": True, "message": "账单全量更新已启动"})
+        return jsonify({"success": True, "message": f"账单{mode}更新已启动"})
+
+    @app.route("/api/bills/incremental-update", methods=["POST"])
+    def bill_incremental_update():
+        """增量更新：下载新邮件 + 扫描所有归档文件，提取抄表和单价（不清空、不动电表档案）。"""
+        return _start_bill_update(clear_first=False)
+
+    @app.route("/api/bills/full-update", methods=["POST"])
+    def bill_full_update():
+        """全量更新：清空抄表+单价，下载新邮件 + 扫描所有归档文件重新提取。"""
+        return _start_bill_update(clear_first=True)
 
     # ---- 账单更新状态轮询 API ----
     @app.route("/api/bill-refresh-status")
