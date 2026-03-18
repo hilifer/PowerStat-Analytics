@@ -216,7 +216,11 @@ class MultiPassExtractor:
                                 best_kw_len = kw_len
                                 best_field = field_name
                     if best_field:
-                        val = self._find_value_near(df, r, c)
+                        # 收集本区域已提取的值，避免同一个值被多个字段抢占
+                        nearby_vals = {v for (hr, hf, v) in hits if abs(hr - r) <= 10}
+                        val = self._find_value_near(df, r, c,
+                                                    field_name=best_field,
+                                                    exclude_values=nearby_vals)
                         if val:
                             if best_field in ("user_id",) and re.match(r'^\d{6,20}$', val):
                                 hits.append((r, best_field, val))
@@ -474,7 +478,7 @@ class MultiPassExtractor:
                     # 竞争匹配：标签配对
                     cat = self._classify_header(cell)
                     if cat == "asset":
-                        val = clean_id(self._find_value_near(df, r, c))
+                        val = clean_id(self._find_value_near(df, r, c, field_name="asset"))
                         if val and len(val) >= 4 and not _CHINESE_RE.search(val):
                             nearest = self._find_nearest_meter(df, r, c, filepath.name)
                             if nearest:
@@ -485,7 +489,7 @@ class MultiPassExtractor:
                                     asset_count += 1
                     elif cat in ("meter", "gen_meter", "grid_meter"):
                         mtype = {"gen_meter": "发电表", "grid_meter": "上网表"}.get(cat)
-                        val = clean_id(self._find_value_near(df, r, c))
+                        val = clean_id(self._find_value_near(df, r, c, field_name=cat))
                         if is_valid_meter_number(val):
                             self._register_meter(val, filepath.name, sheet_name, mtype)
 
@@ -556,7 +560,7 @@ class MultiPassExtractor:
                     cell = _cell_str(df.iloc[r, c])
                     if not cell or not self._matches_any(cell, self._user_aliases):
                         continue
-                    val = clean_id(self._find_value_near(df, r, c))
+                    val = clean_id(self._find_value_near(df, r, c, field_name="user_id"))
                     if val and len(val) >= 6 and re.match(r'^\d+$', val):
                         nearest = self._find_nearest_meter(df, r, c, filepath.name)
                         if nearest:
@@ -750,7 +754,7 @@ class MultiPassExtractor:
 
                     # 倍率
                     if self._matches_any(cell, self._multiplier_aliases):
-                        val = self._find_value_near(df, r, c)
+                        val = self._find_value_near(df, r, c, field_name="multiplier")
                         fv = _to_float(val)
                         if fv and fv >= 1:
                             nearest = self._find_nearest_meter(df, r, c, filepath.name)
@@ -760,7 +764,7 @@ class MultiPassExtractor:
 
                     # 折扣
                     elif self._matches_any(cell, self._discount_aliases):
-                        val = self._find_value_near(df, r, c)
+                        val = self._find_value_near(df, r, c, field_name="discount")
                         m = re.search(r'(\d+\.?\d*)', val) if val else None
                         if m:
                             dv = float(m.group(1))
@@ -773,7 +777,7 @@ class MultiPassExtractor:
 
                     # 项目名
                     elif self._matches_any(cell, self._project_aliases):
-                        val = self._find_value_near(df, r, c)
+                        val = self._find_value_near(df, r, c, field_name="project")
                         if val and not re.match(r'^\d+$', val) and len(val) >= 2:
                             nearest = self._find_nearest_meter(df, r, c, filepath.name)
                             if nearest and not self.meters[nearest]["project_name"]:
@@ -1362,15 +1366,64 @@ class MultiPassExtractor:
                 best_cat = cat
         return best_cat
 
-    def _find_value_near(self, df, row_idx, col_idx) -> str:
+    def _find_value_near(self, df, row_idx, col_idx, field_name=None,
+                         exclude_values=None) -> str:
+        """在标签单元格附近查找字段值。
+
+        搜索策略：收集附近所有候选值，按匹配质量排序返回最优。
+        - 优先级：右侧 > 下方 > 右下对角 > 右侧第2格
+        - 排除已被其他字段占用的值（exclude_values）
+        - 根据 field_name 做格式偏好：
+            user_id: 偏好较长数字串（≥10位）
+            gen_meter/grid_meter: 偏好 _is_meter_like
+            gen_asset/grid_asset: 偏好含字母的编号
+            multiplier: 偏好小数字
+        """
         max_r, max_c = len(df), len(df.columns)
-        for dr, dc in [(0, 1), (1, 0), (1, 1), (0, 2)]:
+        exclude = exclude_values or set()
+        candidates = []  # [(value, priority)]
+
+        for priority, (dr, dc) in enumerate([(0, 1), (1, 0), (1, 1), (0, 2)]):
             r, c = row_idx + dr, col_idx + dc
             if r < max_r and c < max_c:
                 val = _cell_str(df.iloc[r, c])
-                if val and not _CHINESE_RE.search(val):
-                    return val
-        return ""
+                if val and not _CHINESE_RE.search(val) and val not in exclude:
+                    candidates.append((val, priority))
+
+        if not candidates:
+            return ""
+
+        # 无字段提示时，返回位置最近的（向后兼容）
+        if not field_name:
+            return candidates[0][0]
+
+        # 按字段特征打分：分数越高越好
+        def _score(val, positional_priority):
+            s = 100 - positional_priority * 10  # 位置越近基础分越高
+            if field_name in ("gen_meter", "grid_meter"):
+                if _is_meter_like(val):
+                    s += 50
+                # 纯字母或含字母偏少 → 不太像电表号
+                if re.search(r'[A-Za-z]', val):
+                    s -= 30
+            elif field_name == "user_id":
+                if re.match(r'^\d{10,20}$', val):
+                    s += 50  # 长数字串更像用户号
+                elif re.match(r'^\d{6,9}$', val):
+                    s += 20
+            elif field_name in ("gen_asset", "grid_asset"):
+                if re.search(r'[A-Za-z]', val) and len(val) >= 10:
+                    s += 50  # 含字母的长编号更像资产号
+                elif re.match(r'^\d+$', val):
+                    s -= 20  # 纯数字不太像资产号
+            elif field_name == "multiplier":
+                fv = _to_float(val)
+                if fv and 1 <= fv <= 200:
+                    s += 50
+            return s
+
+        candidates.sort(key=lambda x: _score(x[0], x[1]), reverse=True)
+        return candidates[0][0]
 
     def _find_meter_in_row(self, df, row_idx, meter_cols) -> Optional[str]:
         """在指定行的电表列中查找已知电表号。"""
