@@ -514,8 +514,8 @@ def _register_routes(app: Flask, db: Database):
         1. (全量) 清空 monthly_readings + price_records
         2. 下载新邮件附件并归档
         3. 扫描所有归档文件（新旧都扫）
-        4. 提取抄表数据 + OCR 单价
-        5. 写入数据库（不动电表档案）
+        4. 提取抄表数据（从所有文件加载 → 多轮提取 → 写入 monthly_readings）
+        5. 提取单价数据（图片 OCR → 写入 price_records）
 
         log_fn: 可选，外部传入的日志函数。不传则写入 BILL_REFRESH_STATUS。
         """
@@ -619,47 +619,28 @@ def _register_routes(app: Flask, db: Database):
                 status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 return
 
-            # ---- 步骤 4：加载文件并提取 ----
+            # ---- 步骤 4：提取抄表数据 ----
             dispatcher = SmartDispatcher()
             all_sheets = []
-            all_ocr = []
 
+            _log(f"[抄表] 开始从 {len(archive_files)} 个文件中提取…")
             for i, (fpath, sinfo) in enumerate(archive_files, 1):
                 fname = Path(fpath).name
                 if i <= 3 or i % 10 == 0 or i == len(archive_files):
-                    _log(f"处理文件 [{i}/{len(archive_files)}] {fname}")
-
+                    _log(f"[抄表] 加载文件 [{i}/{len(archive_files)}] {fname}")
                 try:
                     sheets = dispatcher.load_as_dataframes(fpath, sinfo)
                     all_sheets.extend(sheets)
                 except Exception as e:
                     log.error("加载文件失败 %s: %s", fname, e)
 
-                file_type = dispatcher.detect_type(fpath)
-                if file_type == "image":
-                    try:
-                        ocr = dispatcher.ocr_engine.extract_from_image(fpath, sinfo)
-                        if ocr.has_any_data():
-                            all_ocr.append(ocr)
-                            if ocr.has_price_data():
-                                _log(f"  OCR 单价: {fname} → 用户={ocr.user_id or '?'}, "
-                                     f"月={ocr.reading_month or '?'}, "
-                                     f"尖={ocr.sharp_peak_price}, 峰={ocr.peak_price}, "
-                                     f"平={ocr.flat_price}, 谷={ocr.valley_price}")
-                            elif ocr.user_id:
-                                _log(f"  OCR: {fname} → 用户={ocr.user_id}, 未提取到单价")
-                    except Exception as e:
-                        log.error("OCR 失败 %s: %s", fname, e)
-
-            # ---- 步骤 5：多轮扫描提取抄表数据 ----
-            _log(f"多轮扫描提取（{len(all_sheets)} 个 sheet）…")
+            _log(f"[抄表] 多轮扫描提取（{len(all_sheets)} 个 sheet）…")
             extractor = MultiPassExtractor()
             extractor.load_dataframes(all_sheets)
             all_records = extractor.extract_all()
 
-            # ---- 步骤 6：写入抄表数据（不动电表档案） ----
             readings_added = 0
-            _log(f"提取到 {len(all_records)} 条记录，写入抄表数据…")
+            _log(f"[抄表] 提取到 {len(all_records)} 条记录，写入数据库…")
             for rec in all_records:
                 meter_number = rec.get("meter_number", "").strip()
                 if not meter_number:
@@ -689,8 +670,35 @@ def _register_routes(app: Flask, db: Database):
                 except Exception as e:
                     log.error("抄表入库失败: %s - %s", meter_number, e)
 
-            # ---- 步骤 7：写入 OCR 单价 ----
+            # ---- 步骤 5：提取单价数据（图片 OCR） ----
+            all_ocr = []
+
+            _log(f"[单价] 开始从 {len(archive_files)} 个文件中识别图片…")
+            ocr_count = 0
+            for i, (fpath, sinfo) in enumerate(archive_files, 1):
+                fname = Path(fpath).name
+                file_type = dispatcher.detect_type(fpath)
+                if file_type != "image":
+                    continue
+                ocr_count += 1
+                if ocr_count <= 3 or ocr_count % 10 == 0:
+                    _log(f"[单价] OCR 图片 [{ocr_count}] {fname}")
+                try:
+                    ocr = dispatcher.ocr_engine.extract_from_image(fpath, sinfo)
+                    if ocr.has_any_data():
+                        all_ocr.append(ocr)
+                        if ocr.has_price_data():
+                            _log(f"  OCR 单价: {fname} → 用户={ocr.user_id or '?'}, "
+                                 f"月={ocr.reading_month or '?'}, "
+                                 f"尖={ocr.sharp_peak_price}, 峰={ocr.peak_price}, "
+                                 f"平={ocr.flat_price}, 谷={ocr.valley_price}")
+                        elif ocr.user_id:
+                            _log(f"  OCR: {fname} → 用户={ocr.user_id}, 未提取到单价")
+                except Exception as e:
+                    log.error("OCR 失败 %s: %s", fname, e)
+
             price_saved = 0
+            _log(f"[单价] OCR 识别 {ocr_count} 张图片，有效 {len(all_ocr)} 条，写入数据库…")
             for ocr in all_ocr:
                 if ocr.user_id and ocr.reading_month:
                     try:
@@ -709,13 +717,13 @@ def _register_routes(app: Flask, db: Database):
                         log.error("单价入库失败: %s", e)
 
             _log(f"{mode_label}更新完成！抄表数据 {readings_added} 条，单价 {price_saved} 条"
-                 f"（扫描 {len(archive_files)} 个文件，OCR {len(all_ocr)} 张图片，新邮件 {new_email_count} 个）")
+                 f"（扫描 {len(archive_files)} 个文件，OCR {ocr_count} 张图片，新邮件 {new_email_count} 个）")
             status["result"] = {
                 "readings_added": readings_added,
                 "prices_added": price_saved,
                 "new_emails": new_email_count,
                 "files_scanned": len(archive_files),
-                "ocr_images": len(all_ocr),
+                "ocr_images": ocr_count,
             }
             status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
