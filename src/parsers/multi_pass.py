@@ -255,9 +255,15 @@ class MultiPassExtractor:
                 user_id = block.get("user_id")
                 gen_meter = block.get("gen_meter")
                 grid_meter = block.get("grid_meter")
-                # 防止电表号被误当用户编号
-                if user_id and (user_id == gen_meter or user_id == grid_meter):
-                    user_id = None
+                # 值冲突去重：同一个值不可能既是用户号又是电表号
+                # user_id 标签更具体（"用户号"），电表号更可能是 _find_value_near 误取
+                if user_id and user_id == gen_meter:
+                    gen_meter = None
+                if user_id and user_id == grid_meter:
+                    grid_meter = None
+                # 发电表和上网表号也不能相同
+                if gen_meter and gen_meter == grid_meter:
+                    grid_meter = None
                 # 记录 pass0 识别的用户编号，防止 pass1 误注册为电表
                 if user_id:
                     self._pass0_user_ids.add(user_id)
@@ -307,7 +313,17 @@ class MultiPassExtractor:
         log.info("  预扫描发现 %d 个配对块", block_count)
 
     def _cluster_hits_into_blocks(self, hits: list, max_gap: int = 10) -> list[dict]:
-        """将按行排序的命中项聚合为块。同一块内行间距不超过 max_gap。"""
+        """将按行排序的命中项聚合为块。同一块内行间距不超过 max_gap。
+
+        去重规则：同一个值不能被分配到多个字段（如 user_id 和 grid_meter 不能相同）。
+        字段优先级：user_id > gen_meter > grid_meter > gen_asset > grid_asset > multiplier
+        """
+        # 字段优先级（先出现的优先保留值）
+        _FIELD_PRIORITY = {
+            "user_id": 0, "gen_meter": 1, "grid_meter": 2,
+            "gen_asset": 3, "grid_asset": 4, "multiplier": 5,
+        }
+
         blocks = []
         current_block = {}
         current_max_row = -999
@@ -320,7 +336,21 @@ class MultiPassExtractor:
 
             # 同一字段取第一个值（不覆盖）
             if field not in current_block:
-                current_block[field] = value
+                # 值去重：检查是否已被更高优先级字段占用
+                conflict_field = None
+                for existing_field, existing_val in current_block.items():
+                    if existing_val == value:
+                        conflict_field = existing_field
+                        break
+                if conflict_field is None:
+                    current_block[field] = value
+                else:
+                    # 优先级高的（数值小）保留，低的丢弃
+                    if _FIELD_PRIORITY.get(field, 99) < _FIELD_PRIORITY.get(conflict_field, 99):
+                        del current_block[conflict_field]
+                        current_block[field] = value
+                    # 否则跳过当前 hit
+
             current_max_row = max(current_max_row, row)
 
         if current_block:
