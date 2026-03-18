@@ -87,6 +87,7 @@ class MultiPassExtractor:
         self.meters = {}     # meter_number -> {asset, user_id, type, ...}
         self.readings = {}   # (meter_number, month) -> {sharp_peak, peak, flat, valley, total}
         self.pairs = []      # [(gen_meter_number, grid_meter_number)]
+        self._pass0_user_ids = set()  # pass0 识别的用户编号，防止 pass1 误注册为电表
 
     def load_dataframes(self, sheets: list):
         self._sheets = sheets
@@ -257,6 +258,9 @@ class MultiPassExtractor:
                 # 防止电表号被误当用户编号
                 if user_id and (user_id == gen_meter or user_id == grid_meter):
                     user_id = None
+                # 记录 pass0 识别的用户编号，防止 pass1 误注册为电表
+                if user_id:
+                    self._pass0_user_ids.add(user_id)
                 gen_asset = block.get("gen_asset")
                 grid_asset = block.get("grid_asset")
                 multiplier_str = block.get("multiplier")
@@ -1133,9 +1137,10 @@ class MultiPassExtractor:
         1. user_id 不能等于任何已知 meter_number
         2. asset_number 不能等于任何已知 meter_number
         3. user_id 和 asset_number 不能相同
-        4. user_id 不应满足电表号格式特征（8-16位纯数字）
 
         冲突时从 _user_id_candidates / _asset_candidates 中选下一个合格值。
+        注意：不再检查 user_id 是否"像电表号"（原规则4已移除），
+        因为中国电网的用户编号本身就是纯数字串。
         """
         log.info("[交叉验证] 检查字段冲突…")
         all_meter_numbers = set(self.meters.keys())
@@ -1146,8 +1151,6 @@ class MultiPassExtractor:
             """从候选列表中选第一个合格的 user_id。"""
             for candidate in info.get("_user_id_candidates", []):
                 if candidate in all_meter_numbers:
-                    continue
-                if _is_meter_like(candidate):
                     continue
                 # 不能和 asset_number 相同
                 if candidate == (info.get("asset_number") or ""):
@@ -1213,20 +1216,8 @@ class MultiPassExtractor:
                     info["user_id"] = ""
                     cleared += 1
 
-            # 规则4：user_id 格式像电表号（8-16位纯数字）
-            uid = info.get("user_id") or ""
-            if uid and _is_meter_like(uid):
-                new_uid = _pick_valid_user_id(info)
-                if new_uid:
-                    log.info("  电表 %s: user_id '%s' 格式像电表号，替换为候选值 '%s'",
-                             mn, uid, new_uid)
-                    info["user_id"] = new_uid
-                    fixed += 1
-                else:
-                    log.warning("  电表 %s: user_id '%s' 格式像电表号，无合格候选值，已清除",
-                                mn, uid)
-                    info["user_id"] = ""
-                    cleared += 1
+            # 规则4 已移除：中国电网的用户编号本身就是纯数字串，
+            # 与电表号格式相似是正常的，不应因此清除。
 
         if fixed or cleared:
             log.info("  交叉验证: 修复 %d 个, 清除 %d 个（留待人工审核）", fixed, cleared)
@@ -1238,6 +1229,9 @@ class MultiPassExtractor:
     # ================================================================
 
     def _register_meter(self, meter_number: str, source_file="", source_sheet="", meter_type=None):
+        # pass0 已识别为用户编号的值不注册为电表
+        if meter_number in self._pass0_user_ids:
+            return
         if meter_number not in self.meters:
             self.meters[meter_number] = {
                 "meter_number": meter_number,
