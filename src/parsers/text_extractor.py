@@ -101,6 +101,17 @@ def extract_meters_from_text(text: str, filepath: str = "") -> list[dict]:
     user_ids = _USER_ID_RE.findall(text)
     user_id = user_ids[0] if user_ids else None
 
+    # 先收集所有电表号，用于排除电表号被误当用户编号
+    all_meter_numbers = set()
+    for m in _GRID_METER_RE.finditer(text):
+        all_meter_numbers.add(m.group(1))
+    for m in _GEN_METER_RE.finditer(text):
+        all_meter_numbers.add(m.group(1))
+    if user_id and user_id in all_meter_numbers:
+        log.warning("  用户编号 %s 与电表号重复，跳过", user_id)
+        # 尝试使用第二个候选
+        user_id = next((u for u in user_ids if u not in all_meter_numbers), None)
+
     # 提取上网电表
     for m in _GRID_METER_RE.finditer(text):
         meter_number = m.group(1)

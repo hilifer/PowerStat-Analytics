@@ -237,6 +237,9 @@ class MultiPassExtractor:
                 user_id = block.get("user_id")
                 gen_meter = block.get("gen_meter")
                 grid_meter = block.get("grid_meter")
+                # 防止电表号被误当用户编号
+                if user_id and (user_id == gen_meter or user_id == grid_meter):
+                    user_id = None
                 gen_asset = block.get("gen_asset")
                 grid_asset = block.get("grid_asset")
                 multiplier_str = block.get("multiplier")
@@ -448,6 +451,10 @@ class MultiPassExtractor:
     # 第2轮：提取用户编号，关联到最近电表
     # ================================================================
 
+    def _is_known_meter_number(self, val: str) -> bool:
+        """检查值是否是已知的电表号，防止电表号被误当用户编号。"""
+        return val in self.meters
+
     def _pass2_user_ids(self):
         """扫描所有文件，找用户编号并关联到电表。"""
         log.info("[第2轮] 扫描用户编号...")
@@ -476,7 +483,7 @@ class MultiPassExtractor:
                             continue
                         for uc in user_cols:
                             uv = clean_id(_cell_str(df.iloc[r, uc]))
-                            if uv and len(uv) >= 6 and re.match(r'^\d+$', uv):
+                            if uv and len(uv) >= 6 and re.match(r'^\d+$', uv) and not self._is_known_meter_number(uv):
                                 if not self.meters[mn]["user_id"]:
                                     self.meters[mn]["user_id"] = uv
                                     count += 1
@@ -490,7 +497,7 @@ class MultiPassExtractor:
                     if not cell or not self._matches_any(cell, self._user_aliases):
                         continue
                     val = clean_id(self._find_value_near(df, r, c))
-                    if val and len(val) >= 6 and re.match(r'^\d+$', val):
+                    if val and len(val) >= 6 and re.match(r'^\d+$', val) and not self._is_known_meter_number(val):
                         sheet_users.add(val)
                         nearest = self._find_nearest_meter(df, r, c, filepath.name)
                         if nearest and not self.meters[nearest]["user_id"]:
@@ -501,13 +508,16 @@ class MultiPassExtractor:
                     m = re.search(r'(?:用户编号|用户号|户号|用电户号)\s*[:：]?\s*(\d{6,20})', cell)
                     if m:
                         uid = m.group(1)
-                        sheet_users.add(uid)
-                        nearest = self._find_nearest_meter(df, r, c, filepath.name)
-                        if nearest and not self.meters[nearest]["user_id"]:
-                            self.meters[nearest]["user_id"] = uid
-                            count += 1
+                        if not self._is_known_meter_number(uid):
+                            sheet_users.add(uid)
+                            nearest = self._find_nearest_meter(df, r, c, filepath.name)
+                            if nearest and not self.meters[nearest]["user_id"]:
+                                self.meters[nearest]["user_id"] = uid
+                                count += 1
 
             # C. 单用户 sheet → 关联给所有本文件电表
+            # 再次过滤，排除可能混入的电表号
+            sheet_users = {u for u in sheet_users if not self._is_known_meter_number(u)}
             if len(sheet_users) == 1:
                 uid = sheet_users.pop()
                 for mn, info in self.meters.items():
