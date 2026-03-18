@@ -507,16 +507,11 @@ def _register_routes(app: Flask, db: Database):
 
     # ---- 账单数据更新（共用核心逻辑） ----
 
-    def _do_bill_update(clear_first: bool, log_fn=None):
+    def _do_bill_update(clear_first: bool, task_type: str = "all", log_fn=None):
         """账单更新核心逻辑。
 
-        流程：
-        1. (全量) 清空 monthly_readings + price_records
-        2. 下载新邮件附件并归档
-        3. 扫描所有归档文件（新旧都扫）
-        4. 提取抄表数据（从所有文件加载 → 多轮提取 → 写入 monthly_readings）
-        5. 提取单价数据（图片 OCR → 写入 price_records）
-
+        task_type: 'readings' 只提取抄表数据, 'prices' 只提取单价, 'all' 两者都做
+        clear_first: 全量模式，先清空对应数据
         log_fn: 可选，外部传入的日志函数。不传则写入 BILL_REFRESH_STATUS。
         """
         status = app.config["BILL_REFRESH_STATUS"]
@@ -535,16 +530,20 @@ def _register_routes(app: Flask, db: Database):
             import re, shutil
 
             mode_label = "全量" if clear_first else "增量"
+            task_labels = {"readings": "抄表数据", "prices": "单价提取", "all": "全部"}
+            task_label = task_labels.get(task_type, task_type)
 
             # ---- 步骤 1：全量时先清空 ----
             if clear_first:
-                _log("清空抄表数据和单价记录…")
                 with db.connection() as conn:
-                    rc = conn.execute("SELECT COUNT(*) FROM monthly_readings").fetchone()[0]
-                    pc = conn.execute("SELECT COUNT(*) FROM price_records").fetchone()[0]
-                    conn.execute("DELETE FROM monthly_readings")
-                    conn.execute("DELETE FROM price_records")
-                _log(f"已清空 {rc} 条抄表数据、{pc} 条单价记录")
+                    if task_type in ("readings", "all"):
+                        rc = conn.execute("SELECT COUNT(*) FROM monthly_readings").fetchone()[0]
+                        conn.execute("DELETE FROM monthly_readings")
+                        _log(f"已清空 {rc} 条抄表数据")
+                    if task_type in ("prices", "all"):
+                        pc = conn.execute("SELECT COUNT(*) FROM price_records").fetchone()[0]
+                        conn.execute("DELETE FROM price_records")
+                        _log(f"已清空 {pc} 条单价记录")
 
             # ---- 步骤 2：下载新邮件附件 ----
             _log("正在连接邮箱搜索新附件…")
@@ -621,105 +620,107 @@ def _register_routes(app: Flask, db: Database):
 
             # ---- 步骤 4：提取抄表数据 ----
             dispatcher = SmartDispatcher()
-            all_sheets = []
-
-            _log(f"[抄表] 开始从 {len(archive_files)} 个文件中提取…")
-            for i, (fpath, sinfo) in enumerate(archive_files, 1):
-                fname = Path(fpath).name
-                if i <= 3 or i % 10 == 0 or i == len(archive_files):
-                    _log(f"[抄表] 加载文件 [{i}/{len(archive_files)}] {fname}")
-                try:
-                    sheets = dispatcher.load_as_dataframes(fpath, sinfo)
-                    all_sheets.extend(sheets)
-                except Exception as e:
-                    log.error("加载文件失败 %s: %s", fname, e)
-
-            _log(f"[抄表] 多轮扫描提取（{len(all_sheets)} 个 sheet）…")
-            extractor = MultiPassExtractor()
-            extractor.load_dataframes(all_sheets)
-            all_records = extractor.extract_all()
-
             readings_added = 0
-            _log(f"[抄表] 提取到 {len(all_records)} 条记录，写入数据库…")
-            for rec in all_records:
-                meter_number = rec.get("meter_number", "").strip()
-                if not meter_number:
-                    continue
-                month = rec.get("reading_month")
-                if not month or month == "unknown":
-                    continue
-                try:
-                    with db.connection() as conn:
-                        row = conn.execute("SELECT id FROM meters WHERE meter_number = ?",
-                                           (meter_number,)).fetchone()
-                    if not row:
+            ocr_count = 0
+            price_saved = 0
+
+            if task_type in ("readings", "all"):
+                all_sheets = []
+                _log(f"[抄表] 开始从 {len(archive_files)} 个文件中提取…")
+                for i, (fpath, sinfo) in enumerate(archive_files, 1):
+                    fname = Path(fpath).name
+                    if i <= 3 or i % 10 == 0 or i == len(archive_files):
+                        _log(f"[抄表] 加载文件 [{i}/{len(archive_files)}] {fname}")
+                    try:
+                        sheets = dispatcher.load_as_dataframes(fpath, sinfo)
+                        all_sheets.extend(sheets)
+                    except Exception as e:
+                        log.error("加载文件失败 %s: %s", fname, e)
+
+                _log(f"[抄表] 多轮扫描提取（{len(all_sheets)} 个 sheet）…")
+                extractor = MultiPassExtractor()
+                extractor.load_dataframes(all_sheets)
+                all_records = extractor.extract_all()
+
+                _log(f"[抄表] 提取到 {len(all_records)} 条记录，写入数据库…")
+                for rec in all_records:
+                    meter_number = rec.get("meter_number", "").strip()
+                    if not meter_number:
                         continue
-                    meter_id = row["id"]
-                    db.upsert_reading(
-                        meter_id=meter_id,
-                        reading_month=month,
-                        sharp_peak=rec.get("sharp_peak"),
-                        peak=rec.get("peak"),
-                        flat=rec.get("flat"),
-                        valley=rec.get("valley"),
-                        total_kwh=rec.get("total_kwh"),
-                        source_file=rec.get("source_file"),
-                        source_sheet=rec.get("source_sheet"),
-                    )
-                    readings_added += 1
-                except Exception as e:
-                    log.error("抄表入库失败: %s - %s", meter_number, e)
+                    month = rec.get("reading_month")
+                    if not month or month == "unknown":
+                        continue
+                    try:
+                        with db.connection() as conn:
+                            row = conn.execute("SELECT id FROM meters WHERE meter_number = ?",
+                                               (meter_number,)).fetchone()
+                        if not row:
+                            continue
+                        meter_id = row["id"]
+                        db.upsert_reading(
+                            meter_id=meter_id,
+                            reading_month=month,
+                            sharp_peak=rec.get("sharp_peak"),
+                            peak=rec.get("peak"),
+                            flat=rec.get("flat"),
+                            valley=rec.get("valley"),
+                            total_kwh=rec.get("total_kwh"),
+                            source_file=rec.get("source_file"),
+                            source_sheet=rec.get("source_sheet"),
+                        )
+                        readings_added += 1
+                    except Exception as e:
+                        log.error("抄表入库失败: %s - %s", meter_number, e)
 
             # ---- 步骤 5：提取单价数据（图片 OCR） ----
-            all_ocr = []
-
-            _log(f"[单价] 开始从 {len(archive_files)} 个文件中识别图片…")
-            ocr_count = 0
-            for i, (fpath, sinfo) in enumerate(archive_files, 1):
-                fname = Path(fpath).name
-                file_type = dispatcher.detect_type(fpath)
-                if file_type != "image":
-                    continue
-                ocr_count += 1
-                if ocr_count <= 3 or ocr_count % 10 == 0:
-                    _log(f"[单价] OCR 图片 [{ocr_count}] {fname}")
-                try:
-                    ocr = dispatcher.ocr_engine.extract_from_image(fpath, sinfo)
-                    if ocr.has_any_data():
-                        all_ocr.append(ocr)
-                        if ocr.has_price_data():
-                            _log(f"  OCR 单价: {fname} → 用户={ocr.user_id or '?'}, "
-                                 f"月={ocr.reading_month or '?'}, "
-                                 f"尖={ocr.sharp_peak_price}, 峰={ocr.peak_price}, "
-                                 f"平={ocr.flat_price}, 谷={ocr.valley_price}, "
-                                 f"均价={ocr.average_price}")
-                        elif ocr.user_id:
-                            _log(f"  OCR: {fname} → 用户={ocr.user_id}, 未提取到单价")
-                except Exception as e:
-                    log.error("OCR 失败 %s: %s", fname, e)
-
-            price_saved = 0
-            _log(f"[单价] OCR 识别 {ocr_count} 张图片，有效 {len(all_ocr)} 条，写入数据库…")
-            for ocr in all_ocr:
-                if ocr.user_id and ocr.reading_month:
+            if task_type in ("prices", "all"):
+                all_ocr = []
+                _log(f"[单价] 开始从 {len(archive_files)} 个文件中识别图片…")
+                for i, (fpath, sinfo) in enumerate(archive_files, 1):
+                    fname = Path(fpath).name
+                    file_type = dispatcher.detect_type(fpath)
+                    if file_type != "image":
+                        continue
+                    ocr_count += 1
+                    if ocr_count <= 3 or ocr_count % 10 == 0:
+                        _log(f"[单价] OCR 图片 [{ocr_count}] {fname}")
                     try:
-                        db.upsert_price(
-                            user_id=ocr.user_id,
-                            reading_month=ocr.reading_month,
-                            sharp_peak_price=ocr.sharp_peak_price,
-                            peak_price=ocr.peak_price,
-                            flat_price=ocr.flat_price,
-                            valley_price=ocr.valley_price,
-                            average_price=ocr.average_price,
-                            source_file=ocr.source_file,
-                        )
-                        if ocr.has_price_data():
-                            price_saved += 1
+                        ocr = dispatcher.ocr_engine.extract_from_image(fpath, sinfo)
+                        if ocr.has_any_data():
+                            all_ocr.append(ocr)
+                            if ocr.has_price_data():
+                                _log(f"  OCR 单价: {fname} → 用户={ocr.user_id or '?'}, "
+                                     f"月={ocr.reading_month or '?'}, "
+                                     f"尖={ocr.sharp_peak_price}, 峰={ocr.peak_price}, "
+                                     f"平={ocr.flat_price}, 谷={ocr.valley_price}, "
+                                     f"均价={ocr.average_price}")
+                            elif ocr.user_id:
+                                _log(f"  OCR: {fname} → 用户={ocr.user_id}, 未提取到单价")
                     except Exception as e:
-                        log.error("单价入库失败: %s", e)
+                        log.error("OCR 失败 %s: %s", fname, e)
 
-            _log(f"{mode_label}更新完成！抄表数据 {readings_added} 条，单价 {price_saved} 条"
-                 f"（扫描 {len(archive_files)} 个文件，OCR {ocr_count} 张图片，新邮件 {new_email_count} 个）")
+                _log(f"[单价] OCR 识别 {ocr_count} 张图片，有效 {len(all_ocr)} 条，写入数据库…")
+                for ocr in all_ocr:
+                    if ocr.user_id and ocr.reading_month:
+                        try:
+                            db.upsert_price(
+                                user_id=ocr.user_id,
+                                reading_month=ocr.reading_month,
+                                sharp_peak_price=ocr.sharp_peak_price,
+                                peak_price=ocr.peak_price,
+                                flat_price=ocr.flat_price,
+                                valley_price=ocr.valley_price,
+                                average_price=ocr.average_price,
+                                source_file=ocr.source_file,
+                            )
+                            if ocr.has_price_data():
+                                price_saved += 1
+                        except Exception as e:
+                            log.error("单价入库失败: %s", e)
+
+            _log(f"[{task_label}] {mode_label}更新完成！"
+                 f"抄表 {readings_added} 条，单价 {price_saved} 条"
+                 f"（扫描 {len(archive_files)} 个文件，OCR {ocr_count} 张，新邮件 {new_email_count} 个）")
             status["result"] = {
                 "readings_added": readings_added,
                 "prices_added": price_saved,
@@ -734,7 +735,7 @@ def _register_routes(app: Flask, db: Database):
             _log(f"错误: {e}")
             status["result"] = {"error": str(e)}
 
-    def _start_bill_update(clear_first: bool):
+    def _start_bill_update(clear_first: bool, task_type: str = "all"):
         """启动账单更新后台任务。"""
         lock = app.config["BILL_REFRESH_LOCK"]
         status = app.config["BILL_REFRESH_STATUS"]
@@ -743,32 +744,54 @@ def _register_routes(app: Flask, db: Database):
             return jsonify({"error": "账单更新任务正在执行中"}), 409
 
         mode = "全量" if clear_first else "增量"
+        task_labels = {"readings": "抄表数据", "prices": "单价提取", "all": "全部"}
+        task_label = task_labels.get(task_type, task_type)
         status["running"] = True
-        status["progress"] = f"正在启动{mode}更新…"
+        status["progress"] = f"正在启动{task_label}{mode}更新…"
         status["result"] = None
         status["logs"] = []
         status["started_at"] = datetime.now().strftime("%H:%M:%S")
 
         def _worker():
             try:
-                _do_bill_update(clear_first)
+                _do_bill_update(clear_first, task_type=task_type)
             finally:
                 status["running"] = False
                 lock.release()
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
-        return jsonify({"success": True, "message": f"账单{mode}更新已启动"})
+        return jsonify({"success": True, "message": f"{task_label}{mode}更新已启动"})
 
     @app.route("/api/bills/incremental-update", methods=["POST"])
     def bill_incremental_update():
-        """增量更新：下载新邮件 + 扫描所有归档文件，提取抄表和单价（不清空、不动电表档案）。"""
-        return _start_bill_update(clear_first=False)
+        """增量更新：下载新邮件 + 扫描所有归档文件，提取抄表和单价。"""
+        return _start_bill_update(clear_first=False, task_type="all")
 
     @app.route("/api/bills/full-update", methods=["POST"])
     def bill_full_update():
         """全量更新：清空抄表+单价，下载新邮件 + 扫描所有归档文件重新提取。"""
-        return _start_bill_update(clear_first=True)
+        return _start_bill_update(clear_first=True, task_type="all")
+
+    @app.route("/api/bills/readings/incremental", methods=["POST"])
+    def bill_readings_incremental():
+        """抄表数据增量更新。"""
+        return _start_bill_update(clear_first=False, task_type="readings")
+
+    @app.route("/api/bills/readings/full", methods=["POST"])
+    def bill_readings_full():
+        """抄表数据全量更新：清空 monthly_readings 后重新提取。"""
+        return _start_bill_update(clear_first=True, task_type="readings")
+
+    @app.route("/api/bills/prices/incremental", methods=["POST"])
+    def bill_prices_incremental():
+        """单价提取增量更新。"""
+        return _start_bill_update(clear_first=False, task_type="prices")
+
+    @app.route("/api/bills/prices/full", methods=["POST"])
+    def bill_prices_full():
+        """单价提取全量更新：清空 price_records 后重新提取。"""
+        return _start_bill_update(clear_first=True, task_type="prices")
 
     # ---- 账单更新状态轮询 API ----
     @app.route("/api/bill-refresh-status")

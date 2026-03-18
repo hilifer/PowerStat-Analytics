@@ -10,19 +10,29 @@
 
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem; flex-wrap:wrap; gap:0.5rem;">
     <h1 style="margin:0;">账单查询</h1>
-    <div style="display:flex; gap:0.5rem; align-items:center;">
-        <button type="button" class="btn btn-primary btn-sm" id="btnIncremental"
-                onclick="startBillUpdate('incremental')">增量更新</button>
-        <button type="button" class="btn btn-danger btn-sm" id="btnFull"
-                onclick="startBillUpdate('full')">全量更新</button>
-        <a href="{{ url_for('export_csv') }}" class="btn btn-success btn-sm">导出 CSV</a>
-    </div>
+    <a href="{{ url_for('export_csv') }}" class="btn btn-success btn-sm">导出 CSV</a>
 </div>
 
-<!-- 更新说明 -->
-<div style="font-size:0.8rem; color:var(--text-secondary); margin-bottom:0.75rem;">
-    <strong>增量更新</strong>：下载新邮件 + 扫描所有归档文件，提取抄表和单价（不清空已有数据，不动电表档案）<br>
-    <strong>全量更新</strong>：先清空抄表和单价，再下载新邮件 + 扫描所有归档文件重新提取（不动电表档案）
+<!-- 操作按钮区 -->
+<div style="display:flex; gap:1rem; margin-bottom:0.75rem; flex-wrap:wrap;">
+    <!-- 抄表数据 -->
+    <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
+                background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
+        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">抄表数据</span>
+        <button type="button" class="btn btn-primary btn-sm update-btn"
+                onclick="startBillUpdate('incremental','readings')">增量更新</button>
+        <button type="button" class="btn btn-danger btn-sm update-btn"
+                onclick="startBillUpdate('full','readings')">全量更新</button>
+    </div>
+    <!-- 单价提取 -->
+    <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
+                background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
+        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">单价提取</span>
+        <button type="button" class="btn btn-primary btn-sm update-btn"
+                onclick="startBillUpdate('incremental','prices')">增量更新</button>
+        <button type="button" class="btn btn-danger btn-sm update-btn"
+                onclick="startBillUpdate('full','prices')">全量更新</button>
+    </div>
 </div>
 
 <!-- 更新进度面板 -->
@@ -188,20 +198,36 @@
 
 <script>
 /* === 账单数据更新（不离开页面） === */
-function startBillUpdate(mode) {
+var taskLabels = { readings: '抄表数据', prices: '单价提取', all: '全部' };
+
+function startBillUpdate(mode, taskType) {
+    taskType = taskType || 'all';
+    var label = taskLabels[taskType] || taskType;
+
     if (mode === 'full') {
-        if (!confirm('全量更新将执行以下操作：\n\n1. 清空所有抄表数据（monthly_readings）\n2. 清空所有单价记录（price_records）\n3. 下载新邮件附件\n4. 扫描所有归档文件重新提取\n\n电表档案不受影响。确定继续？')) {
+        var warns = {
+            readings: '将清空所有抄表数据（monthly_readings），然后重新提取。',
+            prices:   '将清空所有单价记录（price_records），然后重新提取。',
+            all:      '将清空所有抄表数据和单价记录，然后重新提取。'
+        };
+        if (!confirm(label + '全量更新\n\n' + (warns[taskType] || warns.all) + '\n\n电表档案不受影响。确定继续？')) {
             return;
         }
     }
 
-    var url = mode === 'full'
-        ? '/api/bills/full-update'
-        : '/api/bills/incremental-update';
+    // 构建 API URL
+    var urlMap = {
+        'incremental_readings': '/api/bills/readings/incremental',
+        'full_readings':        '/api/bills/readings/full',
+        'incremental_prices':   '/api/bills/prices/incremental',
+        'full_prices':          '/api/bills/prices/full',
+        'incremental_all':      '/api/bills/incremental-update',
+        'full_all':             '/api/bills/full-update'
+    };
+    var url = urlMap[mode + '_' + taskType] || '/api/bills/incremental-update';
 
-    // 禁用按钮
-    document.getElementById('btnIncremental').disabled = true;
-    document.getElementById('btnFull').disabled = true;
+    // 禁用所有更新按钮
+    disableAllButtons();
 
     // 显示进度面板
     var panel = document.getElementById('billRefreshPanel');
@@ -211,7 +237,7 @@ function startBillUpdate(mode) {
 
     panel.style.display = '';
     spinner.style.display = '';
-    progress.textContent = '正在启动' + (mode === 'full' ? '全量' : '增量') + '更新…';
+    progress.textContent = '正在启动' + label + (mode === 'full' ? '全量' : '增量') + '更新…';
     logsDiv.innerHTML = '';
 
     fetch(url, { method: 'POST' })
@@ -220,22 +246,23 @@ function startBillUpdate(mode) {
             if (data.error) {
                 progress.textContent = '错误: ' + data.error;
                 spinner.style.display = 'none';
-                enableButtons();
+                enableAllButtons();
                 return;
             }
-            // 启动轮询
             startPolling();
         })
         .catch(function(e) {
             progress.textContent = '请求失败: ' + e;
             spinner.style.display = 'none';
-            enableButtons();
+            enableAllButtons();
         });
 }
 
-function enableButtons() {
-    document.getElementById('btnIncremental').disabled = false;
-    document.getElementById('btnFull').disabled = false;
+function disableAllButtons() {
+    document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = true; });
+}
+function enableAllButtons() {
+    document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
 }
 
 var pollTimer = null;
@@ -268,7 +295,7 @@ function pollBillStatus() {
                 progress.textContent = data.progress || '完成';
                 clearInterval(pollTimer);
                 pollTimer = null;
-                enableButtons();
+                enableAllButtons();
 
                 // 2秒后刷新页面显示新数据
                 setTimeout(function() { location.reload(); }, 2000);
@@ -291,8 +318,7 @@ function escapeHtml(s) {
             if (data.running) {
                 document.getElementById('billRefreshPanel').style.display = '';
                 document.getElementById('billProgress').textContent = data.progress || '处理中…';
-                document.getElementById('btnIncremental').disabled = true;
-                document.getElementById('btnFull').disabled = true;
+                disableAllButtons();
                 if (data.logs && data.logs.length) {
                     document.getElementById('billLogs').innerHTML = data.logs.map(function(l) {
                         return '<div>' + escapeHtml(l) + '</div>';
