@@ -246,7 +246,6 @@ class MultiPassExtractor:
 
             # 提取项目名：目录路径 → sheet标题 → 文件名
             project_name = (self._extract_project_from_path(filepath)
-                            or self._extract_project_from_sheet_title(df)
                             or self._extract_project_from_filename(filepath.name))
 
             for block in blocks:
@@ -747,7 +746,6 @@ class MultiPassExtractor:
 
             # C. 项目名兜底：目录路径 → sheet标题 → 文件名
             proj = (self._extract_project_from_path(filepath)
-                    or self._extract_project_from_sheet_title(df)
                     or self._extract_project_from_filename(filepath.name))
             if proj:
                 for mn, info in self.meters.items():
@@ -1448,14 +1446,3 @@ class MultiPassExtractor:
     def _extract_project_from_filename(self, filename: str) -> Optional[str]:
         return self._extract_project_name(filename)
 
-    def _extract_project_from_sheet_title(self, df) -> Optional[str]:
-        """从 sheet 前几行的标题中提取项目名。"""
-        for r in range(min(5, len(df))):
-            for c in range(min(5, len(df.columns))):
-                cell = _cell_str(df.iloc[r, c])
-                if not cell or len(cell) < 4:
-                    continue
-                proj = self._extract_project_name(cell)
-                if proj:
-                    return proj
-        return None
