@@ -497,10 +497,20 @@ class OCREngine:
             "valley_price": ["谷"],
         }
 
+        # 费用组件行关键字（大工业明细行，不是完整时段单价）
+        _fee_component_keywords = [
+            "电输电费", "输配电费", "上网环节", "系统运行", "线损",
+            "力调电费", "环节线损", "运行费用", "基金及附加",
+        ]
+
         # 策略A：逐行匹配
         for line in lines:
             line_clean = line.strip()
             if not line_clean:
+                continue
+
+            # 跳过费用组件行（大工业明细，单价是组件价非总价）
+            if any(kw in line_clean for kw in _fee_component_keywords):
                 continue
 
             for field, keywords in field_map.items():

@@ -68,10 +68,16 @@ body {
 
 /* ---- Container ---- */
 .container {
-    max-width: 1280px;
+    max-width: 1600px;
+    width: 100%;
     margin: 0 auto;
     padding: 1.5rem 2rem;
     flex: 1;
+}
+
+/* 超宽屏 (≥1920px) 使用更大宽度 */
+@media (min-width: 1920px) {
+    .container { max-width: 1800px; }
 }
 
 /* ---- Cards ---- */
