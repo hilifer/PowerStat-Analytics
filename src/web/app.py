@@ -9,7 +9,7 @@ from pathlib import Path
 
 from flask import (
     Flask, render_template, request, redirect, url_for,
-    jsonify, send_from_directory, flash, abort,
+    jsonify, send_from_directory, flash, abort, send_file,
 )
 
 from src.config_loader import config
@@ -1064,6 +1064,33 @@ def _register_routes(app: Flask, db: Database):
         csv_dir = config.get("storage", "csv_export_dir", default="output/data")
         flash(f"CSV 已导出到 {csv_dir}", "success")
         return redirect(url_for("index"))
+
+    @app.route("/bills/export-excel")
+    def bills_export_excel():
+        """导出月度电费单 Excel 文件。"""
+        from src.web.bill_export import generate_bill_excel
+
+        project = request.args.get("project") or None
+        user_id = request.args.get("user_id") or None
+        month = request.args.get("month") or None
+
+        buf = generate_bill_excel(db, project_name=project, user_id=user_id, month=month)
+
+        # 文件名
+        parts = []
+        if project:
+            parts.append(project)
+        if month:
+            parts.append(month)
+        parts.append("电费单")
+        filename = "_".join(parts) + ".xlsx"
+
+        return send_file(
+            buf,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=filename,
+        )
 
     # ---- 新建电表页面 ----
     @app.route("/meters/create", methods=["GET", "POST"])
