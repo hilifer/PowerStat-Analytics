@@ -1190,42 +1190,6 @@ def _register_routes(app: Flask, db: Database):
             return jsonify({"error": "电表不存在"}), 404
         return jsonify(meter)
 
-    # ---- 在归档中查找图片文件并返回 URL ----
-    @app.route("/api/archive/find-image")
-    def find_archive_image():
-        """根据 source_file 文件名在归档目录中查找对应图片，返回下载 URL。"""
-        filename = request.args.get("filename", "").strip()
-        if not filename:
-            return jsonify({"error": "缺少 filename 参数"}), 400
-
-        archive_root = Path(config.get("storage", "archive_root",
-                                       default="output/archive"))
-        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
-
-        # 在归档目录递归查找
-        if archive_root.exists():
-            for f in archive_root.rglob("*"):
-                if f.is_file() and f.name == filename and f.suffix.lower() in IMAGE_EXTS:
-                    rel = f.relative_to(archive_root)
-                    return jsonify({
-                        "found": True,
-                        "url": url_for("archive_download", filepath=str(rel)),
-                        "filename": f.name,
-                    })
-
-            # 模糊匹配：文件名去扩展名后包含
-            stem = Path(filename).stem
-            for f in archive_root.rglob("*"):
-                if f.is_file() and stem in f.stem and f.suffix.lower() in IMAGE_EXTS:
-                    rel = f.relative_to(archive_root)
-                    return jsonify({
-                        "found": True,
-                        "url": url_for("archive_download", filepath=str(rel)),
-                        "filename": f.name,
-                    })
-
-        return jsonify({"found": False})
-
     # ---- CSV 文件下载 ----
     @app.route("/download-csv/<filename>")
     def download_csv(filename):
