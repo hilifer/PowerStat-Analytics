@@ -2,14 +2,19 @@
 
 通过 IMAP 连接 QQ 邮箱，根据配置的过滤规则筛选电费相关邮件，
 下载附件到本地临时目录。
+
+每封邮件按独立子目录存放（以日期+主题命名），
+通过 processed_emails 表记录指纹防止重复下载。
 """
 
 import email
 import email.header
+import hashlib
 import imaplib
 import os
 import re
 import socket
+import sqlite3
 import time
 import zipfile
 from datetime import datetime
@@ -136,6 +141,61 @@ class EmailFetcher:
 
         self._conn = None
 
+        # 数据库路径（用于邮件去重）
+        self._db_path = config.get("storage", "database", default="output/data/powerstat.db")
+        Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_processed_emails_table()
+
+    # ---- 邮件去重 ----
+
+    def _ensure_processed_emails_table(self):
+        """确保 processed_emails 表存在。"""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS processed_emails (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fingerprint TEXT UNIQUE NOT NULL,
+                    filename    TEXT,
+                    subject     TEXT,
+                    email_date  TEXT,
+                    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+    @staticmethod
+    def _compute_fingerprint(msg: Message) -> str:
+        """计算邮件指纹：优先用 Message-ID，否则用 subject+date+sender 的哈希。"""
+        message_id = msg.get("Message-ID", "").strip()
+        if message_id:
+            return message_id
+
+        subject = _decode_header_value(msg.get("Subject", ""))
+        sender = _decode_header_value(msg.get("From", ""))
+        date_str = msg.get("Date", "")
+        raw = f"{subject}|{sender}|{date_str}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+    def _is_email_processed(self, fingerprint: str) -> bool:
+        """检查邮件是否已处理过。"""
+        with sqlite3.connect(self._db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM processed_emails WHERE fingerprint = ?",
+                (fingerprint,)
+            ).fetchone()
+            return row is not None
+
+    def _mark_email_processed(self, fingerprint: str, subject: str,
+                               email_date: Optional[datetime]):
+        """标记邮件为已处理。"""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO processed_emails
+                   (fingerprint, subject, email_date)
+                   VALUES (?, ?, ?)""",
+                (fingerprint, subject,
+                 email_date.isoformat() if email_date else None)
+            )
+
     def connect(self):
         """连接到 IMAP 服务器。"""
         # 空凭据提前报错，不要浪费时间尝试连接
@@ -189,7 +249,11 @@ class EmailFetcher:
             self._conn = None
 
     def fetch_attachments(self) -> list[EmailAttachment]:
-        """抓取符合条件的邮件并下载附件，返回附件信息列表。"""
+        """抓取符合条件的邮件并下载附件，返回附件信息列表。
+
+        每封邮件的附件保存在独立子目录中（以日期_主题命名），
+        已处理过的邮件（指纹匹配）自动跳过，不重复下载。
+        """
         if not self._conn:
             self.connect()
 
@@ -211,6 +275,7 @@ class EmailFetcher:
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         attachments = []
         debug_logged = 0  # 打印前几封被过滤掉的邮件头，用于诊断
+        skipped_dup = 0   # 跳过的重复邮件计数
 
         for mid in ids:
             try:
@@ -230,16 +295,39 @@ class EmailFetcher:
                         debug_logged += 1
                     continue
 
+                # ---- 去重检查 ----
+                fingerprint = self._compute_fingerprint(msg)
+                if self._is_email_processed(fingerprint):
+                    _subj = _decode_header_value(msg.get("Subject", ""))
+                    log.info("跳过已处理邮件: %s", _subj)
+                    skipped_dup += 1
+                    continue
+
                 subject = _decode_header_value(msg.get("Subject", ""))
                 sender = _decode_header_value(msg.get("From", ""))
                 mail_date = _parse_date(msg)
 
                 log.info("处理邮件: [%s] %s", mail_date, subject)
 
+                # ---- 创建邮件专属子目录 ----
                 date_prefix = mail_date.strftime("%Y%m%d") if mail_date else "unknown"
+                safe_subject = _safe_filename(subject) if subject else "untitled"
+                # 限制目录名长度
+                if len(safe_subject) > 80:
+                    safe_subject = safe_subject[:80]
+                email_dir_name = f"{date_prefix}_{safe_subject}"
+                email_dir = self.temp_dir / email_dir_name
+                # 如果同名目录已存在（不同邮件碰巧同名），加序号
+                counter = 1
+                orig_dir_name = email_dir_name
+                while email_dir.exists():
+                    email_dir_name = f"{orig_dir_name}_{counter}"
+                    email_dir = self.temp_dir / email_dir_name
+                    counter += 1
+                email_dir.mkdir(parents=True, exist_ok=True)
+
                 body_html = ""
                 body_text = ""
-                has_real_attachment = False
 
                 for part in msg.walk():
                     if part.get_content_maintype() == "multipart":
@@ -265,46 +353,7 @@ class EmailFetcher:
                         continue
 
                     # ---- 获取附件（不限格式，全部下载） ----
-                    # 多种方式获取文件名（兼容各种邮件客户端）
-                    filename = part.get_filename()
-                    if not filename:
-                        filename = part.get_param("name")
-                    if not filename:
-                        # 从 Content-Disposition 头直接正则提取
-                        if "filename" in disposition:
-                            fn_match = re.search(
-                                r'filename[*]?=["\']?([^"\';\r\n]+)', disposition
-                            )
-                            if fn_match:
-                                filename = fn_match.group(1).strip()
-                    if not filename:
-                        # 从 Content-Type 头直接正则提取
-                        ct_header = part.get("Content-Type", "")
-                        if "name" in ct_header:
-                            nm_match = re.search(
-                                r'name[*]?=["\']?([^"\';\r\n]+)', ct_header
-                            )
-                            if nm_match:
-                                filename = nm_match.group(1).strip()
-                    if not filename:
-                        # 兜底：有 attachment disposition 或非文本类型就给默认名
-                        if "attachment" in disposition:
-                            filename = f"attachment_{hash(mid) & 0xFFFF:04x}.bin"
-                        elif content_type not in ("text/plain", "text/html"):
-                            content_id = part.get("Content-ID", "")
-                            cid = content_id.strip("<>").split("@")[0] if content_id else ""
-                            ext_map = {
-                                "image/png": ".png", "image/jpeg": ".jpg",
-                                "image/gif": ".gif", "image/bmp": ".bmp",
-                                "application/pdf": ".pdf",
-                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-                                "application/vnd.ms-excel": ".xls",
-                                "application/octet-stream": ".bin",
-                                "application/zip": ".zip",
-                            }
-                            ext = ext_map.get(content_type, ".bin")
-                            filename = f"{cid}{ext}" if cid else f"unnamed{ext}"
-
+                    filename = self._extract_filename(part, disposition, content_type, mid)
                     if not filename:
                         continue
 
@@ -317,13 +366,13 @@ class EmailFetcher:
                         log.warning("  附件过大跳过: %s (%d MB)", filename, len(payload) // (1024 * 1024))
                         continue
 
-                    safe_name = f"{date_prefix}_{_safe_filename(filename)}"
-                    filepath = self.temp_dir / safe_name
-                    counter = 1
+                    safe_name = _safe_filename(filename)
+                    filepath = email_dir / safe_name
+                    file_counter = 1
                     orig_stem = filepath.stem
                     while filepath.exists():
-                        filepath = filepath.with_name(f"{orig_stem}_{counter}{filepath.suffix}")
-                        counter += 1
+                        filepath = filepath.with_name(f"{orig_stem}_{file_counter}{filepath.suffix}")
+                        file_counter += 1
 
                     with open(filepath, "wb") as f:
                         f.write(payload)
@@ -337,20 +386,15 @@ class EmailFetcher:
                         email_sender=sender,
                     )
                     attachments.append(att)
-                    has_real_attachment = True
-                    log.info("  已下载附件: %s -> %s", filename, filepath.name)
+                    log.info("  已下载附件: %s -> %s/%s", filename, email_dir_name, filepath.name)
 
                 # ---- 保存邮件正文为 HTML/TXT（也作为可解析内容） ----
                 body_content = body_html or body_text
                 if body_content:
                     ext = ".html" if body_html else ".txt"
-                    body_name = f"{date_prefix}_邮件正文_{_safe_filename(subject)}{ext}"
-                    body_path = self.temp_dir / body_name
-                    counter = 1
-                    orig_stem = body_path.stem
-                    while body_path.exists():
-                        body_path = body_path.with_name(f"{orig_stem}_{counter}{body_path.suffix}")
-                        counter += 1
+                    body_name = f"邮件正文{ext}"
+                    body_path = email_dir / body_name
+
                     with open(body_path, "w", encoding="utf-8") as f:
                         f.write(body_content)
 
@@ -364,10 +408,16 @@ class EmailFetcher:
                         is_body=True,
                     )
                     attachments.append(att)
-                    log.info("  已保存邮件正文: %s", body_name)
+                    log.info("  已保存邮件正文: %s/%s", email_dir_name, body_name)
+
+                # ---- 标记邮件为已处理 ----
+                self._mark_email_processed(fingerprint, subject, mail_date)
 
             except Exception as e:
                 log.error("处理邮件 %s 时出错: %s", mid, e, exc_info=True)
+
+        if skipped_dup:
+            log.info("跳过 %d 封已处理的重复邮件", skipped_dup)
 
         # 解压 zip 文件，将内部文件展开为独立附件
         attachments = self._extract_archives(attachments)
@@ -375,8 +425,51 @@ class EmailFetcher:
         log.info("共获得 %d 个附件（含解压）", len(attachments))
         return attachments
 
+    @staticmethod
+    def _extract_filename(part, disposition: str, content_type: str, mid) -> Optional[str]:
+        """从邮件 part 中提取附件文件名（兼容各种邮件客户端）。"""
+        filename = part.get_filename()
+        if not filename:
+            filename = part.get_param("name")
+        if not filename:
+            if "filename" in disposition:
+                fn_match = re.search(
+                    r'filename[*]?=["\']?([^"\';\r\n]+)', disposition
+                )
+                if fn_match:
+                    filename = fn_match.group(1).strip()
+        if not filename:
+            ct_header = part.get("Content-Type", "")
+            if "name" in ct_header:
+                nm_match = re.search(
+                    r'name[*]?=["\']?([^"\';\r\n]+)', ct_header
+                )
+                if nm_match:
+                    filename = nm_match.group(1).strip()
+        if not filename:
+            if "attachment" in disposition:
+                filename = f"attachment_{hash(mid) & 0xFFFF:04x}.bin"
+            elif content_type not in ("text/plain", "text/html"):
+                content_id = part.get("Content-ID", "")
+                cid = content_id.strip("<>").split("@")[0] if content_id else ""
+                ext_map = {
+                    "image/png": ".png", "image/jpeg": ".jpg",
+                    "image/gif": ".gif", "image/bmp": ".bmp",
+                    "application/pdf": ".pdf",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                    "application/vnd.ms-excel": ".xls",
+                    "application/octet-stream": ".bin",
+                    "application/zip": ".zip",
+                }
+                ext = ext_map.get(content_type, ".bin")
+                filename = f"{cid}{ext}" if cid else f"unnamed{ext}"
+        return filename
+
     def _extract_archives(self, attachments: list[EmailAttachment]) -> list[EmailAttachment]:
-        """解压 zip 等压缩包，将内部文件展开为独立附件返回。"""
+        """解压 zip 等压缩包，将内部文件展开为独立附件返回。
+
+        解压目录在 ZIP 所在的邮件子目录内创建（以 ZIP 文件名命名的子文件夹）。
+        """
         ARCHIVE_EXTS = {".zip"}
         INNER_EXTS = {".xlsx", ".xls", ".pdf", ".png", ".jpg", ".jpeg",
                       ".bmp", ".tiff", ".tif", ".csv"}
@@ -395,6 +488,7 @@ class EmailFetcher:
                 result.append(att)
                 continue
 
+            # 在 ZIP 所在目录内创建子目录
             extract_dir = zip_path.parent / zip_path.stem
             extract_dir.mkdir(parents=True, exist_ok=True)
             extracted_count = 0
