@@ -37,6 +37,8 @@ from src.parsers.validators import clean_id, is_valid_meter_number
 _CHINESE_RE = re.compile(r'[\u4e00-\u9fff]')
 _DATE_RE = re.compile(r'^\d{4}[-/]\d{1,2}[-/]\d{1,2}$|^\d{4}[-/]\d{1,2}$|^\d{8}$')
 _MONTH_RE = re.compile(r'(\d{4})\s*[-年/]\s*(\d{1,2})\s*月?')
+# 紧凑格式：YYYYMM 或 YYYY + 数字 + 月（无分隔符）
+_MONTH_COMPACT_RE = re.compile(r'(\d{4})(0[1-9]|1[0-2])(?:\D|$)')
 
 
 def _cell_str(val) -> str:
@@ -1144,22 +1146,27 @@ class MultiPassExtractor:
         if not all_period_hits:
             return []
 
-        # 按行排序，聚合为块（连续行间隔 ≤ 3）
+        # 按行排序，聚合为块（连续行间隔 ≤ 3，且同一周期不重复）
         all_period_hits.sort(key=lambda x: x[0])
         current_cluster = [all_period_hits[0]]
+        seen_periods = {all_period_hits[0][2]}
         clusters = []
 
         for hit in all_period_hits[1:]:
-            if hit[0] - current_cluster[-1][0] <= 3 and hit[1] == current_cluster[0][1]:
-                current_cluster.append(hit)
-            else:
+            # 如果同一周期已出现过，说明进入了新块
+            if hit[2] in seen_periods or hit[0] - current_cluster[-1][0] > 3 or hit[1] != current_cluster[0][1]:
                 if len(current_cluster) >= 3:
                     clusters.append(current_cluster)
                 current_cluster = [hit]
+                seen_periods = {hit[2]}
+            else:
+                current_cluster.append(hit)
+                seen_periods.add(hit[2])
         if len(current_cluster) >= 3:
             clusters.append(current_cluster)
 
         # 转化为块定义
+        prev_title_row = None
         for cluster in clusters:
             category_col = cluster[0][1]
             period_rows = {}
@@ -1177,6 +1184,22 @@ class MultiPassExtractor:
                     title_row = r
                     break
 
+            # 如果没有找到自己的标题行且与前一个块共享同一个sheet，
+            # 使用前一个块的标题行（共享表头）
+            if prev_title_row is not None and title_row > prev_title_row:
+                # 检查是否真找到了标题（如果title_row只是fallback值，用前一个块的）
+                found_title = False
+                for r in range(first_period_row - 1, max(-1, first_period_row - 6), -1):
+                    if r < 0:
+                        break
+                    cell = _cell_str(df.iloc[r, 0]) if len(df.columns) > 0 else ""
+                    if any(kw in cell for kw in ("统计表", "电费单", "项目", "光伏")):
+                        found_title = True
+                        break
+                if not found_title:
+                    title_row = prev_title_row  # 共享前一个块的标题/表头
+
+            prev_title_row = title_row
             blocks.append({
                 'title_row': title_row,
                 'category_col': category_col,
@@ -1195,12 +1218,29 @@ class MultiPassExtractor:
         # 找数据列：优先 "发电量"/"用电量"，其次 "上网电量"/"反向用电量"
         # 注意：必须在 period_rows 上方的表头行搜索
         first_period = min(period_rows.keys())
+        # header_search_range 可以回溯到共享表头
         header_search_range = range(max(title_row, 0), first_period)
+        # metadata_start 限定为块本身附近（不包括其他块的数据行）
+        # 使用 first_period - 1 避免搜索到前一个块的数据
+        metadata_start = max(title_row, first_period - 1)
 
-        # 高优先级关键字（已乘倍率的电量）
-        fwd_kw_high = ("发电量", "用电量")
-        fwd_kw_low = ("电表用理", "电表用量", "正向用电量")
-        rev_kw_high = ("上网电量", "反向用电量", "上网用电量")
+        # 先探测区段边界：通过 "正向数据"/"反向数据" 确定列范围
+        fwd_section_start, rev_section_start = 0, None
+        for row_idx in header_search_range:
+            for col_idx in range(len(df.columns)):
+                cell = _cell_str(df.iloc[row_idx, col_idx])
+                if cell in ("反向数据", "反向", "上网数据"):
+                    rev_section_start = col_idx
+                elif cell in ("正向数据", "正向", "发电数据"):
+                    fwd_section_start = col_idx
+
+        # 高优先级关键字（已乘倍率的最终电量）
+        fwd_kw_high = ("发电量",)  # 明确正向
+        rev_kw_high = ("上网电量", "反向用电量", "上网用电量")  # 明确反向
+        # 中优先级：通用"用电量"（可能出现在正向和反向区段）
+        ambiguous_kw_high = ("用电量",)
+        # 低优先级（原始差值，未乘倍率）
+        ambiguous_kw_low = ("电表用理", "电表用量", "正向用电量")
         rev_kw_low = ("反向用量",)
         price_kw = ("电价", "优惠后电价")
         amount_kw = ("金额",)
@@ -1214,15 +1254,33 @@ class MultiPassExtractor:
                 cell = _cell_str(df.iloc[row_idx, col_idx])
                 if not cell:
                     continue
-                # 高优先级覆盖低优先级
-                if cell in fwd_kw_high:
-                    data_cols["forward"] = col_idx  # 覆盖
-                elif cell in fwd_kw_low and "forward" not in data_cols:
-                    data_cols["forward"] = col_idx
+
+                # 判断该列属于正向还是反向区段
+                in_rev_section = rev_section_start is not None and col_idx >= rev_section_start
+
+                # 明确的反向关键字（最高优先级）
                 if cell in rev_kw_high:
                     data_cols["reverse"] = col_idx
                 elif cell in rev_kw_low and "reverse" not in data_cols:
                     data_cols["reverse"] = col_idx
+                # 明确的正向关键字（最高优先级）
+                elif cell in fwd_kw_high:
+                    data_cols["forward"] = col_idx
+                # 通用"用电量"：按区段分配，覆盖低优先级
+                elif cell in ambiguous_kw_high:
+                    if in_rev_section:
+                        data_cols["reverse"] = col_idx  # 高优先级覆盖
+                    else:
+                        data_cols["forward"] = col_idx  # 高优先级覆盖
+                # 低优先级（电表用理等）
+                elif cell in ambiguous_kw_low:
+                    if in_rev_section:
+                        if "reverse" not in data_cols:
+                            data_cols["reverse"] = col_idx
+                    else:
+                        if "forward" not in data_cols:
+                            data_cols["forward"] = col_idx
+
                 if cell in price_kw:
                     data_cols["price"] = col_idx  # 取最后一个（优惠后电价 > 原电价）
                 if cell in amount_kw:
@@ -1245,12 +1303,21 @@ class MultiPassExtractor:
         for r in range(title_row, min(title_row + 3, len(df))):
             for c in range(min(10, len(df.columns))):
                 cell_text = _cell_str(df.iloc[r, c])
+                # 标准格式（YYYY年MM月）
                 m = _MONTH_RE.search(cell_text)
                 if m:
                     y, mo = int(m.group(1)), int(m.group(2))
                     if 2015 <= y <= 2035 and 1 <= mo <= 12:
                         month = f"{y}-{str(mo).zfill(2)}"
                         break
+                # 紧凑格式（YYYYMM）
+                if not month:
+                    m = _MONTH_COMPACT_RE.search(cell_text)
+                    if m:
+                        y, mo = int(m.group(1)), int(m.group(2))
+                        if 2015 <= y <= 2035:
+                            month = f"{y}-{str(mo).zfill(2)}"
+                            break
             if month:
                 break
         if not month:
@@ -1259,10 +1326,11 @@ class MultiPassExtractor:
             return
 
         # 在块的 metadata 行中搜索电表号/用户号
-        # 搜索范围：period 行上方（title_row → first_period）+ 下方（last_period+1 → +10）
+        # 搜索范围：块附近（不回溯到其他块）+ period 行本身 + 下方
         first_period = min(period_rows.keys())
         last_period = max(period_rows.keys())
-        search_ranges = list(range(title_row, first_period)) + \
+        search_ranges = list(range(metadata_start, first_period)) + \
+                         list(range(first_period, last_period + 1)) + \
                          list(range(last_period + 1, min(last_period + 10, len(df))))
         block_gen_meter = block_grid_meter = block_user_id = None
         block_discount = None
@@ -1277,13 +1345,13 @@ class MultiPassExtractor:
             if um and not block_user_id:
                 block_user_id = um.group(1)
 
-            # 发电表号
-            gm = re.search(r'(?:发电表号?|发电表)\s*[:：]?\s*(\d{8,16})', row_text)
+            # 发电表号（兼容 "发电表号"/"发电表"/"发电" + 可选引号）
+            gm = re.search(r'(?:发电表号?|发电表?)\s*[:：]?\s*[\'\"]*(\d{8,16})', row_text)
             if gm and not block_gen_meter:
                 block_gen_meter = gm.group(1)
 
-            # 上网表号
-            nm = re.search(r'(?:上网表号?|上网电表号?|上网表)\s*[:：]?\s*(\d{8,16})', row_text)
+            # 上网表号（兼容 "上网表号"/"上网表"/"上网" + 可选引号）
+            nm = re.search(r'(?:上网表号?|上网电表号?|上网表?)\s*[:：]?\s*[\'\"]*(\d{8,16})', row_text)
             if nm and not block_grid_meter:
                 block_grid_meter = nm.group(1)
 
@@ -1963,9 +2031,15 @@ class MultiPassExtractor:
 
     def _infer_month(self, filename: str, sheet_name: str, source_info: dict) -> str:
         for text in [filename, sheet_name]:
+            # 标准格式：2026年1月 / 2026-01 / 2026/01
             for m in _MONTH_RE.finditer(text):
                 y, mo = int(m.group(1)), int(m.group(2))
                 if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                    return f"{y}-{str(mo).zfill(2)}"
+            # 紧凑格式：202601（YYYYMM，无分隔符）
+            for m in _MONTH_COMPACT_RE.finditer(text):
+                y, mo = int(m.group(1)), int(m.group(2))
+                if 2015 <= y <= 2035:
                     return f"{y}-{str(mo).zfill(2)}"
         if source_info and source_info.get("email_date"):
             d = source_info["email_date"]
