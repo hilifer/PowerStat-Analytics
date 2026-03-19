@@ -1407,8 +1407,7 @@ class MultiPassExtractor:
         # 低优先级：已乘倍率的最终电量（兜底使用）
         fwd_kw_low = ("发电量",)
         rev_kw_low = ("上网电量", "上网用电量", "反向用量")
-        price_kw = ("电价", "优惠后电价")
-        amount_kw = ("金额",)
+        # 注意：单价（电价）从图片 OCR 提取，不从 Excel 表提取
         actual_usage_kw = ("实际用电数",)
         mult_kw = ("倍率", "CT倍率", "变比")
         cur_reading_kw = ("本月表数", "本月读数", "本月示数")
@@ -1454,10 +1453,6 @@ class MultiPassExtractor:
                         data_cols["reverse"] = col_idx
                         data_cols["reverse_is_multiplied"] = True
 
-                if cell in price_kw:
-                    data_cols["price"] = col_idx  # 取最后一个（优惠后电价 > 原电价）
-                if cell in amount_kw:
-                    data_cols.setdefault("amount", col_idx)
                 if cell in actual_usage_kw:
                     data_cols.setdefault("actual_usage", col_idx)
                 # 倍率列：按区段分正向/反向
@@ -1591,29 +1586,17 @@ class MultiPassExtractor:
                 elif mt == "上网表" and not grid_meter:
                     grid_meter = mn
 
-        # 提取读数
+        # 提取读数（单价从图片 OCR 提取，此处不提取）
         fwd_r, rev_r = {}, {}
         fwd_total = rev_total = None
-        prices = {}  # period -> price
-        amounts = {}  # period -> amount
         for row_idx, period in period_rows.items():
             fv = _to_float(df.iloc[row_idx, data_cols["forward"]]) if "forward" in data_cols else None
             rv = _to_float(df.iloc[row_idx, data_cols["reverse"]]) if "reverse" in data_cols else None
-            pv = _to_float(df.iloc[row_idx, data_cols["price"]]) if "price" in data_cols else None
-            av = _to_float(df.iloc[row_idx, data_cols["amount"]]) if "amount" in data_cols else None
             if period == "total":
                 fwd_total, rev_total = fv, rv
-                if pv is not None:
-                    prices[period] = pv
-                if av is not None:
-                    amounts[period] = av
             elif period in ("sharp_peak", "peak", "flat", "valley"):
                 fwd_r[period] = fv
                 rev_r[period] = rv
-                if pv is not None:
-                    prices[period] = pv
-                if av is not None:
-                    amounts[period] = av
 
         # 提取本月表数和上月表数（原始抄表数据）
         fwd_cur = {}   # period -> 正向本月表数
@@ -1715,31 +1698,7 @@ class MultiPassExtractor:
             if block_grid_asset and not self.meters[grid_meter].get("asset_number"):
                 self.meters[grid_meter]["asset_number"] = block_grid_asset
 
-        # 记录电价信息（存入 self.prices 供后续入库）
-        if prices:
-            # 如果只有 total 电价（无分时），将其作为统一电价填入各时段
-            if "total" in prices and not any(prices.get(k) for k in ("sharp_peak", "peak", "flat", "valley")):
-                unit_price = prices["total"]
-                for period in ("sharp_peak", "peak", "flat", "valley"):
-                    prices.setdefault(period, unit_price)
-
-            # 确定用户编号：块内 > 发电表 > 上网表
-            uid = block_user_id
-            if not uid and gen_meter:
-                uid = self.meters.get(gen_meter, {}).get("user_id")
-            if not uid and grid_meter:
-                uid = self.meters.get(grid_meter, {}).get("user_id")
-
-            if uid and month:
-                price_key = (uid, month)
-                if price_key not in self.prices:
-                    self.prices[price_key] = {
-                        "sharp_peak_price": prices.get("sharp_peak"),
-                        "peak_price": prices.get("peak"),
-                        "flat_price": prices.get("flat"),
-                        "valley_price": prices.get("valley"),
-                        "source_file": filepath.name,
-                    }
+        # 注意：单价数据从图片 OCR 提取，不从 Excel 表格提取
 
     # ================================================================
     # 组装 + 合并
@@ -1820,8 +1779,7 @@ class MultiPassExtractor:
                 continue
             info = self.meters[mn]
             uid = info.get("user_id")
-            # 查找对应的价格数据
-            price_data = self.prices.get((uid, month), {}) if uid else {}
+            # 注意：单价数据从图片 OCR 提取，不从 Excel 关联
             records.append({
                 "meter_number": mn,
                 "asset_number": info.get("asset_number"),
@@ -1847,10 +1805,6 @@ class MultiPassExtractor:
                 "prev_flat": reading.get("prev_flat"),
                 "prev_valley": reading.get("prev_valley"),
                 "prev_total": reading.get("prev_total"),
-                "sharp_peak_price": price_data.get("sharp_peak_price"),
-                "peak_price": price_data.get("peak_price"),
-                "flat_price": price_data.get("flat_price"),
-                "valley_price": price_data.get("valley_price"),
                 "source_file": reading.get("source_file"),
                 "source_sheet": reading.get("source_sheet"),
             })
