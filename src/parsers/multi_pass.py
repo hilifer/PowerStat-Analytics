@@ -3,9 +3,8 @@
 按两层结构提取电表档案，再提取月度读数：
 
 第一层 · 核心身份（电表固有属性）：
-  预扫描：扫描配对块，收集用户号阻止名单
   pass1：电表号 + 资产编号（基础身份，最先建立）
-  配对注册：用预扫描缓存补充电表和配对关系
+  配对块：补充电表 + 建立配对关系
   pass2：电表类型（发电表/上网表）
   pass3：倍率 + 折扣（计量/商务属性）
 
@@ -98,7 +97,6 @@ class MultiPassExtractor:
         self.readings = {}   # (meter_number, month) -> {sharp_peak, peak, flat, valley, total}
         self.prices = {}     # (user_id, month) -> {sharp_peak_price, peak_price, ...}
         self.pairs = []      # [(gen_meter_number, grid_meter_number)]
-        self._pass0_user_ids = set()  # pass0 识别的用户编号，防止 pass1 误注册为电表
 
     def load_dataframes(self, sheets: list):
         self._sheets = sheets
@@ -132,9 +130,8 @@ class MultiPassExtractor:
         按两层结构组织：
 
         第一层 · 核心身份（电表固有属性）：
-          预扫描：扫描配对块，收集用户号阻止名单（防止 pass1 误注册）
           pass1：电表号 + 资产编号（基础身份，最先建立）
-          配对注册：用预扫描缓存补充电表和配对关系
+          配对块：补充电表 + 建立配对关系
           pass2：电表类型（发电表/上网表）
           pass3：倍率 + 折扣（计量/商务属性）
 
@@ -148,14 +145,11 @@ class MultiPassExtractor:
         """
         # ── 第一层：核心身份（电表固有属性） ──────────────
 
-        # 预扫描：扫描配对块，收集用户号阻止名单
-        self._prescan_paired_blocks()
-
         # pass1：电表号 + 资产编号
         self._pass1_meters_and_assets()
 
-        # 配对注册：用预扫描缓存补充电表和配对关系
-        self._register_paired_blocks()
+        # 配对块：补充电表 + 建立配对关系
+        self._paired_blocks()
 
         # pass2：电表类型
         self._pass2_meter_types()
@@ -168,7 +162,7 @@ class MultiPassExtractor:
         # pass4：用户编号
         self._pass4_user_ids()
 
-        # pass5：项目名 + 折扣 + 同用户互补共享
+        # pass5：项目名 + 同用户互补共享
         self._pass5_supplementary_attrs()
 
         # ── 整理 ─────────────────────────────────────
@@ -187,7 +181,7 @@ class MultiPassExtractor:
                      info.get("user_id"), info.get("multiplier"), info.get("project_name"))
 
     # ================================================================
-    # 预扫描：配对电表块识别（统计表中的用户号+发电表+上网表块）
+    # 配对块：识别统计表中的用户号+发电表+上网表块
     # ================================================================
 
     # 块内标签正则：兼容两种格式
@@ -205,8 +199,6 @@ class MultiPassExtractor:
             r'(?:发电表?资产编号?|发电资产[号产]?|发电表资产)\s*[:：]?\s*([0-9A-Za-z]{8,30})'), 1),
         ("grid_asset", re.compile(
             r'(?:上网表?资产[号产表]?|上网电表资产表?|上网表资产)\s*[:：]?\s*([0-9A-Za-z]{8,30})'), 1),
-        ("multiplier", re.compile(
-            r'(?:倍率|CT倍率|变比)\s*[:：]?\s*(\d+\.?\d*)'), 1),
     ]
 
     # 哪些标签关键字标识块内各字段（用于格式1的 label-then-value 模式）
@@ -216,19 +208,20 @@ class MultiPassExtractor:
         "grid_meter":  ["上网表号", "上网电表号", "上网电表", "上网表"],
         "gen_asset":   ["发电表资产编号", "发电表资产", "发电资产号", "发电资产产号"],
         "grid_asset":  ["上网表资产号", "上网表资产产", "上网表资产", "上网电表资产表", "上网电表资产"],
-        "multiplier":  ["倍率", "CT倍率", "变比"],
     }
 
-    def _prescan_paired_blocks(self):
-        """预扫描：扫描统计表中的配对块，只收集用户号阻止名单。
+    def _paired_blocks(self):
+        """扫描统计表中的配对块，注册电表并建立配对关系。
 
-        扫描结果缓存到 self._paired_block_cache，供 _register_paired_blocks 使用。
-        这一步不注册任何电表，只做两件事：
-          1. 扫描所有 sheet 识别配对块
-          2. 收集 _pass0_user_ids 阻止名单（防止 pass1 把用户号误注册为电表）
+        在 pass1 之后执行。此时基础电表已注册，
+        本步骤补充统计表中发现的电表并建立发电表↔上网表配对。
+
+        支持两种格式：
+        格式1（表格型）：标签在一个单元格，值在相邻单元格
+        格式2（文本型）：标签和值在同一单元格内（如"用电户号0950000088133431"）
         """
-        log.info("[预扫描] 扫描配对块，收集用户号阻止名单...")
-        self._paired_block_cache = []  # [(block_dict, filepath, sheet_name, project_name)]
+        log.info("[配对块] 扫描统计表中的配对电表块...")
+        block_count = 0
 
         for df, filepath, sheet_name, source_info in self._sheets:
             # 收集所有标签命中：(row, field_name, value)
@@ -272,10 +265,6 @@ class MultiPassExtractor:
                                 hits.append((r, best_field, val))
                             elif best_field in ("gen_asset", "grid_asset") and len(val) >= 8 and not _CHINESE_RE.search(val):
                                 hits.append((r, best_field, val))
-                            elif best_field == "multiplier":
-                                fv = _to_float(val)
-                                if fv and fv >= 1:
-                                    hits.append((r, best_field, val))
 
                     # 策略C：处理 "上网表7月新装09001SG..." 这类非标准标签
                     m = re.search(r'(?:上网表|发电表)\d{1,2}月新装\s*[:：]?\s*([0-9A-Za-z]{8,30})', cell)
@@ -298,97 +287,54 @@ class MultiPassExtractor:
                 user_id = block.get("user_id")
                 gen_meter = block.get("gen_meter")
                 grid_meter = block.get("grid_meter")
-                # 值冲突去重
+                # 值冲突去重：同一个值不可能既是用户号又是电表号
                 if user_id and user_id == gen_meter:
                     gen_meter = None
-                    block["gen_meter"] = None
                 if user_id and user_id == grid_meter:
                     grid_meter = None
-                    block["grid_meter"] = None
                 if gen_meter and gen_meter == grid_meter:
                     grid_meter = None
-                    block["grid_meter"] = None
 
-                # 只收集用户号阻止名单（这一步的核心目的）
-                if user_id:
-                    self._pass0_user_ids.add(user_id)
+                # 必须至少有一个电表号才有意义
+                if not gen_meter and not grid_meter:
+                    continue
 
-                # 至少有一个电表号才缓存
-                if gen_meter or grid_meter:
-                    self._paired_block_cache.append(
-                        (block, filepath, sheet_name, project_name))
+                block_count += 1
+                gen_asset = block.get("gen_asset")
+                grid_asset = block.get("grid_asset")
 
-        log.info("  预扫描发现 %d 个配对块，收集 %d 个用户号",
-                 len(self._paired_block_cache), len(self._pass0_user_ids))
+                # 只做三件事：注册电表 + 关联资产号 + 建立配对
+                # user_id、multiplier、project_name 由后续专门的 pass 提取，不在此重复
 
-    def _register_paired_blocks(self):
-        """用预扫描缓存注册配对电表块（在 pass1 之后执行）。
+                # 注册发电表
+                if gen_meter and is_valid_meter_number(gen_meter):
+                    self._register_meter(gen_meter, filepath.name, sheet_name, "发电表")
+                    if gen_asset and not self.meters[gen_meter]["asset_number"]:
+                        self.meters[gen_meter]["asset_number"] = gen_asset
 
-        此时 self.meters 已有 pass1 注册的基础电表，
-        本步骤补充统计表中发现的电表并建立配对关系。
-        """
-        log.info("[配对注册] 处理 %d 个缓存配对块...", len(self._paired_block_cache))
-        block_count = 0
+                # 注册上网表
+                if grid_meter and is_valid_meter_number(grid_meter):
+                    self._register_meter(grid_meter, filepath.name, sheet_name, "上网表")
+                    if grid_asset and not self.meters[grid_meter]["asset_number"]:
+                        self.meters[grid_meter]["asset_number"] = grid_asset
 
-        for block, filepath, sheet_name, project_name in self._paired_block_cache:
-            user_id = block.get("user_id")
-            gen_meter = block.get("gen_meter")
-            grid_meter = block.get("grid_meter")
-            gen_asset = block.get("gen_asset")
-            grid_asset = block.get("grid_asset")
-            multiplier_str = block.get("multiplier")
-            multiplier = _to_float(multiplier_str) if multiplier_str else None
+                # 配对
+                if gen_meter and grid_meter and is_valid_meter_number(gen_meter) and is_valid_meter_number(grid_meter):
+                    self.pairs.append((gen_meter, grid_meter))
+                    log.info("  配对块: 发电表=%s 上网表=%s", gen_meter, grid_meter)
 
-            block_count += 1
-
-            # 注册发电表
-            if gen_meter and is_valid_meter_number(gen_meter):
-                self._register_meter(gen_meter, filepath.name, sheet_name, "发电表",
-                                     explicit_meter=True)
-                info = self.meters[gen_meter]
-                if gen_asset and not info["asset_number"]:
-                    info["asset_number"] = gen_asset
-                if user_id and not info["user_id"]:
-                    info["user_id"] = user_id
-                if multiplier and not info["multiplier"]:
-                    info["multiplier"] = multiplier
-                if project_name and not info["project_name"]:
-                    info["project_name"] = project_name
-
-            # 注册上网表
-            if grid_meter and is_valid_meter_number(grid_meter):
-                self._register_meter(grid_meter, filepath.name, sheet_name, "上网表",
-                                     explicit_meter=True)
-                info = self.meters[grid_meter]
-                if grid_asset and not info["asset_number"]:
-                    info["asset_number"] = grid_asset
-                if user_id and not info["user_id"]:
-                    info["user_id"] = user_id
-                if multiplier and not info["multiplier"]:
-                    info["multiplier"] = multiplier
-                if project_name and not info["project_name"]:
-                    info["project_name"] = project_name
-
-            # 配对
-            if gen_meter and grid_meter and is_valid_meter_number(gen_meter) and is_valid_meter_number(grid_meter):
-                self.pairs.append((gen_meter, grid_meter))
-                log.info("  配对块: 用户=%s 发电表=%s 上网表=%s 项目=%s",
-                         user_id, gen_meter, grid_meter, project_name)
-
-        log.info("  注册 %d 个配对块", block_count)
-        # 释放缓存
-        self._paired_block_cache = []
+        log.info("  发现 %d 个配对块", block_count)
 
     def _cluster_hits_into_blocks(self, hits: list, max_gap: int = 10) -> list[dict]:
         """将按行排序的命中项聚合为块。同一块内行间距不超过 max_gap。
 
         去重规则：同一个值不能被分配到多个字段（如 user_id 和 grid_meter 不能相同）。
-        字段优先级：user_id > gen_meter > grid_meter > gen_asset > grid_asset > multiplier
+        字段优先级：user_id > gen_meter > grid_meter > gen_asset > grid_asset
         """
         # 字段优先级（先出现的优先保留值）
         _FIELD_PRIORITY = {
             "user_id": 0, "gen_meter": 1, "grid_meter": 2,
-            "gen_asset": 3, "grid_asset": 4, "multiplier": 5,
+            "gen_asset": 3, "grid_asset": 4,
         }
 
         blocks = []
@@ -506,8 +452,7 @@ class MultiPassExtractor:
                         val = clean_id(_cell_str(df.iloc[r, mc]))
                         if not is_valid_meter_number(val):
                             continue
-                        self._register_meter(val, filepath.name, sheet_name, mtype,
-                                             explicit_meter=True)
+                        self._register_meter(val, filepath.name, sheet_name, mtype)
                         if val not in self.meters:
                             continue
                         # 同行最近资产编号
@@ -560,8 +505,7 @@ class MultiPassExtractor:
                         mtype = {"gen_meter": "发电表", "grid_meter": "上网表"}.get(cat)
                         val = clean_id(self._find_value_near(df, r, c, field_name=cat))
                         if is_valid_meter_number(val):
-                            self._register_meter(val, filepath.name, sheet_name, mtype,
-                                                 explicit_meter=True)
+                            self._register_meter(val, filepath.name, sheet_name, mtype)
 
                     # 内嵌格式："电表号：12345678" 或 "发电表号0950050038124235"
                     for pattern, mtype in [
@@ -573,8 +517,7 @@ class MultiPassExtractor:
                         if m:
                             val = clean_id(m.group(1))
                             if is_valid_meter_number(val):
-                                self._register_meter(val, filepath.name, sheet_name, mtype,
-                                                     explicit_meter=True)
+                                self._register_meter(val, filepath.name, sheet_name, mtype)
 
         log.info("  找到 %d 个电表, 关联 %d 个资产编号", len(self.meters), asset_count)
 
@@ -1612,18 +1555,8 @@ class MultiPassExtractor:
     # ================================================================
 
     def _register_meter(self, meter_number: str, source_file="", source_sheet="",
-                        meter_type=None, *, explicit_meter=False):
-        """注册一个电表。
-
-        Args:
-            explicit_meter: 为 True 时绕过用户号阻止名单。
-                当上下文明确标识为电表号时使用（如表头列写"电表号"、
-                配对块中标注为"发电表号/上网表号"），即使该数字也出现
-                在其他地方作为用户号，也应注册为电表。
-        """
-        # 预扫描已识别为用户编号的值：除非上下文明确是电表号，否则不注册
-        if meter_number in self._pass0_user_ids and not explicit_meter:
-            return
+                        meter_type=None):
+        """注册一个电表。"""
         if meter_number not in self.meters:
             self.meters[meter_number] = {
                 "meter_number": meter_number,
