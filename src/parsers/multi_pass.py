@@ -760,7 +760,12 @@ class MultiPassExtractor:
     # ================================================================
 
     def _pass3_multiplier_and_discount(self):
-        """扫描所有文件，提取倍率和折扣并关联到电表。"""
+        """扫描所有文件，提取倍率和折扣并关联到电表。
+
+        倍率按方向区分：
+        - 正向数据区的倍率 → 发电表
+        - 反向数据区的倍率 → 上网表（通过配对关系路由）
+        """
         log.info("[pass3] 提取倍率/折扣...")
         count = 0
 
@@ -769,31 +774,126 @@ class MultiPassExtractor:
 
             # A. 表头列同行关联
             if header_idx is not None:
-                meter_cols, mult_cols, disc_cols = [], [], []
+                meter_cols, gen_cols, grid_cols = [], [], []
+                mult_cols, disc_cols = [], []
+                fwd_total_col, rev_total_col = None, None
+
                 for c in range(len(df.columns)):
                     hdr = _cell_str(df.iloc[header_idx, c])
                     if not hdr:
                         continue
-                    if self._matches_any(hdr, self._meter_aliases | self._gen_aliases | self._grid_aliases):
+                    if self._matches_any(hdr, self._meter_aliases):
                         meter_cols.append(c)
+                    if self._matches_any(hdr, self._gen_aliases):
+                        gen_cols.append(c)
+                    if self._matches_any(hdr, self._grid_aliases):
+                        grid_cols.append(c)
                     if self._matches_any(hdr, self._multiplier_aliases):
                         mult_cols.append(c)
                     if self._matches_any(hdr, self._discount_aliases):
                         disc_cols.append(c)
+                    if self._matches_any(hdr, self._fwd_total_aliases) and fwd_total_col is None:
+                        fwd_total_col = c
+                    if self._matches_any(hdr, self._rev_total_aliases) and rev_total_col is None:
+                        rev_total_col = c
 
-                if meter_cols and (mult_cols or disc_cols):
+                all_meter_cols = meter_cols + gen_cols + grid_cols
+
+                # 判断倍率列属于正向区还是反向区
+                # 正向区: fwd_total_col 附近（在 rev_total_col 之前）
+                # 反向区: rev_total_col 附近（在 fwd_total_col 之后）
+                fwd_mult_cols = []
+                rev_mult_cols = []
+                if len(mult_cols) >= 2 and fwd_total_col is not None and rev_total_col is not None:
+                    boundary = (fwd_total_col + rev_total_col) // 2
+                    for mc in mult_cols:
+                        if mc < boundary:
+                            fwd_mult_cols.append(mc)
+                        else:
+                            rev_mult_cols.append(mc)
+                    log.debug("  倍率列区分: 正向%s 反向%s (边界=%d)",
+                              fwd_mult_cols, rev_mult_cols, boundary)
+
+                if all_meter_cols and (mult_cols or disc_cols):
+                    has_dual_mult = bool(fwd_mult_cols and rev_mult_cols)
+
                     for r in range(header_idx + 1, len(df)):
-                        mn = self._find_meter_in_row(df, r, meter_cols)
-                        if not mn:
+                        # 找行内所有电表号
+                        row_meters = []
+                        for mc in all_meter_cols:
+                            val = clean_id(_cell_str(df.iloc[r, mc]))
+                            if val in self.meters:
+                                row_meters.append((mc, val))
+                            elif _is_meter_like(val):
+                                for mn in self.meters:
+                                    if val in mn or mn in val:
+                                        row_meters.append((mc, mn if len(mn) > len(val) else val))
+                                        break
+
+                        if not row_meters:
                             continue
+
+                        if has_dual_mult:
+                            # 双倍率模式：按方向分配
+                            for col_idx, mn in row_meters:
+                                info = self.meters[mn]
+                                mtype = info.get("meter_type", "未知")
+
+                                # 判断该电表号所在列属于哪个区域
+                                if col_idx in gen_cols or mtype == "发电表":
+                                    target_mult_cols = fwd_mult_cols
+                                elif col_idx in grid_cols or mtype == "上网表":
+                                    target_mult_cols = rev_mult_cols
+                                else:
+                                    # 根据列位置推断
+                                    boundary = (fwd_total_col + rev_total_col) // 2
+                                    target_mult_cols = fwd_mult_cols if col_idx < boundary else rev_mult_cols
+
+                                if not info["multiplier"]:
+                                    for mc in target_mult_cols:
+                                        v = _to_float(df.iloc[r, mc])
+                                        if v and v >= 1:
+                                            info["multiplier"] = v
+                                            count += 1
+                                            break
+
+                            # 如果行内只有一个电表号（发电表），把反向倍率赋给配对的上网表
+                            if len(row_meters) == 1:
+                                _, mn = row_meters[0]
+                                mtype = self.meters[mn].get("meter_type", "未知")
+                                if mtype == "发电表" and rev_mult_cols:
+                                    paired = self._find_paired_meter(mn, "上网表")
+                                    if paired and paired in self.meters and not self.meters[paired]["multiplier"]:
+                                        for mc in rev_mult_cols:
+                                            v = _to_float(df.iloc[r, mc])
+                                            if v and v >= 1:
+                                                self.meters[paired]["multiplier"] = v
+                                                count += 1
+                                                break
+                                elif mtype == "上网表" and fwd_mult_cols:
+                                    paired = self._find_paired_meter(mn, "发电表")
+                                    if paired and paired in self.meters and not self.meters[paired]["multiplier"]:
+                                        for mc in fwd_mult_cols:
+                                            v = _to_float(df.iloc[r, mc])
+                                            if v and v >= 1:
+                                                self.meters[paired]["multiplier"] = v
+                                                count += 1
+                                                break
+                        else:
+                            # 单倍率模式（原有逻辑）
+                            mn = row_meters[0][1]
+                            info = self.meters[mn]
+                            if not info["multiplier"]:
+                                for mc in mult_cols:
+                                    v = _to_float(df.iloc[r, mc])
+                                    if v and v >= 1:
+                                        info["multiplier"] = v
+                                        count += 1
+                                        break
+
+                        # 折扣提取（不区分方向）
+                        mn = row_meters[0][1]
                         info = self.meters[mn]
-                        if not info["multiplier"]:
-                            for mc in mult_cols:
-                                v = _to_float(df.iloc[r, mc])
-                                if v and v >= 1:
-                                    info["multiplier"] = v
-                                    count += 1
-                                    break
                         if not info["discount"]:
                             for dc in disc_cols:
                                 v = _to_float(df.iloc[r, dc])
@@ -953,12 +1053,20 @@ class MultiPassExtractor:
 
         # === 识别标识列：电表号 > 用户编号 > 资产号 ===
         meter_cols = []
+        gen_meter_cols = []   # 发电表号列
+        grid_meter_cols = []  # 上网表号列
         user_id_cols = []
         asset_cols = []
         type_col = None  # "用户类型"/"用户类别" 列
         for c, hdr in headers.items():
             cat = self._classify_header(hdr)
-            if cat in ("meter", "gen_meter", "grid_meter"):
+            if cat == "gen_meter":
+                gen_meter_cols.append(c)
+                meter_cols.append(c)
+            elif cat == "grid_meter":
+                grid_meter_cols.append(c)
+                meter_cols.append(c)
+            elif cat == "meter":
                 meter_cols.append(c)
             elif cat == "user":
                 user_id_cols.append(c)
@@ -972,6 +1080,8 @@ class MultiPassExtractor:
         id_source = "meter" if meter_cols else ("user_id" if user_id_cols else "asset")
         if not id_cols:
             return
+        # 标记是否同时有发电表列和上网表列（双表号模式）
+        has_dual_meter_cols = bool(gen_meter_cols and grid_meter_cols)
 
         # 构建资产号→电表号的反查表
         asset_to_meter = {}
@@ -1067,7 +1177,16 @@ class MultiPassExtractor:
             meter_type = self.meters.get(meter_number, {}).get("meter_type", "未知")
             detected_type = self._detect_type_from_text(row_type) if row_type else "未知"
 
-            # 正向读数
+            # 双表号模式：行内同时有发电表号和上网表号
+            # 正向读数 → 发电表号列对应的电表
+            # 反向读数 → 上网表号列对应的电表
+            gen_meter = None
+            grid_meter = None
+            if has_dual_meter_cols:
+                gen_meter = self._find_meter_in_row(df, row_idx, gen_meter_cols)
+                grid_meter = self._find_meter_in_row(df, row_idx, grid_meter_cols)
+
+            # 正向读数 → 发电表
             if fwd_cols:
                 fwd_readings = {k: _to_float(row.iloc[c]) for k, c in fwd_cols.items()}
                 fwd_total = _to_float(row.iloc[fwd_total_col]) if fwd_total_col is not None else None
@@ -1075,10 +1194,11 @@ class MultiPassExtractor:
                 if fwd_total is None and parts:
                     fwd_total = sum(parts)
                 if any(v is not None for v in fwd_readings.values()) or fwd_total is not None:
-                    self._upsert_reading(meter_number, row_month, fwd_readings,
+                    fwd_target = gen_meter or meter_number
+                    self._upsert_reading(fwd_target, row_month, fwd_readings,
                                          fwd_total, filepath.name, sheet_name)
 
-            # 反向读数：写入配对的上网表（如果有）
+            # 反向读数 → 上网表
             if rev_cols:
                 rev_readings = {k: _to_float(row.iloc[c]) for k, c in rev_cols.items()}
                 rev_total = _to_float(row.iloc[rev_total_col]) if rev_total_col is not None else None
@@ -1086,10 +1206,9 @@ class MultiPassExtractor:
                 if rev_total is None and parts:
                     rev_total = sum(parts)
                 if any(v is not None for v in rev_readings.values()) or rev_total is not None:
-                    # 反向数据归到配对的上网表
-                    paired = self._find_paired_meter(meter_number, "上网表")
-                    target = paired or meter_number
-                    self._upsert_reading(target, row_month, rev_readings,
+                    # 优先：上网表号列 > 配对关系 > 当前电表号
+                    rev_target = grid_meter or self._find_paired_meter(meter_number, "上网表") or meter_number
+                    self._upsert_reading(rev_target, row_month, rev_readings,
                                          rev_total, filepath.name, sheet_name)
 
     def _readings_from_transposed(self, df, filepath, sheet_name, source_info):
