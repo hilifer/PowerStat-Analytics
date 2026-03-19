@@ -9,6 +9,7 @@
 - 从文件名推断月份和用户编号作为补充
 """
 
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -88,9 +89,20 @@ class OCREngine:
         if self.engine_type == "tesseract":
             try:
                 import pytesseract
+                import shutil
+                # 显式查找 tesseract 路径，避免 Flask 等服务环境 PATH 不完整
+                tess_path = shutil.which("tesseract")
+                if not tess_path:
+                    # 常见安装路径回退
+                    for p in ["/usr/bin/tesseract", "/usr/local/bin/tesseract"]:
+                        if os.path.isfile(p):
+                            tess_path = p
+                            break
+                if tess_path:
+                    pytesseract.pytesseract.tesseract_cmd = tess_path
                 pytesseract.get_tesseract_version()
                 self._engine = pytesseract
-                log.info("Tesseract OCR 引擎初始化成功")
+                log.info("Tesseract OCR 引擎初始化成功 (路径: %s)", tess_path or "default")
             except Exception as e:
                 log.warning("Tesseract 不可用: %s。图片 OCR 功能将被跳过。", e)
                 self._unavailable = True
