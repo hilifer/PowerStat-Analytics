@@ -615,9 +615,10 @@ class OCREngine:
         大工业电费账单包含多个组件行，每个组件分别列出尖/峰/平/谷的单价。
         总单价 = 各组件单价之和。
 
-        重要：大工业电费单中，同一组件的4行按固定顺序排列：
-        尖→峰(尖峰)→平→谷。但标签可能写成 (尖)(峰)(峰)(谷)，
-        其中第二个"(峰)"实际对应"平"期。需按行序号区分，不能只看标签。
+        重要：账单原始标签是正确的 (尖)(峰)(平)(谷)，但 OCR 可能把
+        "(平)" 误识别为 "(峰)"，导致出现两个"峰"标签。
+        修正策略：每个组件的行按出现顺序固定映射为 尖→峰→平→谷，
+        不依赖 OCR 读取的标签文字，以避免 OCR 误识别导致错误。
         """
         lines = text.split("\n")
 
@@ -635,7 +636,8 @@ class OCREngine:
         flat_fee_keywords = ["基金及附加", "基金附加"]
         flat_fee_price = None
 
-        # 按组件类型分组收集行数据：component_type -> [(period_label, price), ...]
+        # 按组件类型分组收集行数据：component_type -> [(ocr_label, price), ...]
+        # 保持行出现顺序
         component_groups: dict[str, list[tuple[str, float]]] = {}
 
         # 用于识别组件类型
@@ -646,8 +648,6 @@ class OCREngine:
             "运行": ["系统运行", "运行费用"],
             "分摊": ["市场化分摊", "分摊费用"],
         }
-
-        period_chars = {"尖": "sharp_peak", "峰": "peak", "平": "flat", "谷": "valley"}
 
         for line in lines:
             line_clean = line.strip()
@@ -706,30 +706,16 @@ class OCREngine:
                     price_val = val
                     break
 
-            # 记录所有行（含价格为0/无效的），用于全局时段判断
+            # 记录所有行（含价格为 None 的），保持出现顺序
             component_groups.setdefault(comp_type, []).append(
-                (period_label, price_val)  # price_val 可能为 None
+                (period_label, price_val)
             )
 
-        # ---- 全局判断时段映射规则 ----
-        # 统计所有组件行的标签（含 price=None 的行），确保一致性
-        all_labels = []
-        for rows in component_groups.values():
-            for label, _ in rows:
-                all_labels.append(label)
-
-        global_peak_count = all_labels.count("峰")
-        global_flat_count = all_labels.count("平")
-        global_sharp_count = all_labels.count("尖")
-        num_components = len(component_groups)
-
-        # 大工业电费单4行固定顺序：尖→峰→平→谷
-        # 但标签可能写成 (尖)(峰)(峰)(谷)，第2个"峰"实际是"平"
-        # 全局规则（对所有组件统一）：
-        #   有"尖"行 → 两个"峰" = 峰+平
-        #   无"尖"行 → 两个"峰" = 尖峰+平
-        global_need_remap = (global_peak_count > num_components and global_flat_count == 0)
-        global_has_sharp = (global_sharp_count > 0)
+        # ---- 按行顺序分配时段 ----
+        # 标准顺序：尖(0)→峰(1)→平(2)→谷(3)
+        # OCR 可能把 (平) 误读为 (峰)，所以不完全信任标签，
+        # 而是结合标签和出现顺序来决定时段。
+        positional_order = ["sharp_peak_price", "peak_price", "flat_price", "valley_price"]
 
         period_prices = {
             "sharp_peak_price": [],
@@ -746,31 +732,53 @@ class OCREngine:
         }
 
         for comp_type, rows in component_groups.items():
-            peak_seen = 0
-            for label, price in rows:
-                if price is None:
-                    continue  # 跳过无有效价格的行（如电量为0时单价也为0）
+            # 检查该组件是否存在标签异常（如两个"峰"缺少"平"）
+            labels_in_group = [label for label, _ in rows]
+            label_set = set(labels_in_group)
+            has_all_four = {"尖", "峰", "平", "谷"}.issubset(label_set)
+            has_dup_labels = len(labels_in_group) != len(label_set)
 
-                actual_field = label_to_field.get(label)
-                if not actual_field:
-                    continue
-
-                if label == "峰" and global_need_remap:
-                    peak_seen += 1
-                    if global_has_sharp:
-                        # 已有"尖"行 → 两个"峰" = 峰 + 平
-                        if peak_seen == 1:
-                            actual_field = "peak_price"
-                        else:
-                            actual_field = "flat_price"
-                    else:
-                        # 无"尖"行 → 两个"峰" = 尖峰 + 平
-                        if peak_seen == 1:
-                            actual_field = "sharp_peak_price"
-                        else:
-                            actual_field = "flat_price"
-
-                period_prices[actual_field].append(price)
+            if has_all_four and not has_dup_labels:
+                # 标签完整无重复 → 直接按标签映射
+                for label, price in rows:
+                    if price is None:
+                        continue
+                    field = label_to_field.get(label)
+                    if field:
+                        period_prices[field].append(price)
+            elif len(rows) == 4 and has_dup_labels:
+                # 有重复标签（OCR 误读）→ 按位置顺序映射
+                log.info("  组件[%s] OCR标签异常 %s，按行顺序映射为尖→峰→平→谷",
+                         comp_type, labels_in_group)
+                for idx, (label, price) in enumerate(rows):
+                    if price is None:
+                        continue
+                    if idx < len(positional_order):
+                        period_prices[positional_order[idx]].append(price)
+            elif len(rows) == 3 and "尖" not in label_set:
+                # 只有3行（无尖）→ 映射为峰/平/谷
+                for idx, (label, price) in enumerate(rows):
+                    if price is None:
+                        continue
+                    field_idx = idx + 1  # 跳过尖
+                    if field_idx < len(positional_order):
+                        period_prices[positional_order[field_idx]].append(price)
+            else:
+                # 其他情况：尽量按标签映射，遇到重复则按位置
+                seen_fields = set()
+                for idx, (label, price) in enumerate(rows):
+                    if price is None:
+                        continue
+                    field = label_to_field.get(label)
+                    if field and field not in seen_fields:
+                        period_prices[field].append(price)
+                        seen_fields.add(field)
+                    elif idx < len(positional_order):
+                        # 标签已用过或无法识别 → 按位置
+                        fallback_field = positional_order[idx]
+                        if fallback_field not in seen_fields:
+                            period_prices[fallback_field].append(price)
+                            seen_fields.add(fallback_field)
 
         # 求和得到各时段总单价（加上固定费用）
         prices = {}
