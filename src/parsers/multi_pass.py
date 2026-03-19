@@ -790,7 +790,7 @@ class MultiPassExtractor:
                         grid_cols.append(c)
                     if self._matches_any(hdr, self._multiplier_aliases):
                         mult_cols.append(c)
-                    if self._matches_any(hdr, self._discount_aliases):
+                    if self._matches_any(hdr, self._discount_aliases) and "电价" not in hdr:
                         disc_cols.append(c)
                     if self._matches_any(hdr, self._fwd_total_aliases) and fwd_total_col is None:
                         fwd_total_col = c
@@ -916,7 +916,7 @@ class MultiPassExtractor:
                             if nearest and not self.meters[nearest]["multiplier"]:
                                 self.meters[nearest]["multiplier"] = fv
                                 count += 1
-                    elif self._matches_any(cell, self._discount_aliases):
+                    elif self._matches_any(cell, self._discount_aliases) and "电价" not in cell:
                         val = self._find_value_near(df, r, c, field_name="discount")
                         m = re.search(r'(\d+\.?\d*)', val) if val else None
                         if m:
