@@ -615,21 +615,11 @@ class OCREngine:
         大工业电费账单包含多个组件行，每个组件分别列出尖/峰/平/谷的单价。
         总单价 = 各组件单价之和。
 
-        五种计价方式：
-        第1种: 电能量电费 + 输配电费 + 系统运行费 + 基金及附加费
-        第2种: 电能电费 + 输配电费 + 上网环节线损电费 + 系统运行费用 + 基金及附加费
-        第4种: 同上但更多明细行（含市场化分摊等）
-        第5种: (电费1 + 电费2) / 2（两行同类型取平均）
+        重要：大工业电费单中，同一组件的4行按固定顺序排列：
+        尖→峰(尖峰)→平→谷。但标签可能写成 (尖)(峰)(峰)(谷)，
+        其中第二个"(峰)"实际对应"平"期。需按行序号区分，不能只看标签。
         """
         lines = text.split("\n")
-
-        # 时段关键字
-        period_keys = {
-            "sharp_peak_price": ["尖"],
-            "peak_price": ["峰"],
-            "flat_price": ["平"],
-            "valley_price": ["谷"],
-        }
 
         # 组件行关键字（匹配所有可能的费用组件）
         component_keywords = [
@@ -641,12 +631,23 @@ class OCREngine:
             "市场化分摊", "分摊费用",
         ]
 
-        # 每个时段的组件单价列表
-        period_components: dict[str, list[float]] = {k: [] for k in period_keys}
-
         # 不分时段的固定费用（基金及附加费等，加到每个时段）
         flat_fee_keywords = ["基金及附加", "基金附加"]
         flat_fee_price = None
+
+        # 按组件类型分组收集行数据：component_type -> [(period_label, price), ...]
+        component_groups: dict[str, list[tuple[str, float]]] = {}
+
+        # 用于识别组件类型
+        component_type_map = {
+            "电能": ["电度电费", "电脑电费", "电能电费", "电能量电费", "电量电费"],
+            "输配": ["输配电费", "输配电"],
+            "线损": ["上网环节", "环节线损"],
+            "运行": ["系统运行", "运行费用"],
+            "分摊": ["市场化分摊", "分摊费用"],
+        }
+
+        period_chars = {"尖": "sharp_peak", "峰": "peak", "平": "flat", "谷": "valley"}
 
         for line in lines:
             line_clean = line.strip()
@@ -657,46 +658,123 @@ class OCREngine:
             if not any(kw in line_clean for kw in component_keywords):
                 continue
 
-            # 检查是否是不分时段的固定费用行（无尖峰平谷标记）
+            # 检查是否是不分时段的固定费用行（基金附加费，无时段标记）
             is_flat_fee = any(kw in line_clean for kw in flat_fee_keywords)
-            has_period_marker = any(
-                re.search(rf'[(\(]\s*{kw}\s*[)\)]', line_clean) or
-                re.search(rf'{kw}\s*期', line_clean)
-                for kws in period_keys.values() for kw in kws
-            )
+            has_period_marker = bool(re.search(r'[(\(]\s*[尖峰平谷]\s*[)\)]', line_clean)) or \
+                                bool(re.search(r'[尖峰平谷]\s*期', line_clean))
 
             if is_flat_fee and not has_period_marker:
-                # 不分时段的基金附加费，提取单价
                 nums = re.findall(r'(\d+\.\d{2,8})', line_clean)
                 for n in nums:
                     val = float(n)
-                    if 0.001 <= val <= 1.0:  # 基金附加费单价通常很小
+                    if 0.001 <= val <= 1.0:
                         flat_fee_price = val
                         break
                 continue
 
-            # 判断属于哪个时段
-            for field, kws in period_keys.items():
-                for kw in kws:
-                    # 用括号格式 "(峰)" 或 "峰期" 匹配
-                    if re.search(rf'[(\(]\s*{kw}\s*[)\)]', line_clean) or \
-                       re.search(rf'{kw}\s*期', line_clean):
-                        # 排除 peak 行含 "尖"
-                        if field == "peak_price" and "尖" in line_clean:
-                            continue
-                        # 提取该行中像单价的数字（0.x 范围，高精度）
-                        nums = re.findall(r'(\d+\.\d{2,8})', line_clean)
-                        for n in nums:
-                            val = float(n)
-                            # 单价通常 < 3.0，排除电量和金额（通常 > 10）
-                            if 0.001 <= val <= 3.0:
-                                period_components[field].append(val)
-                                break  # 每行只取一个单价
-                        break
+            if not has_period_marker:
+                continue
+
+            # 识别组件类型
+            comp_type = None
+            for ct, keywords in component_type_map.items():
+                if any(kw in line_clean for kw in keywords):
+                    comp_type = ct
+                    break
+            if not comp_type:
+                continue
+
+            # 识别时段标签（取括号内或"X期"的字符）
+            period_label = None
+            pm = re.search(r'[(\(]\s*([尖峰平谷])\s*[)\)]', line_clean)
+            if pm:
+                period_label = pm.group(1)
+            else:
+                pm = re.search(r'([尖峰平谷])\s*期', line_clean)
+                if pm:
+                    period_label = pm.group(1)
+
+            if not period_label:
+                continue
+
+            # 提取该行中的单价
+            nums = re.findall(r'(\d+\.\d{2,8})', line_clean)
+            price_val = None
+            for n in nums:
+                val = float(n)
+                if 0.001 <= val <= 3.0:
+                    price_val = val
+                    break
+
+            # 记录所有行（含价格为0/无效的），用于全局时段判断
+            component_groups.setdefault(comp_type, []).append(
+                (period_label, price_val)  # price_val 可能为 None
+            )
+
+        # ---- 全局判断时段映射规则 ----
+        # 统计所有组件行的标签（含 price=None 的行），确保一致性
+        all_labels = []
+        for rows in component_groups.values():
+            for label, _ in rows:
+                all_labels.append(label)
+
+        global_peak_count = all_labels.count("峰")
+        global_flat_count = all_labels.count("平")
+        global_sharp_count = all_labels.count("尖")
+        num_components = len(component_groups)
+
+        # 大工业电费单4行固定顺序：尖→峰→平→谷
+        # 但标签可能写成 (尖)(峰)(峰)(谷)，第2个"峰"实际是"平"
+        # 全局规则（对所有组件统一）：
+        #   有"尖"行 → 两个"峰" = 峰+平
+        #   无"尖"行 → 两个"峰" = 尖峰+平
+        global_need_remap = (global_peak_count > num_components and global_flat_count == 0)
+        global_has_sharp = (global_sharp_count > 0)
+
+        period_prices = {
+            "sharp_peak_price": [],
+            "peak_price": [],
+            "flat_price": [],
+            "valley_price": [],
+        }
+
+        label_to_field = {
+            "尖": "sharp_peak_price",
+            "峰": "peak_price",
+            "平": "flat_price",
+            "谷": "valley_price",
+        }
+
+        for comp_type, rows in component_groups.items():
+            peak_seen = 0
+            for label, price in rows:
+                if price is None:
+                    continue  # 跳过无有效价格的行（如电量为0时单价也为0）
+
+                actual_field = label_to_field.get(label)
+                if not actual_field:
+                    continue
+
+                if label == "峰" and global_need_remap:
+                    peak_seen += 1
+                    if global_has_sharp:
+                        # 已有"尖"行 → 两个"峰" = 峰 + 平
+                        if peak_seen == 1:
+                            actual_field = "peak_price"
+                        else:
+                            actual_field = "flat_price"
+                    else:
+                        # 无"尖"行 → 两个"峰" = 尖峰 + 平
+                        if peak_seen == 1:
+                            actual_field = "sharp_peak_price"
+                        else:
+                            actual_field = "flat_price"
+
+                period_prices[actual_field].append(price)
 
         # 求和得到各时段总单价（加上固定费用）
         prices = {}
-        for field, components in period_components.items():
+        for field, components in period_prices.items():
             if components:
                 total = sum(components)
                 if flat_fee_price is not None:
