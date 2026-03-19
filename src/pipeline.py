@@ -610,18 +610,30 @@ class Pipeline:
         return "unknown"
 
     def _infer_project_for_file(self, att: EmailAttachment) -> Optional[str]:
-        """推断文件对应的项目（从已有项目列表匹配，或从文件名提取）。"""
+        """推断文件对应的项目（从已有项目列表匹配，或从文件名/邮件主题提取）。"""
         import re
         projects = self.db.get_projects()
         for proj in projects:
             if proj in att.filename or proj in att.email_subject:
                 return proj
 
-        # 从文件名提取项目名
-        for text in [att.filename, att.email_subject]:
-            m = re.search(r'([\u4e00-\u9fff]{2,10}(?:项目|电站|光伏))', text)
+        # 从邮件主题和文件名提取项目名
+        # 策略：取中文开头到数字/日期/关键词之前的部分作为项目名
+        for text in [att.email_subject, att.filename]:
+            if not text:
+                continue
+            # 去掉 "Fwd:" / "Re:" 等前缀
+            text = re.sub(r'^(?:Fwd?|Re)\s*[:：]\s*', '', text, flags=re.IGNORECASE)
+
+            # 匹配：中文名称（在数字、日期、"电费"、"月" 之前的部分）
+            m = re.match(
+                r'([\u4e00-\u9fff、·]+?)(?:\d|电费|月|抄表|账单|统计)',
+                text.strip()
+            )
             if m:
-                return m.group(1)
+                name = m.group(1).rstrip('、·')
+                if len(name) >= 2:
+                    return name
 
         return None
 

@@ -86,5 +86,9 @@ class Archiver:
             log.info("汇总 CSV: %s (%d 条)", csv_path, len(records))
 
     def _safe_dirname(self, name: str) -> str:
-        """清理目录名。"""
-        return "".join(c if c.isalnum() or c in "._-" else "_" for c in name).strip("_")[:100]
+        """清理目录名，保留中文和常用字符。"""
+        import re
+        # 只去掉文件系统非法字符，保留中文、字母、数字、常用符号
+        cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
+        cleaned = cleaned.strip('. _')
+        return cleaned[:100] if cleaned else "_未命名"
