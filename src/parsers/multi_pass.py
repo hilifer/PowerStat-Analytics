@@ -1364,8 +1364,9 @@ class MultiPassExtractor:
         price_kw = ("电价", "优惠后电价")
         amount_kw = ("金额",)
         actual_usage_kw = ("实际用电数",)
+        mult_kw = ("倍率", "CT倍率", "变比")
 
-        data_cols = {}  # forward, reverse, price, amount, actual_usage
+        data_cols = {}  # forward, reverse, price, amount, actual_usage, fwd_mult, rev_mult
         for row_idx in header_search_range:
             for col_idx in range(len(df.columns)):
                 if col_idx == category_col:
@@ -1406,6 +1407,12 @@ class MultiPassExtractor:
                     data_cols.setdefault("amount", col_idx)
                 if cell in actual_usage_kw:
                     data_cols.setdefault("actual_usage", col_idx)
+                # 倍率列：按区段分正向/反向
+                if cell in mult_kw:
+                    if in_rev_section:
+                        data_cols.setdefault("rev_mult", col_idx)
+                    else:
+                        data_cols.setdefault("fwd_mult", col_idx)
 
         # 兜底：如果没找到 forward 列，用第一个有数值的列
         if "forward" not in data_cols:
@@ -1452,6 +1459,7 @@ class MultiPassExtractor:
                          list(range(first_period, last_period + 1)) + \
                          list(range(last_period + 1, min(last_period + 10, len(df))))
         block_gen_meter = block_grid_meter = block_user_id = None
+        block_gen_asset = block_grid_asset = None
         block_discount = None
         for r in search_ranges:
             row_text = " ".join(_cell_str(df.iloc[r, c])
@@ -1469,10 +1477,20 @@ class MultiPassExtractor:
             if gm and not block_gen_meter:
                 block_gen_meter = gm.group(1)
 
-            # 上网表号（兼容 "上网表号"/"上网表"/"上网" + 可选引号）
+            # 上网表号（兼容 "上网表号"/"上网电表号"/"上网表" + 可选引号）
             nm = re.search(r'(?:上网表号?|上网电表号?|上网表?)\s*[:：]?\s*[\'\"]*(\d{8,16})', row_text)
             if nm and not block_grid_meter:
                 block_grid_meter = nm.group(1)
+
+            # 发电表资产编号
+            ga = re.search(r'(?:发电表?资产(?:编号|号)?)\s*[:：]?\s*[\'\"]*(\w{10,30})', row_text)
+            if ga and not block_gen_asset:
+                block_gen_asset = ga.group(1)
+
+            # 上网表资产编号
+            na = re.search(r'(?:上网表?资产(?:编号|号)?)\s*[:：]?\s*[\'\"]*(\w{10,30})', row_text)
+            if na and not block_grid_asset:
+                block_grid_asset = na.group(1)
 
             # 折扣
             dm = re.search(r'(\d+\.?\d*)\s*折', row_text)
@@ -1529,6 +1547,19 @@ class MultiPassExtractor:
                 if av is not None:
                     amounts[period] = av
 
+        # 从转置行中提取倍率（取第一个非 total 行的值，倍率在各行应一致）
+        fwd_mult_val = rev_mult_val = None
+        if "fwd_mult" in data_cols or "rev_mult" in data_cols:
+            for row_idx, period in period_rows.items():
+                if period == "total":
+                    continue
+                if "fwd_mult" in data_cols and fwd_mult_val is None:
+                    fwd_mult_val = _to_float(df.iloc[row_idx, data_cols["fwd_mult"]])
+                if "rev_mult" in data_cols and rev_mult_val is None:
+                    rev_mult_val = _to_float(df.iloc[row_idx, data_cols["rev_mult"]])
+                if fwd_mult_val is not None and rev_mult_val is not None:
+                    break
+
         # 写入读数
         if gen_meter and gen_meter in self.meters and any(v is not None for v in fwd_r.values()):
             parts = [v for v in fwd_r.values() if v is not None]
@@ -1538,11 +1569,24 @@ class MultiPassExtractor:
             # 设置折扣
             if block_discount and not self.meters[gen_meter].get("discount"):
                 self.meters[gen_meter]["discount"] = block_discount
+            # 正向倍率 → 发电表
+            if fwd_mult_val and fwd_mult_val >= 1 and not self.meters[gen_meter].get("multiplier"):
+                self.meters[gen_meter]["multiplier"] = fwd_mult_val
+            # 资产编号
+            if block_gen_asset and not self.meters[gen_meter].get("asset_number"):
+                self.meters[gen_meter]["asset_number"] = block_gen_asset
+
         if grid_meter and grid_meter in self.meters and any(v is not None for v in rev_r.values()):
             parts = [v for v in rev_r.values() if v is not None]
             self._upsert_reading(grid_meter, month, rev_r,
                                  rev_total or (sum(parts) if parts else None),
                                  filepath.name, sheet_name)
+            # 反向倍率 → 上网表
+            if rev_mult_val and rev_mult_val >= 1 and not self.meters[grid_meter].get("multiplier"):
+                self.meters[grid_meter]["multiplier"] = rev_mult_val
+            # 资产编号
+            if block_grid_asset and not self.meters[grid_meter].get("asset_number"):
+                self.meters[grid_meter]["asset_number"] = block_grid_asset
 
         # 记录电价信息（存入 self.prices 供后续入库）
         if prices and block_user_id:

@@ -499,11 +499,13 @@ def _register_routes(app: Flask, db: Database):
     # ---- 账单查询 ----
     @app.route("/bills")
     def bills():
+        from datetime import date
         project = request.args.get("project")
         user_id = request.args.get("user_id")
         meter = request.args.get("meter")
-        month_from = request.args.get("from")
-        month_to = request.args.get("to")
+        current_month = date.today().strftime("%Y-%m")
+        month_from = request.args.get("from") or current_month
+        month_to = request.args.get("to") or current_month
 
         results = db.get_monthly_bill(
             project_name=project, user_id=user_id,
