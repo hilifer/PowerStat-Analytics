@@ -1377,14 +1377,15 @@ class MultiPassExtractor:
                 elif cell in ("正向数据", "正向", "发电数据"):
                     fwd_section_start = col_idx
 
-        # 高优先级关键字（已乘倍率的最终电量）
-        fwd_kw_high = ("发电量",)  # 明确正向
-        rev_kw_high = ("上网电量", "反向用电量", "上网用电量")  # 明确反向
-        # 中优先级：通用"用电量"（可能出现在正向和反向区段）
+        # 高优先级：原始差值（未乘倍率，抄表数据），按区段分正向/反向
+        raw_kw_high = ("电表用理", "电表用量")
+        fwd_raw_kw = ("正向用电量",)  # 明确正向原始
+        rev_raw_kw = ("反向用电量",)  # 明确反向原始
+        # 中优先级：通用"用电量"（按区段分配）
         ambiguous_kw_high = ("用电量",)
-        # 低优先级（原始差值，未乘倍率）
-        ambiguous_kw_low = ("电表用理", "电表用量", "正向用电量")
-        rev_kw_low = ("反向用量",)
+        # 低优先级：已乘倍率的最终电量（兜底使用）
+        fwd_kw_low = ("发电量",)
+        rev_kw_low = ("上网电量", "上网用电量", "反向用量")
         price_kw = ("电价", "优惠后电价")
         amount_kw = ("金额",)
         actual_usage_kw = ("实际用电数",)
@@ -1402,28 +1403,33 @@ class MultiPassExtractor:
                 # 判断该列属于正向还是反向区段
                 in_rev_section = rev_section_start is not None and col_idx >= rev_section_start
 
-                # 明确的反向关键字（最高优先级）
-                if cell in rev_kw_high:
-                    data_cols["reverse"] = col_idx
-                elif cell in rev_kw_low and "reverse" not in data_cols:
-                    data_cols["reverse"] = col_idx
-                # 明确的正向关键字（最高优先级）
-                elif cell in fwd_kw_high:
-                    data_cols["forward"] = col_idx
-                # 通用"用电量"：按区段分配，覆盖低优先级
-                elif cell in ambiguous_kw_high:
+                # 最高优先级：原始表码差（电表用理），按区段分配
+                if cell in raw_kw_high:
                     if in_rev_section:
-                        data_cols["reverse"] = col_idx  # 高优先级覆盖
+                        data_cols["reverse"] = col_idx
                     else:
-                        data_cols["forward"] = col_idx  # 高优先级覆盖
-                # 低优先级（电表用理等）
-                elif cell in ambiguous_kw_low:
+                        data_cols["forward"] = col_idx
+                # 明确方向的原始读数
+                elif cell in fwd_raw_kw:
+                    data_cols["forward"] = col_idx
+                elif cell in rev_raw_kw:
+                    data_cols["reverse"] = col_idx
+                # 中优先级：通用"用电量"，按区段分配
+                elif cell in ambiguous_kw_high:
                     if in_rev_section:
                         if "reverse" not in data_cols:
                             data_cols["reverse"] = col_idx
-                    else:
-                        if "forward" not in data_cols:
-                            data_cols["forward"] = col_idx
+                    elif "forward" not in data_cols:
+                        data_cols["forward"] = col_idx
+                # 低优先级：已乘倍率的最终电量（发电量/上网电量），仅兜底
+                elif cell in fwd_kw_low:
+                    if "forward" not in data_cols:
+                        data_cols["forward"] = col_idx
+                        data_cols["forward_is_multiplied"] = True
+                elif cell in rev_kw_low:
+                    if "reverse" not in data_cols:
+                        data_cols["reverse"] = col_idx
+                        data_cols["reverse_is_multiplied"] = True
 
                 if cell in price_kw:
                     data_cols["price"] = col_idx  # 取最后一个（优惠后电价 > 原电价）
@@ -1583,6 +1589,22 @@ class MultiPassExtractor:
                     rev_mult_val = _to_float(df.iloc[row_idx, data_cols["rev_mult"]])
                 if fwd_mult_val is not None and rev_mult_val is not None:
                     break
+
+        # 如果正向列使用的是"发电量"（已乘倍率），需要除以倍率还原为原始表码差
+        if data_cols.get("forward_is_multiplied") and fwd_mult_val and fwd_mult_val > 1:
+            for k in fwd_r:
+                if fwd_r[k] is not None:
+                    fwd_r[k] = round(fwd_r[k] / fwd_mult_val, 2)
+            if fwd_total is not None:
+                fwd_total = round(fwd_total / fwd_mult_val, 2)
+
+        # 如果反向列使用的是"上网电量"（已乘倍率），需要除以倍率还原为原始表码差
+        if data_cols.get("reverse_is_multiplied") and rev_mult_val and rev_mult_val > 1:
+            for k in rev_r:
+                if rev_r[k] is not None:
+                    rev_r[k] = round(rev_r[k] / rev_mult_val, 2)
+            if rev_total is not None:
+                rev_total = round(rev_total / rev_mult_val, 2)
 
         # 写入读数
         if gen_meter and gen_meter in self.meters and any(v is not None for v in fwd_r.values()):
