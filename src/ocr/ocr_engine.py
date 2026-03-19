@@ -341,12 +341,12 @@ class OCREngine:
 
         先识别账单类型（参照《电费单价收取方式》五种），再按对应方式计算。
 
-        第1种: 尖/峰/平/谷期电量电费行含单价列 → 直接读取
-               (电能量电费+输配电费+系统运行费+基金附加费 已合并到单价中)
+        第1种: 电能量电费+输配电费+系统运行费+基金附加费 → 组件求和
+               (账单中各组件分时段列出，需要逐项求和得到各时段总单价)
         第2种: 电能电费+输配电费+上网环节线损电费+系统运行费+基金附加费 → 组件求和
-        第3种: 只有"电量电费"（无尖峰平谷）→ 所有时段统一价格
-        第4种: 多行明细(电度/输配/上网环节/系统运行/基金附加/市场化分摊) → 组件求和
-        第5种: 同一时段出现两行电费 → (电费1+电费2)/2 取平均
+        第3种: 尖期电量电费=尖峰期单价 → 各时段电费行直接含单价列
+        第4种: 电量电费=尖=峰=平=谷 → 单一电价，所有时段统一
+        第5种: (电费1+电费2)/2 → 同一时段两行取平均
         """
         # ---- Step 1: 检测账单类型 ----
         bill_type = self._detect_bill_type(text)
@@ -359,16 +359,16 @@ class OCREngine:
             # 第5种: 两行同类取平均
             prices = self._extract_prices_two_average(text)
 
-        elif bill_type in (2, 4):
-            # 第2/4种: 多组件明细行求和
+        elif bill_type in (1, 2):
+            # 第1/2种: 多组件明细行求和
             prices = self._extract_prices_industrial_components(text)
 
-        elif bill_type == 1:
-            # 第1种: 电费信息表格直接读单价列
+        elif bill_type == 3:
+            # 第3种: 各时段电费行直接含单价列
             prices = self._extract_prices_charge_table(text)
 
-        elif bill_type == 3:
-            # 第3种: 单一电价，所有时段统一
+        elif bill_type == 4:
+            # 第4种: 单一电价，所有时段统一
             single = self._extract_single_price(text)
             if single is not None:
                 prices = {
@@ -411,7 +411,7 @@ class OCREngine:
                     break
 
         if not self._has_enough_prices(prices):
-            # 单一电价兜底（第3种）
+            # 单一电价兜底（第4种）
             single = self._extract_single_price(text)
             if single is not None:
                 prices = {
@@ -445,12 +445,12 @@ class OCREngine:
     def _detect_bill_type(self, text: str) -> int:
         """检测电费账单类型（1-5），返回类型编号。
 
-        检测特征：
-        第5种: 同一时段出现 "电费1"/"电费2" 两行 → 取平均
-        第4种: 含多种组件明细行(≥3种不同组件) → 逐项汇总
+        检测特征（按优先级从高到低）：
+        第5种: 同一时段出现 "电费1"/"电费2" 两行且单价不同 → 取平均
         第2种: 含上网环节线损电费 + 其他组件 → 组件求和
-        第1种: 含 "X期电量电费"/"X期电费" 行 + 单价列 → 直接读
-        第3种: 只有 "电量电费"/"电费"（无尖峰平谷标记）→ 单一电价
+        第1种: 含≥3种不同组件明细行（电能/输配/系统运行/基金） → 组件求和
+        第3种: 含 "X期电量电费"/"X期电费" 行 → 各时段直接读单价
+        第4种: 只有 "电量电费"（无尖峰平谷标记）→ 单一电价=所有时段
         """
         lines = text.split("\n")
 
@@ -529,20 +529,20 @@ class OCREngine:
                 return 5  # 第5种：两行取平均
             # 否则当作第1种（电费1/电费2只是标签不同，实际单价列可直接读）
 
-        if len(component_types) >= 3:
-            return 4  # 第4种：多组件明细汇总
-
         if "线损" in component_types and len(component_types) >= 2:
-            return 2  # 第2种：含上网环节线损 + 其他组件
+            return 2  # 第2种：电能+输配+上网环节线损+系统运行+基金 → 组件求和
 
-        if has_period_charge_rows:
-            return 1  # 第1种：分时段电费行含单价
+        if len(component_types) >= 3:
+            return 1  # 第1种：电能量+输配+系统运行+基金附加 → 组件求和
 
         if has_single_charge:
-            return 3  # 第3种：单一电价
+            return 4  # 第4种：电量电费=所有时段统一单价
 
-        # 默认按第1种处理（最通用）
-        return 1
+        if has_period_charge_rows:
+            return 3  # 第3种：各时段电费行直接含单价
+
+        # 默认按第3种处理（最通用，直接读单价列）
+        return 3
 
     def _has_enough_prices(self, prices: dict) -> bool:
         """至少有2个分时段价格或有平均电价即认为足够。"""

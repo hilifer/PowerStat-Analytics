@@ -12,6 +12,7 @@ from flask import (
     jsonify, send_from_directory, flash, abort, send_file,
 )
 
+from src.archive.archiver import Archiver
 from src.config_loader import config
 from src.data.models import Database
 from src.logger import log
@@ -107,6 +108,51 @@ def _mark_processed(db: Database, fingerprint: str, filename: str,
                VALUES (?, ?, ?, ?)""",
             (fingerprint, filename, subject, date_str),
         )
+
+
+# ---------------------------------------------------------------------------
+# 归档辅助函数
+# ---------------------------------------------------------------------------
+
+def _infer_month(filename: str, email_date=None) -> str:
+    """从文件名或邮件日期推断月份。"""
+    import re
+    for match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})', filename or ""):
+        y, m = int(match.group(1)), int(match.group(2))
+        if 2015 <= y <= 2035 and 1 <= m <= 12:
+            return f"{y}-{str(m).zfill(2)}"
+    if email_date:
+        return email_date.strftime("%Y-%m")
+    return "unknown"
+
+
+def _infer_project(db: Database, filename: str, email_subject: str = "") -> str:
+    """从文件名/邮件主题推断项目名。优先匹配数据库已有项目。"""
+    import re
+    # 先尝试匹配数据库中已有的项目名
+    try:
+        projects = db.get_projects()
+        for proj in projects:
+            if proj and (proj in (filename or "") or proj in (email_subject or "")):
+                return proj
+    except Exception:
+        pass
+
+    # 从文件名/邮件主题提取项目名
+    for text in [email_subject, filename]:
+        if not text:
+            continue
+        text = re.sub(r'^(?:Fwd?|Re)\s*[:：]\s*', '', text, flags=re.IGNORECASE)
+        m = re.match(
+            r'([\u4e00-\u9fff、·]+?)(?:\d|电费|月|抄表|账单|统计)',
+            text.strip()
+        )
+        if m:
+            name = m.group(1).rstrip('、·')
+            if len(name) >= 2:
+                return name
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -322,33 +368,14 @@ def _register_routes(app: Flask, db: Database):
                         except Exception as e:
                             log.error("配对保存失败: %s <-> %s: %s", gen_meter, grid_meter, e)
 
-                # 1.5 归档新附件
+                # 1.5 归档新附件（按 年月/项目/文件 目录结构）
                 _log(f"归档 {len(new_attachments)} 个新附件…")
+                archiver = Archiver(db)
                 for att, fp, date_str in new_attachments:
                     if not att.is_body:
-                        reading_month = None
-                        for month_match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})', att.filename):
-                            y, m = int(month_match.group(1)), int(month_match.group(2))
-                            if 2015 <= y <= 2030 and 1 <= m <= 12:
-                                reading_month = f"{y}-{str(m).zfill(2)}"
-                                break
-                        if not reading_month:
-                            reading_month = (
-                                att.email_date.strftime("%Y-%m") if att.email_date else "unknown"
-                            )
-                        archive_root = Path(config.get("storage", "archive_root",
-                                                       default="output/archive"))
-                        dest_dir = archive_root / reading_month
-                        dest_dir.mkdir(parents=True, exist_ok=True)
-
-                        src_path = Path(att.filepath)
-                        if src_path.exists():
-                            dest_path = dest_dir / src_path.name
-                            counter = 1
-                            while dest_path.exists():
-                                dest_path = dest_dir / f"{src_path.stem}_{counter}{src_path.suffix}"
-                                counter += 1
-                            shutil.copy2(str(src_path), str(dest_path))
+                        reading_month = _infer_month(att.filename, att.email_date)
+                        project = _infer_project(db, att.filename, att.email_subject)
+                        archiver.archive_attachment(att.filepath, reading_month, project)
 
                     _mark_processed(db, fp, att.filename, att.email_subject, date_str)
                     new_count += 1
@@ -548,27 +575,12 @@ def _register_routes(app: Flask, db: Database):
 
                     _log(f"  新附件 [{new_email_count + 1}] {att.filename}")
 
-                    # 归档到月份目录
+                    # 归档到 年月/项目/文件 目录
                     if not att.is_body:
-                        reading_month = None
-                        for month_match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})', att.filename):
-                            y, m = int(month_match.group(1)), int(month_match.group(2))
-                            if 2015 <= y <= 2030 and 1 <= m <= 12:
-                                reading_month = f"{y}-{str(m).zfill(2)}"
-                                break
-                        if not reading_month:
-                            reading_month = att.email_date.strftime("%Y-%m") if att.email_date else "unknown"
-                        archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
-                        dest_dir = archive_root / reading_month
-                        dest_dir.mkdir(parents=True, exist_ok=True)
-                        src_path = Path(att.filepath)
-                        if src_path.exists():
-                            dest_path = dest_dir / src_path.name
-                            counter = 1
-                            while dest_path.exists():
-                                dest_path = dest_dir / f"{src_path.stem}_{counter}{src_path.suffix}"
-                                counter += 1
-                            shutil.copy2(str(src_path), str(dest_path))
+                        reading_month = _infer_month(att.filename, att.email_date)
+                        project = _infer_project(db, att.filename, att.email_subject)
+                        archiver = Archiver(db)
+                        archiver.archive_attachment(att.filepath, reading_month, project)
 
                     _mark_processed(db, fp, att.filename, att.email_subject, date_str)
                     new_email_count += 1
@@ -592,7 +604,9 @@ def _register_routes(app: Flask, db: Database):
             if archive_root.exists():
                 for f in sorted(archive_root.rglob("*")):
                     if f.is_file() and f.suffix.lower() in ALL_EXTS:
-                        month_dir = f.parent.name
+                        # 支持 年月/项目/文件 和 年月/文件 两种结构
+                        rel = f.relative_to(archive_root)
+                        month_dir = rel.parts[0] if rel.parts else f.parent.name
                         source_info = {"filename": f.name, "archive_month": month_dir}
                         archive_files.append((str(f), source_info))
 
