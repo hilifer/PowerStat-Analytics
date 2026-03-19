@@ -702,23 +702,48 @@ def _register_routes(app: Flask, db: Database):
                         log.error("OCR 失败 %s: %s", fname, e)
 
                 _log(f"[单价] OCR 识别 {ocr_count} 张图片，有效 {len(all_ocr)} 条，写入数据库…")
+                # 获取已知 user_id 用于修正 OCR 提取结果
+                known_user_ids = set()
+                try:
+                    for m in db.get_meters():
+                        uid = m.get("user_id")
+                        if uid:
+                            known_user_ids.add(uid)
+                except Exception:
+                    pass
+
+                from src.pipeline import Pipeline
                 for ocr in all_ocr:
-                    if ocr.user_id and ocr.reading_month:
-                        try:
-                            db.upsert_price(
-                                user_id=ocr.user_id,
-                                reading_month=ocr.reading_month,
-                                sharp_peak_price=ocr.sharp_peak_price,
-                                peak_price=ocr.peak_price,
-                                flat_price=ocr.flat_price,
-                                valley_price=ocr.valley_price,
-                                average_price=ocr.average_price,
-                                source_file=ocr.source_file,
-                            )
-                            if ocr.has_price_data():
-                                price_saved += 1
-                        except Exception as e:
-                            log.error("单价入库失败: %s", e)
+                    if not ocr.reading_month or not ocr.has_price_data():
+                        continue
+                    user_id = ocr.user_id
+                    if not user_id:
+                        log.warning("单价无 user_id，跳过: src=%s", ocr.source_file)
+                        continue
+                    # 修正 user_id
+                    if user_id not in known_user_ids and known_user_ids:
+                        matched = Pipeline._match_user_id(user_id, known_user_ids)
+                        if matched:
+                            log.info("单价 user_id 修正: %s -> %s", user_id, matched)
+                            user_id = matched
+                        else:
+                            log.warning("单价 user_id 无法匹配: %s, src=%s",
+                                        user_id, ocr.source_file)
+                            continue
+                    try:
+                        db.upsert_price(
+                            user_id=user_id,
+                            reading_month=ocr.reading_month,
+                            sharp_peak_price=ocr.sharp_peak_price,
+                            peak_price=ocr.peak_price,
+                            flat_price=ocr.flat_price,
+                            valley_price=ocr.valley_price,
+                            average_price=ocr.average_price,
+                            source_file=ocr.source_file,
+                        )
+                        price_saved += 1
+                    except Exception as e:
+                        log.error("单价入库失败: %s", e)
 
             _log(f"[{task_label}] {mode_label}更新完成！"
                  f"抄表 {readings_added} 条，单价 {price_saved} 条"

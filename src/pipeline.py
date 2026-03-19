@@ -474,23 +474,101 @@ class Pipeline:
                 log.error("入库失败: %s - %s", rec.get("meter_number"), e)
 
     def _save_prices(self, ocr_results: list):
-        """将 OCR 提取的单价写入数据库。"""
+        """将 OCR 提取的单价写入数据库。
+
+        OCR 提取的 user_id 可能不完整（截断）或错误（如时间戳），
+        需要与 meters 表中已知的 user_id 做后缀匹配修正。
+        """
         log.info("写入 %d 条单价记录...", len(ocr_results))
+
+        # 获取已知的 user_id 列表用于匹配修正
+        known_user_ids = set()
+        try:
+            meters = self.db.get_meters()
+            for m in meters:
+                uid = m.get("user_id")
+                if uid:
+                    known_user_ids.add(uid)
+        except Exception:
+            pass
+
+        saved, skipped = 0, 0
         for ocr in ocr_results:
-            if ocr.user_id and ocr.reading_month:
-                try:
-                    self.db.upsert_price(
-                        user_id=ocr.user_id,
-                        reading_month=ocr.reading_month,
-                        sharp_peak_price=ocr.sharp_peak_price,
-                        peak_price=ocr.peak_price,
-                        flat_price=ocr.flat_price,
-                        valley_price=ocr.valley_price,
-                        average_price=ocr.average_price,
-                        source_file=ocr.source_file,
-                    )
-                except Exception as e:
-                    log.error("单价入库失败: user=%s - %s", ocr.user_id, e)
+            if not ocr.reading_month:
+                continue
+            # 检查是否有任何有效的单价数据
+            has_price = any(v is not None for v in [
+                ocr.sharp_peak_price, ocr.peak_price,
+                ocr.flat_price, ocr.valley_price, ocr.average_price,
+            ])
+            if not has_price:
+                continue
+
+            user_id = ocr.user_id
+            if not user_id:
+                skipped += 1
+                log.warning("单价无 user_id，跳过: src=%s", ocr.source_file)
+                continue
+
+            # 修正 user_id：如果不在已知列表中，尝试后缀匹配
+            if user_id not in known_user_ids and known_user_ids:
+                matched = self._match_user_id(user_id, known_user_ids)
+                if matched:
+                    log.info("单价 user_id 修正: %s -> %s (src=%s)",
+                             user_id, matched, ocr.source_file)
+                    user_id = matched
+                else:
+                    skipped += 1
+                    log.warning("单价 user_id 无法匹配到已知用户，跳过: "
+                                "user_id=%s, src=%s", user_id, ocr.source_file)
+                    continue
+
+            try:
+                self.db.upsert_price(
+                    user_id=user_id,
+                    reading_month=ocr.reading_month,
+                    sharp_peak_price=ocr.sharp_peak_price,
+                    peak_price=ocr.peak_price,
+                    flat_price=ocr.flat_price,
+                    valley_price=ocr.valley_price,
+                    average_price=ocr.average_price,
+                    source_file=ocr.source_file,
+                )
+                saved += 1
+            except Exception as e:
+                log.error("单价入库失败: user=%s - %s", user_id, e)
+
+        log.info("单价入库完成: 成功 %d, 跳过 %d", saved, skipped)
+
+    @staticmethod
+    def _match_user_id(ocr_uid: str, known_ids: set) -> Optional[str]:
+        """用后缀匹配将 OCR 提取的 user_id 修正为已知的完整 user_id。
+
+        OCR 可能截断前缀（如 '000082501856' 应为 '0946000082501856'），
+        用后缀匹配找到唯一对应的已知 user_id。
+        """
+        import re
+        # 排除明显是时间戳的 user_id（20YYMMDD 开头）
+        if re.match(r'^20\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])', ocr_uid):
+            return None
+
+        # 去掉前导零后做后缀匹配
+        ocr_stripped = ocr_uid.lstrip('0')
+        if len(ocr_stripped) < 4:
+            return None
+
+        candidates = []
+        for kid in known_ids:
+            # 完整 user_id 以 OCR 提取的尾部结尾
+            if kid.endswith(ocr_stripped):
+                candidates.append(kid)
+            # 或者 OCR 提取的以完整 user_id 尾部结尾
+            elif ocr_stripped.endswith(kid.lstrip('0')):
+                candidates.append(kid)
+
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
 
     def _reconcile_data(self, all_records: list[dict]):
         """数据关联补齐：跨文件交叉引用，填补缺失字段。

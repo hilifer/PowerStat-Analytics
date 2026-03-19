@@ -257,8 +257,11 @@ class OCREngine:
         # 匹配8-16位纯数字
         matches = re.findall(r'(\d{8,16})', filename)
         for m in matches:
-            # 排除日期格式 (如 20240115)
-            if re.match(r'^20\d{2}(0[1-9]|1[0-2])', m) and len(m) == 8:
+            # 排除日期/时间戳格式：
+            # - 8位日期 (20240115)
+            # - 14位时间戳 (20260227093114)
+            # - 以及介于两者之间的长度
+            if re.match(r'^20\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])', m):
                 continue
             return m
         return None

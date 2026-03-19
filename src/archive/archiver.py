@@ -53,8 +53,8 @@ class Archiver:
             dest = dest_dir / f"{src.stem}_{counter}{src.suffix}"
             counter += 1
 
-        shutil.copy2(str(src), str(dest))
-        log.info("归档: %s -> %s", src.name, dest)
+        shutil.move(str(src), str(dest))
+        log.info("归档(移动): %s -> %s", src.name, dest)
         return str(dest)
 
     def generate_monthly_summaries(self):
