@@ -1261,6 +1261,26 @@ class MultiPassExtractor:
                 df, filepath, sheet_name, source_info,
                 block, period_keywords)
 
+    @staticmethod
+    def _is_valid_total_only_block(df, cluster):
+        """判断一个只有 1-2 行的 cluster 是否是有效的 total-only 转置块。
+
+        条件：包含 "total" period，且上方有表头行（含"统计表"/"类别"等关键字）。
+        """
+        if len(cluster) < 1 or len(cluster) >= 3:
+            return False
+        periods = {c[2] for c in cluster}
+        if "total" not in periods:
+            return False
+        row_idx = cluster[0][0]
+        # 上方 1-5 行内有表头关键字
+        for r in range(max(0, row_idx - 5), row_idx):
+            row_text = " ".join(str(df.iloc[r, c]) if pd.notna(df.iloc[r, c]) else ""
+                                for c in range(min(len(df.columns), 15)))
+            if any(kw in row_text for kw in ("统计表", "类别", "电表用理", "倍率", "发电量", "用电量")):
+                return True
+        return False
+
     def _find_transposed_blocks(self, df, period_keywords):
         """在 sheet 中找出所有转置表块。
 
@@ -1298,14 +1318,14 @@ class MultiPassExtractor:
         for hit in all_period_hits[1:]:
             # 如果同一周期已出现过，说明进入了新块
             if hit[2] in seen_periods or hit[0] - current_cluster[-1][0] > 3 or hit[1] != current_cluster[0][1]:
-                if len(current_cluster) >= 3:
+                if len(current_cluster) >= 3 or self._is_valid_total_only_block(df, current_cluster):
                     clusters.append(current_cluster)
                 current_cluster = [hit]
                 seen_periods = {hit[2]}
             else:
                 current_cluster.append(hit)
                 seen_periods.add(hit[2])
-        if len(current_cluster) >= 3:
+        if len(current_cluster) >= 3 or self._is_valid_total_only_block(df, current_cluster):
             clusters.append(current_cluster)
 
         # 转化为块定义
@@ -1583,6 +1603,10 @@ class MultiPassExtractor:
             av = _to_float(df.iloc[row_idx, data_cols["amount"]]) if "amount" in data_cols else None
             if period == "total":
                 fwd_total, rev_total = fv, rv
+                if pv is not None:
+                    prices[period] = pv
+                if av is not None:
+                    amounts[period] = av
             elif period in ("sharp_peak", "peak", "flat", "valley"):
                 fwd_r[period] = fv
                 rev_r[period] = rv
@@ -1653,7 +1677,10 @@ class MultiPassExtractor:
                 rev_total = round(rev_total / rev_mult_val, 2)
 
         # 写入读数
-        if gen_meter and gen_meter in self.meters and any(v is not None for v in fwd_r.values()):
+        has_fwd = any(v is not None for v in fwd_r.values()) or fwd_total is not None
+        has_rev = any(v is not None for v in rev_r.values()) or rev_total is not None
+
+        if gen_meter and gen_meter in self.meters and has_fwd:
             parts = [v for v in fwd_r.values() if v is not None]
             self._upsert_reading(gen_meter, month, fwd_r,
                                  fwd_total or (sum(parts) if parts else None),
@@ -1672,7 +1699,7 @@ class MultiPassExtractor:
             if block_gen_asset and not self.meters[gen_meter].get("asset_number"):
                 self.meters[gen_meter]["asset_number"] = block_gen_asset
 
-        if grid_meter and grid_meter in self.meters and any(v is not None for v in rev_r.values()):
+        if grid_meter and grid_meter in self.meters and has_rev:
             parts = [v for v in rev_r.values() if v is not None]
             self._upsert_reading(grid_meter, month, rev_r,
                                  rev_total or (sum(parts) if parts else None),
@@ -1689,16 +1716,30 @@ class MultiPassExtractor:
                 self.meters[grid_meter]["asset_number"] = block_grid_asset
 
         # 记录电价信息（存入 self.prices 供后续入库）
-        if prices and block_user_id:
-            price_key = (block_user_id, month)
-            if price_key not in self.prices:
-                self.prices[price_key] = {
-                    "sharp_peak_price": prices.get("sharp_peak"),
-                    "peak_price": prices.get("peak"),
-                    "flat_price": prices.get("flat"),
-                    "valley_price": prices.get("valley"),
-                    "source_file": filepath.name,
-                }
+        if prices:
+            # 如果只有 total 电价（无分时），将其作为统一电价填入各时段
+            if "total" in prices and not any(prices.get(k) for k in ("sharp_peak", "peak", "flat", "valley")):
+                unit_price = prices["total"]
+                for period in ("sharp_peak", "peak", "flat", "valley"):
+                    prices.setdefault(period, unit_price)
+
+            # 确定用户编号：块内 > 发电表 > 上网表
+            uid = block_user_id
+            if not uid and gen_meter:
+                uid = self.meters.get(gen_meter, {}).get("user_id")
+            if not uid and grid_meter:
+                uid = self.meters.get(grid_meter, {}).get("user_id")
+
+            if uid and month:
+                price_key = (uid, month)
+                if price_key not in self.prices:
+                    self.prices[price_key] = {
+                        "sharp_peak_price": prices.get("sharp_peak"),
+                        "peak_price": prices.get("peak"),
+                        "flat_price": prices.get("flat"),
+                        "valley_price": prices.get("valley"),
+                        "source_file": filepath.name,
+                    }
 
     # ================================================================
     # 组装 + 合并
