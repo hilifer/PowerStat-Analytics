@@ -272,13 +272,8 @@ class MultiPassExtractor:
                         if val:
                             if best_field in ("user_id",) and re.match(r'^\d{6,20}$', val):
                                 hits.append((r, best_field, val))
-                            elif best_field in ("gen_meter", "grid_meter"):
-                                if _is_meter_like(val):
-                                    hits.append((r, best_field, val))
-                                elif len(val) >= 18 and re.search(r'[A-Za-z]', val):
-                                    # 标签写"发电表号/上网表号"但值是资产编号格式
-                                    asset_field = "gen_asset" if best_field == "gen_meter" else "grid_asset"
-                                    hits.append((r, asset_field, val))
+                            elif best_field in ("gen_meter", "grid_meter") and _is_meter_like(val):
+                                hits.append((r, best_field, val))
                             elif best_field in ("gen_asset", "grid_asset") and len(val) >= 8 and not _CHINESE_RE.search(val):
                                 hits.append((r, best_field, val))
 
