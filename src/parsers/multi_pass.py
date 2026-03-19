@@ -842,7 +842,13 @@ class MultiPassExtractor:
             self._readings_from_transposed(df, filepath, sheet_name, source_info)
 
     def _readings_from_table(self, df, filepath, sheet_name, source_info):
-        """从标准表格提取读数。"""
+        """从标准表格提取读数。
+
+        支持：
+        - 电表号列 / 用户编号列（兼作电表号）/ 资产号列（反查电表）
+        - 同时提取正向读数和反向读数（同一行两组尖峰平谷）
+        - 通过正向总/反向总列的位置区分重复的"尖/峰/平/谷"列名
+        """
         header_idx = self._find_header_row(df)
         if header_idx is None:
             return
@@ -853,28 +859,43 @@ class MultiPassExtractor:
             if hdr:
                 headers[c] = hdr
 
-        # 电表号列
+        # === 识别标识列：电表号 > 用户编号 > 资产号 ===
         meter_cols = []
+        user_id_cols = []
+        asset_cols = []
+        type_col = None  # "用户类型"/"用户类别" 列
         for c, hdr in headers.items():
-            if self._matches_any(hdr, self._meter_aliases | self._gen_aliases | self._grid_aliases):
+            cat = self._classify_header(hdr)
+            if cat in ("meter", "gen_meter", "grid_meter"):
                 meter_cols.append(c)
-        if not meter_cols:
-            for c, hdr in headers.items():
-                if self._matches_any(hdr, self._asset_aliases):
-                    meter_cols.append(c)
-        if not meter_cols:
+            elif cat == "user":
+                user_id_cols.append(c)
+            elif cat == "asset":
+                asset_cols.append(c)
+            if "用户类型" in hdr or "用户类别" in hdr or "类别" in hdr:
+                type_col = c
+
+        # 优先级：电表号列 > 用户编号列 > 资产号列
+        id_cols = meter_cols or user_id_cols or asset_cols
+        id_source = "meter" if meter_cols else ("user_id" if user_id_cols else "asset")
+        if not id_cols:
             return
 
-        # 读数列
-        reading_cols = self._map_reading_columns(headers)
-        if not reading_cols:
+        # 构建资产号→电表号的反查表
+        asset_to_meter = {}
+        for mn, info in self.meters.items():
+            a = info.get("asset_number")
+            if a:
+                asset_to_meter[a] = mn
+
+        # === 读数列映射：同时提取正向和反向 ===
+        fwd_cols, rev_cols = self._map_reading_columns_dual(headers)
+        if not fwd_cols and not rev_cols:
             return
 
         # 特殊列
         date_col = next((c for c, h in headers.items()
                          if self._matches_any(h, self._date_aliases)), None)
-        usage_col = next((c for c, h in headers.items()
-                          if self._matches_any(h, self._usage_aliases)), None)
         fwd_total_col = next((c for c, h in headers.items()
                               if self._matches_any(h, self._fwd_total_aliases)), None)
         rev_total_col = next((c for c, h in headers.items()
@@ -901,8 +922,33 @@ class MultiPassExtractor:
             if any(kw in first for kw in ("合计", "总计", "小计", "汇总")):
                 continue
 
-            # 找电表号
-            meter_number = self._find_meter_in_row(df, row_idx, meter_cols)
+            # === 找电表号：按标识列类型匹配 ===
+            meter_number = None
+            if id_source == "meter":
+                meter_number = self._find_meter_in_row(df, row_idx, id_cols)
+            elif id_source == "user_id":
+                # 用户编号列的值可能就是电表号（用户确认这是合法的）
+                for ic in id_cols:
+                    val = clean_id(_cell_str(df.iloc[row_idx, ic]))
+                    if val in self.meters:
+                        meter_number = val
+                        break
+            elif id_source == "asset":
+                # 资产号反查电表号
+                for ic in id_cols:
+                    val = clean_id(_cell_str(df.iloc[row_idx, ic]))
+                    if val in asset_to_meter:
+                        meter_number = asset_to_meter[val]
+                        break
+                    # 资产号可能被截断，尝试前缀匹配
+                    if val:
+                        for full_asset, mn in asset_to_meter.items():
+                            if full_asset.startswith(val) or val.startswith(full_asset):
+                                meter_number = mn
+                                break
+                    if meter_number:
+                        break
+
             if not meter_number:
                 continue
 
@@ -924,20 +970,35 @@ class MultiPassExtractor:
             if not row_month or row_month == "unknown":
                 continue
 
-            # 读数
-            readings = {k: _to_float(row.iloc[c]) for k, c in reading_cols.items()}
-            total = None
-            for tc in [fwd_total_col, rev_total_col, usage_col]:
-                if tc is not None:
-                    total = _to_float(row.iloc[tc])
-                    if total is not None:
-                        break
-            parts = [v for v in readings.values() if v is not None]
-            if total is None and parts:
-                total = sum(parts)
+            # === 判断电表类型，决定正向/反向归属 ===
+            row_type = _cell_str(row.iloc[type_col]) if type_col is not None else ""
+            meter_type = self.meters.get(meter_number, {}).get("meter_type", "未知")
+            detected_type = self._detect_type_from_text(row_type) if row_type else "未知"
 
-            self._upsert_reading(meter_number, row_month, readings, total,
-                                 filepath.name, sheet_name)
+            # 正向读数
+            if fwd_cols:
+                fwd_readings = {k: _to_float(row.iloc[c]) for k, c in fwd_cols.items()}
+                fwd_total = _to_float(row.iloc[fwd_total_col]) if fwd_total_col is not None else None
+                parts = [v for v in fwd_readings.values() if v is not None]
+                if fwd_total is None and parts:
+                    fwd_total = sum(parts)
+                if any(v is not None for v in fwd_readings.values()) or fwd_total is not None:
+                    self._upsert_reading(meter_number, row_month, fwd_readings,
+                                         fwd_total, filepath.name, sheet_name)
+
+            # 反向读数：写入配对的上网表（如果有）
+            if rev_cols:
+                rev_readings = {k: _to_float(row.iloc[c]) for k, c in rev_cols.items()}
+                rev_total = _to_float(row.iloc[rev_total_col]) if rev_total_col is not None else None
+                parts = [v for v in rev_readings.values() if v is not None]
+                if rev_total is None and parts:
+                    rev_total = sum(parts)
+                if any(v is not None for v in rev_readings.values()) or rev_total is not None:
+                    # 反向数据归到配对的上网表
+                    paired = self._find_paired_meter(meter_number, "上网表")
+                    target = paired or meter_number
+                    self._upsert_reading(target, row_month, rev_readings,
+                                         rev_total, filepath.name, sheet_name)
 
     def _readings_from_transposed(self, df, filepath, sheet_name, source_info):
         """从转置表（行=尖峰平谷）提取读数。
@@ -1401,8 +1462,8 @@ class MultiPassExtractor:
             uid = info.get("user_id") or ""
             asset = info.get("asset_number") or ""
 
-            # 规则1：user_id 不能是任何已知电表号
-            if uid and uid in all_meter_numbers:
+            # 规则1：user_id 不能是其他电表的 meter_number（自身相同是允许的）
+            if uid and uid in all_meter_numbers and uid != mn:
                 new_uid = _pick_valid_user_id(info)
                 if new_uid:
                     log.info("  电表 %s: user_id '%s' 与电表号冲突，替换为候选值 '%s'",
@@ -1651,26 +1712,106 @@ class MultiPassExtractor:
         return best_mn
 
     def _map_reading_columns(self, headers: dict) -> dict:
-        """从表头映射尖峰平谷列。"""
-        result = {}
+        """从表头映射尖峰平谷列（兼容旧调用，只返回正向）。"""
+        fwd, _ = self._map_reading_columns_dual(headers)
+        return fwd
+
+    def _map_reading_columns_dual(self, headers: dict) -> tuple[dict, dict]:
+        """从表头同时映射正向和反向的尖峰平谷列。
+
+        利用"正向有功总"和"反向有功总"列的位置做分界：
+        - 正向列组："正向有功总"列附近（之后）的尖峰平谷
+        - 反向列组："反向有功总"列附近（之后）的尖峰平谷
+
+        返回 (fwd_cols, rev_cols)，每个都是 {period_key: col_idx} dict。
+        """
+        # 先找 total 列位置做分界锚点
+        fwd_total_col = None
+        rev_total_col = None
+        for c, hdr in headers.items():
+            if self._matches_any(hdr, self._fwd_total_aliases) and fwd_total_col is None:
+                fwd_total_col = c
+            if self._matches_any(hdr, self._rev_total_aliases) and rev_total_col is None:
+                rev_total_col = c
+
+        # 尝试精确匹配（正向有功尖/反向有功尖 等带前缀的列名）
+        fwd_cols = {}
+        rev_cols = {}
         for sub_field, aliases in self._fwd_readings_cfg.items():
             if not isinstance(aliases, list):
                 continue
             key = "sharp_peak" if "sharp" in sub_field else sub_field
+            # 只匹配带前缀的别名（排除 bare "尖"/"峰"/"平"/"谷"）
+            prefixed = [a for a in aliases if len(a) >= 2]
             for col_idx, hdr in headers.items():
-                if any(a in hdr for a in aliases):
-                    result.setdefault(key, col_idx)
+                if any(a in hdr for a in prefixed):
+                    fwd_cols.setdefault(key, col_idx)
                     break
-        if not result:
-            for sub_field, aliases in self._rev_readings_cfg.items():
+
+        for sub_field, aliases in self._rev_readings_cfg.items():
+            if not isinstance(aliases, list):
+                continue
+            key = "sharp_peak" if "sharp" in sub_field else sub_field
+            for col_idx, hdr in headers.items():
+                if col_idx in fwd_cols.values():
+                    continue  # 已被正向占用
+                if any(a in hdr for a in aliases):
+                    rev_cols.setdefault(key, col_idx)
+                    break
+
+        # 如果精确匹配都找到了，直接返回
+        if fwd_cols and rev_cols:
+            return fwd_cols, rev_cols
+
+        # 对于 bare "尖(kWh)" 重复列名的情况：用位置区分
+        # 规则：在 fwd_total_col 之后、rev_total_col 之前的是正向
+        #       在 rev_total_col 之后的是反向
+        if not fwd_cols and fwd_total_col is not None:
+            bare_map = {"尖": "sharp_peak", "峰": "peak", "平": "flat", "谷": "valley"}
+            for col_idx, hdr in sorted(headers.items()):
+                if rev_total_col is not None and col_idx >= rev_total_col:
+                    break  # 进入反向区域
+                if col_idx <= fwd_total_col:
+                    continue  # 还没到正向数据区
+                for bare, key in bare_map.items():
+                    if bare in hdr and key not in fwd_cols:
+                        fwd_cols[key] = col_idx
+                        break
+
+        if not rev_cols and rev_total_col is not None:
+            bare_map = {"尖": "sharp_peak", "峰": "peak", "平": "flat", "谷": "valley"}
+            for col_idx, hdr in sorted(headers.items()):
+                if col_idx <= rev_total_col:
+                    continue  # 还没到反向数据区
+                for bare, key in bare_map.items():
+                    if bare in hdr and key not in rev_cols:
+                        rev_cols[key] = col_idx
+                        break
+
+        # 兜底：如果只找到一组，且没有 total 锚点区分，当作正向
+        if not fwd_cols and not rev_cols:
+            # 用原始逻辑：所有 forward aliases（含 bare 关键字）
+            for sub_field, aliases in self._fwd_readings_cfg.items():
                 if not isinstance(aliases, list):
                     continue
                 key = "sharp_peak" if "sharp" in sub_field else sub_field
                 for col_idx, hdr in headers.items():
                     if any(a in hdr for a in aliases):
-                        result.setdefault(key, col_idx)
+                        fwd_cols.setdefault(key, col_idx)
                         break
-        return result
+
+        return fwd_cols, rev_cols
+
+    def _find_paired_meter(self, meter_number: str, target_type: str) -> Optional[str]:
+        """在配对关系中找指定类型的配对电表。"""
+        for gen, grid in self.pairs:
+            if target_type == "上网表":
+                if gen == meter_number:
+                    return grid
+            elif target_type == "发电表":
+                if grid == meter_number:
+                    return gen
+        return None
 
     def _detect_type_from_text(self, text: str) -> str:
         if any(kw in text for kw in ["光伏发电", "发电客户", "发电户", "逆变"]):
