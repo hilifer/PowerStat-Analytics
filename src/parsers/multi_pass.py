@@ -1186,7 +1186,11 @@ class MultiPassExtractor:
                 gen_meter = self._find_meter_in_row(df, row_idx, gen_meter_cols)
                 grid_meter = self._find_meter_in_row(df, row_idx, grid_meter_cols)
 
-            # 正向读数 → 发电表
+            # === 根据电表类型决定正向/反向数据归属 ===
+            # 规则：发电表抄正向数据，上网表抄反向数据
+            effective_type = detected_type if detected_type != "未知" else meter_type
+
+            # 正向读数
             if fwd_cols:
                 fwd_readings = {k: _to_float(row.iloc[c]) for k, c in fwd_cols.items()}
                 fwd_total = _to_float(row.iloc[fwd_total_col]) if fwd_total_col is not None else None
@@ -1194,11 +1198,20 @@ class MultiPassExtractor:
                 if fwd_total is None and parts:
                     fwd_total = sum(parts)
                 if any(v is not None for v in fwd_readings.values()) or fwd_total is not None:
-                    fwd_target = gen_meter or meter_number
-                    self._upsert_reading(fwd_target, row_month, fwd_readings,
-                                         fwd_total, filepath.name, sheet_name)
+                    if has_dual_meter_cols:
+                        # 双表号模式：直接写入发电表号列对应的电表
+                        fwd_target = gen_meter or meter_number
+                    elif effective_type == "上网表":
+                        # 上网表不抄正向数据，路由给配对的发电表
+                        fwd_target = self._find_paired_meter(meter_number, "发电表")
+                    else:
+                        # 发电表或未知类型：正向数据写入自身
+                        fwd_target = meter_number
+                    if fwd_target:
+                        self._upsert_reading(fwd_target, row_month, fwd_readings,
+                                             fwd_total, filepath.name, sheet_name)
 
-            # 反向读数 → 上网表
+            # 反向读数
             if rev_cols:
                 rev_readings = {k: _to_float(row.iloc[c]) for k, c in rev_cols.items()}
                 rev_total = _to_float(row.iloc[rev_total_col]) if rev_total_col is not None else None
@@ -1206,10 +1219,21 @@ class MultiPassExtractor:
                 if rev_total is None and parts:
                     rev_total = sum(parts)
                 if any(v is not None for v in rev_readings.values()) or rev_total is not None:
-                    # 优先：上网表号列 > 配对关系 > 当前电表号
-                    rev_target = grid_meter or self._find_paired_meter(meter_number, "上网表") or meter_number
-                    self._upsert_reading(rev_target, row_month, rev_readings,
-                                         rev_total, filepath.name, sheet_name)
+                    if has_dual_meter_cols:
+                        # 双表号模式：直接写入上网表号列对应的电表
+                        rev_target = grid_meter or self._find_paired_meter(meter_number, "上网表") or meter_number
+                    elif effective_type == "发电表":
+                        # 发电表不抄反向数据，路由给配对的上网表
+                        rev_target = self._find_paired_meter(meter_number, "上网表")
+                    elif effective_type == "上网表":
+                        # 上网表：反向数据写入自身
+                        rev_target = meter_number
+                    else:
+                        # 未知类型：尝试配对，兜底写入自身
+                        rev_target = self._find_paired_meter(meter_number, "上网表") or meter_number
+                    if rev_target:
+                        self._upsert_reading(rev_target, row_month, rev_readings,
+                                             rev_total, filepath.name, sheet_name)
 
     def _readings_from_transposed(self, df, filepath, sheet_name, source_info):
         """从转置表（行=尖峰平谷）提取读数。
