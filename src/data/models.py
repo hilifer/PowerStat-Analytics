@@ -44,11 +44,21 @@ CREATE TABLE IF NOT EXISTS monthly_readings (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     meter_id        INTEGER NOT NULL REFERENCES meters(id),
     reading_month   TEXT NOT NULL,               -- 格式: YYYY-MM
-    sharp_peak      REAL,  -- 尖峰
+    sharp_peak      REAL,  -- 尖峰（电表用理 = 本月表数 - 上月表数）
     peak            REAL,  -- 峰
     flat            REAL,  -- 平
     valley          REAL,  -- 谷
     total_kwh       REAL,  -- 总电量
+    cur_sharp_peak  REAL,  -- 本月表数：尖峰
+    cur_peak        REAL,  -- 本月表数：峰
+    cur_flat        REAL,  -- 本月表数：平
+    cur_valley      REAL,  -- 本月表数：谷
+    cur_total       REAL,  -- 本月表数：总
+    prev_sharp_peak REAL,  -- 上月表数：尖峰
+    prev_peak       REAL,  -- 上月表数：峰
+    prev_flat       REAL,  -- 上月表数：平
+    prev_valley     REAL,  -- 上月表数：谷
+    prev_total      REAL,  -- 上月表数：总
     source_file     TEXT,
     source_sheet    TEXT,
     email_date      TIMESTAMP,
@@ -97,6 +107,16 @@ SELECT
     r.flat,
     r.valley,
     r.total_kwh,
+    r.cur_sharp_peak,
+    r.cur_peak,
+    r.cur_flat,
+    r.cur_valley,
+    r.cur_total,
+    r.prev_sharp_peak,
+    r.prev_peak,
+    r.prev_flat,
+    r.prev_valley,
+    r.prev_total,
     p.sharp_peak_price,
     p.peak_price,
     p.flat_price,
@@ -171,6 +191,14 @@ class Database:
             log.info("迁移: 添加 meters.paired_meter_id 列")
             conn.execute("ALTER TABLE meters ADD COLUMN paired_meter_id INTEGER")
 
+        # 添加 monthly_readings 的本月/上月表数列（如果缺失）
+        reading_columns = {row[1] for row in conn.execute("PRAGMA table_info(monthly_readings)").fetchall()}
+        for col in ("cur_sharp_peak", "cur_peak", "cur_flat", "cur_valley", "cur_total",
+                     "prev_sharp_peak", "prev_peak", "prev_flat", "prev_valley", "prev_total"):
+            if col not in reading_columns:
+                log.info("迁移: 添加 monthly_readings.%s 列", col)
+                conn.execute(f"ALTER TABLE monthly_readings ADD COLUMN {col} REAL")
+
         # 添加 average_price 列（如果缺失）
         price_columns = {row[1] for row in conn.execute("PRAGMA table_info(price_records)").fetchall()}
         if "average_price" not in price_columns:
@@ -195,6 +223,16 @@ class Database:
                 r.flat,
                 r.valley,
                 r.total_kwh,
+                r.cur_sharp_peak,
+                r.cur_peak,
+                r.cur_flat,
+                r.cur_valley,
+                r.cur_total,
+                r.prev_sharp_peak,
+                r.prev_peak,
+                r.prev_flat,
+                r.prev_valley,
+                r.prev_total,
                 p.sharp_peak_price,
                 p.peak_price,
                 p.flat_price,
@@ -599,7 +637,13 @@ class Database:
                        sharp_peak: float = None, peak: float = None,
                        flat: float = None, valley: float = None,
                        total_kwh: float = None, source_file: str = None,
-                       source_sheet: str = None, email_date: datetime = None):
+                       source_sheet: str = None, email_date: datetime = None,
+                       cur_sharp_peak: float = None, cur_peak: float = None,
+                       cur_flat: float = None, cur_valley: float = None,
+                       cur_total: float = None,
+                       prev_sharp_peak: float = None, prev_peak: float = None,
+                       prev_flat: float = None, prev_valley: float = None,
+                       prev_total: float = None):
         """插入或更新月度抄表数据。"""
         if total_kwh is None:
             total_kwh = sum(v for v in [sharp_peak, peak, flat, valley] if v is not None)
@@ -608,18 +652,32 @@ class Database:
             conn.execute(
                 """INSERT INTO monthly_readings
                    (meter_id, reading_month, sharp_peak, peak, flat, valley, total_kwh,
+                    cur_sharp_peak, cur_peak, cur_flat, cur_valley, cur_total,
+                    prev_sharp_peak, prev_peak, prev_flat, prev_valley, prev_total,
                     source_file, source_sheet, email_date)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(meter_id, reading_month) DO UPDATE SET
                        sharp_peak = COALESCE(excluded.sharp_peak, monthly_readings.sharp_peak),
                        peak = COALESCE(excluded.peak, monthly_readings.peak),
                        flat = COALESCE(excluded.flat, monthly_readings.flat),
                        valley = COALESCE(excluded.valley, monthly_readings.valley),
                        total_kwh = COALESCE(excluded.total_kwh, monthly_readings.total_kwh),
+                       cur_sharp_peak = COALESCE(excluded.cur_sharp_peak, monthly_readings.cur_sharp_peak),
+                       cur_peak = COALESCE(excluded.cur_peak, monthly_readings.cur_peak),
+                       cur_flat = COALESCE(excluded.cur_flat, monthly_readings.cur_flat),
+                       cur_valley = COALESCE(excluded.cur_valley, monthly_readings.cur_valley),
+                       cur_total = COALESCE(excluded.cur_total, monthly_readings.cur_total),
+                       prev_sharp_peak = COALESCE(excluded.prev_sharp_peak, monthly_readings.prev_sharp_peak),
+                       prev_peak = COALESCE(excluded.prev_peak, monthly_readings.prev_peak),
+                       prev_flat = COALESCE(excluded.prev_flat, monthly_readings.prev_flat),
+                       prev_valley = COALESCE(excluded.prev_valley, monthly_readings.prev_valley),
+                       prev_total = COALESCE(excluded.prev_total, monthly_readings.prev_total),
                        source_file = COALESCE(excluded.source_file, monthly_readings.source_file),
                        source_sheet = COALESCE(excluded.source_sheet, monthly_readings.source_sheet)
                 """,
                 (meter_id, reading_month, sharp_peak, peak, flat, valley, total_kwh,
+                 cur_sharp_peak, cur_peak, cur_flat, cur_valley, cur_total,
+                 prev_sharp_peak, prev_peak, prev_flat, prev_valley, prev_total,
                  source_file, source_sheet,
                  email_date.isoformat() if email_date else None),
             )

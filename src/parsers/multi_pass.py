@@ -1372,9 +1372,10 @@ class MultiPassExtractor:
         for row_idx in header_search_range:
             for col_idx in range(len(df.columns)):
                 cell = _cell_str(df.iloc[row_idx, col_idx])
-                if cell in ("反向数据", "反向", "上网数据"):
-                    rev_section_start = col_idx
-                elif cell in ("正向数据", "正向", "发电数据"):
+                if any(kw in cell for kw in ("反向数据", "上网数据", "反向")):
+                    if rev_section_start is None:
+                        rev_section_start = col_idx
+                elif any(kw in cell for kw in ("正向数据", "发电数据", "正向")):
                     fwd_section_start = col_idx
 
         # 高优先级：原始差值（未乘倍率，抄表数据），按区段分正向/反向
@@ -1390,6 +1391,8 @@ class MultiPassExtractor:
         amount_kw = ("金额",)
         actual_usage_kw = ("实际用电数",)
         mult_kw = ("倍率", "CT倍率", "变比")
+        cur_reading_kw = ("本月表数", "本月读数", "本月示数")
+        prev_reading_kw = ("上月表数", "上月读数", "上月示数")
 
         data_cols = {}  # forward, reverse, price, amount, actual_usage, fwd_mult, rev_mult
         for row_idx in header_search_range:
@@ -1406,9 +1409,9 @@ class MultiPassExtractor:
                 # 最高优先级：原始表码差（电表用理），按区段分配
                 if cell in raw_kw_high:
                     if in_rev_section:
-                        data_cols["reverse"] = col_idx
+                        data_cols.setdefault("reverse", col_idx)
                     else:
-                        data_cols["forward"] = col_idx
+                        data_cols.setdefault("forward", col_idx)
                 # 明确方向的原始读数
                 elif cell in fwd_raw_kw:
                     data_cols["forward"] = col_idx
@@ -1443,6 +1446,17 @@ class MultiPassExtractor:
                         data_cols.setdefault("rev_mult", col_idx)
                     else:
                         data_cols.setdefault("fwd_mult", col_idx)
+                # 本月表数 / 上月表数：按区段分正向/反向
+                if any(kw in cell for kw in cur_reading_kw):
+                    if in_rev_section:
+                        data_cols.setdefault("rev_cur_reading", col_idx)
+                    else:
+                        data_cols.setdefault("fwd_cur_reading", col_idx)
+                if any(kw in cell for kw in prev_reading_kw):
+                    if in_rev_section:
+                        data_cols.setdefault("rev_prev_reading", col_idx)
+                    else:
+                        data_cols.setdefault("fwd_prev_reading", col_idx)
 
         # 兜底：如果没找到 forward 列，用第一个有数值的列
         if "forward" not in data_cols:
@@ -1577,6 +1591,38 @@ class MultiPassExtractor:
                 if av is not None:
                     amounts[period] = av
 
+        # 提取本月表数和上月表数（原始抄表数据）
+        fwd_cur = {}   # period -> 正向本月表数
+        fwd_prev = {}  # period -> 正向上月表数
+        rev_cur = {}   # period -> 反向本月表数
+        rev_prev = {}  # period -> 反向上月表数
+        fwd_cur_total = fwd_prev_total = rev_cur_total = rev_prev_total = None
+        for row_idx, period in period_rows.items():
+            if "fwd_cur_reading" in data_cols:
+                v = _to_float(df.iloc[row_idx, data_cols["fwd_cur_reading"]])
+                if period == "total":
+                    fwd_cur_total = v
+                elif period in ("sharp_peak", "peak", "flat", "valley"):
+                    fwd_cur[period] = v
+            if "fwd_prev_reading" in data_cols:
+                v = _to_float(df.iloc[row_idx, data_cols["fwd_prev_reading"]])
+                if period == "total":
+                    fwd_prev_total = v
+                elif period in ("sharp_peak", "peak", "flat", "valley"):
+                    fwd_prev[period] = v
+            if "rev_cur_reading" in data_cols:
+                v = _to_float(df.iloc[row_idx, data_cols["rev_cur_reading"]])
+                if period == "total":
+                    rev_cur_total = v
+                elif period in ("sharp_peak", "peak", "flat", "valley"):
+                    rev_cur[period] = v
+            if "rev_prev_reading" in data_cols:
+                v = _to_float(df.iloc[row_idx, data_cols["rev_prev_reading"]])
+                if period == "total":
+                    rev_prev_total = v
+                elif period in ("sharp_peak", "peak", "flat", "valley"):
+                    rev_prev[period] = v
+
         # 从转置行中提取倍率（取第一个非 total 行的值，倍率在各行应一致）
         fwd_mult_val = rev_mult_val = None
         if "fwd_mult" in data_cols or "rev_mult" in data_cols:
@@ -1611,7 +1657,11 @@ class MultiPassExtractor:
             parts = [v for v in fwd_r.values() if v is not None]
             self._upsert_reading(gen_meter, month, fwd_r,
                                  fwd_total or (sum(parts) if parts else None),
-                                 filepath.name, sheet_name)
+                                 filepath.name, sheet_name,
+                                 cur_readings=fwd_cur or None,
+                                 prev_readings=fwd_prev or None,
+                                 cur_total=fwd_cur_total,
+                                 prev_total=fwd_prev_total)
             # 设置折扣
             if block_discount and not self.meters[gen_meter].get("discount"):
                 self.meters[gen_meter]["discount"] = block_discount
@@ -1626,7 +1676,11 @@ class MultiPassExtractor:
             parts = [v for v in rev_r.values() if v is not None]
             self._upsert_reading(grid_meter, month, rev_r,
                                  rev_total or (sum(parts) if parts else None),
-                                 filepath.name, sheet_name)
+                                 filepath.name, sheet_name,
+                                 cur_readings=rev_cur or None,
+                                 prev_readings=rev_prev or None,
+                                 cur_total=rev_cur_total,
+                                 prev_total=rev_prev_total)
             # 反向倍率 → 上网表
             if rev_mult_val and rev_mult_val >= 1 and not self.meters[grid_meter].get("multiplier"):
                 self.meters[grid_meter]["multiplier"] = rev_mult_val
@@ -1650,8 +1704,12 @@ class MultiPassExtractor:
     # 组装 + 合并
     # ================================================================
 
-    def _upsert_reading(self, meter_number, month, readings, total, source_file, source_sheet):
-        """写入或补全读数。"""
+    def _upsert_reading(self, meter_number, month, readings, total, source_file, source_sheet,
+                        cur_readings=None, prev_readings=None, cur_total=None, prev_total=None):
+        """写入或补全读数。
+
+        cur_readings/prev_readings: 本月表数/上月表数的 {period: value} dict
+        """
         key = (meter_number, month)
         if key not in self.readings:
             self.readings[key] = {
@@ -1670,6 +1728,23 @@ class MultiPassExtractor:
                     existing[f] = readings[f]
             if existing.get("total_kwh") is None and total is not None:
                 existing["total_kwh"] = total
+
+        # 存储本月表数和上月表数
+        rec = self.readings[key]
+        if cur_readings:
+            for f in ("sharp_peak", "peak", "flat", "valley"):
+                k = f"cur_{f}"
+                if rec.get(k) is None and cur_readings.get(f) is not None:
+                    rec[k] = cur_readings[f]
+            if rec.get("cur_total") is None and cur_total is not None:
+                rec["cur_total"] = cur_total
+        if prev_readings:
+            for f in ("sharp_peak", "peak", "flat", "valley"):
+                k = f"prev_{f}"
+                if rec.get(k) is None and prev_readings.get(f) is not None:
+                    rec[k] = prev_readings[f]
+            if rec.get("prev_total") is None and prev_total is not None:
+                rec["prev_total"] = prev_total
 
     def _build_records(self) -> list[dict]:
         # 构建配对索引：meter_number -> paired_meter_number
@@ -1721,6 +1796,16 @@ class MultiPassExtractor:
                 "flat": reading.get("flat"),
                 "valley": reading.get("valley"),
                 "total_kwh": reading.get("total_kwh"),
+                "cur_sharp_peak": reading.get("cur_sharp_peak"),
+                "cur_peak": reading.get("cur_peak"),
+                "cur_flat": reading.get("cur_flat"),
+                "cur_valley": reading.get("cur_valley"),
+                "cur_total": reading.get("cur_total"),
+                "prev_sharp_peak": reading.get("prev_sharp_peak"),
+                "prev_peak": reading.get("prev_peak"),
+                "prev_flat": reading.get("prev_flat"),
+                "prev_valley": reading.get("prev_valley"),
+                "prev_total": reading.get("prev_total"),
                 "sharp_peak_price": price_data.get("sharp_peak_price"),
                 "peak_price": price_data.get("peak_price"),
                 "flat_price": price_data.get("flat_price"),

@@ -266,15 +266,17 @@ def _write_meter_rows(ws, start_row: int, fwd_bill: dict,
     rev_multiplier = rev_bill.get("multiplier", 1.0) if rev_bill else 1.0
 
     tier_data = _get_tier_data(fwd_bill)
+    cur_reading_data = _get_cur_reading(fwd_bill)
     rev_tier_data = _get_tier_data(rev_bill) if rev_bill else {}
 
     first_row = row
     for tier_key, tier_label in _TIER_LABELS:
         usage = tier_data.get(tier_key)
+        cur_reading = cur_reading_data.get(tier_key)
         price = _get_price(fwd_bill, tier_key)
 
-        # 正向用电量（原始表码差 = 实际用电量 / 倍率）
-        raw_usage = usage  # 数据库存的就是原始读数差
+        # 正向用电量（原始表码差 = 本月表数 - 上月表数）
+        raw_usage = usage  # 数据库存的是电表用理（未乘倍率的差值）
         actual_usage = (raw_usage or 0) * multiplier
 
         # 反向用电量
@@ -299,7 +301,7 @@ def _write_meter_rows(ws, start_row: int, fwd_bill: dict,
                     _data_font, None, _left)
         _apply_cell(ws.cell(row=row, column=3), tier_label, _data_font, None, _center)
         _apply_cell(ws.cell(row=row, column=4),
-                    raw_usage if raw_usage else None,
+                    cur_reading if cur_reading else None,
                     _data_font, None, _right, "#,##0.00")
         _apply_cell(ws.cell(row=row, column=5),
                     multiplier if row == first_row else None,
@@ -349,13 +351,24 @@ def _write_meter_rows(ws, start_row: int, fwd_bill: dict,
 
 
 def _get_tier_data(bill: dict) -> dict:
-    """从账单字典提取各时段用电量。"""
+    """从账单字典提取各时段用电量（电表用理）。"""
     return {
         "sharp_peak": bill.get("sharp_peak"),
         "peak": bill.get("peak"),
         "flat": bill.get("flat"),
         "valley": bill.get("valley"),
         "total": bill.get("total_kwh"),
+    }
+
+
+def _get_cur_reading(bill: dict) -> dict:
+    """从账单字典提取各时段本月表数（抄表数据）。"""
+    return {
+        "sharp_peak": bill.get("cur_sharp_peak"),
+        "peak": bill.get("cur_peak"),
+        "flat": bill.get("cur_flat"),
+        "valley": bill.get("cur_valley"),
+        "total": bill.get("cur_total"),
     }
 
 
