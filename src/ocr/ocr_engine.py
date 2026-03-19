@@ -337,84 +337,93 @@ class OCREngine:
         return None
 
     def _extract_prices(self, text: str) -> dict:
-        """从电费账单文本中提取单价（智能多策略）。
+        """从电费账单文本中提取单价。
 
-        支持三类账单格式：
-        1. 工业分时电价（南方电网）：电费信息表中 X期电量电费 行含单价列
-        2. 居民合表 / 单一电价：电量电费行只有一个单价 → average_price
-        3. 大工业用电：多行组件明细 → 提取平均电价
+        先识别账单类型（参照《电费单价收取方式》五种），再按对应方式计算。
+
+        第1种: 尖/峰/平/谷期电量电费行含单价列 → 直接读取
+               (电能量电费+输配电费+系统运行费+基金附加费 已合并到单价中)
+        第2种: 电能电费+输配电费+上网环节线损电费+系统运行费+基金附加费 → 组件求和
+        第3种: 只有"电量电费"（无尖峰平谷）→ 所有时段统一价格
+        第4种: 多行明细(电度/输配/上网环节/系统运行/基金附加/市场化分摊) → 组件求和
+        第5种: 同一时段出现两行电费 → (电费1+电费2)/2 取平均
         """
+        # ---- Step 1: 检测账单类型 ----
+        bill_type = self._detect_bill_type(text)
+        log.info("  账单类型检测: 第%s种", bill_type)
+
         prices = {}
 
-        # ---- 策略1：电费信息表格 "X期电量电费" 行（工业分时，图2格式） ----
-        prices = self._extract_prices_charge_table(text)
-        if self._has_enough_prices(prices):
-            # 同时提取平均电价作为补充
-            avg = self._extract_average_price(text)
-            if avg is not None:
-                prices["average_price"] = avg
-            return prices
+        # ---- Step 2: 按类型提取 ----
+        if bill_type == 5:
+            # 第5种: 两行同类取平均
+            prices = self._extract_prices_two_average(text)
 
-        # ---- 策略1.5：大工业组件费用行求和（电度电费+输配电费+上网环节+系统运行） ----
-        prices = self._extract_prices_industrial_components(text)
-        if self._has_enough_prices(prices):
-            avg = self._extract_average_price(text)
-            if avg is not None:
-                prices["average_price"] = avg
-            return prices
+        elif bill_type in (2, 4):
+            # 第2/4种: 多组件明细行求和
+            prices = self._extract_prices_industrial_components(text)
 
-        # ---- 策略2：表格行级匹配（尖/峰/平/谷关键字 + 数字） ----
-        prices = self._extract_prices_table_row(text)
-        if self._has_enough_prices(prices):
-            avg = self._extract_average_price(text)
-            if avg is not None:
-                prices["average_price"] = avg
-            return prices
+        elif bill_type == 1:
+            # 第1种: 电费信息表格直接读单价列
+            prices = self._extract_prices_charge_table(text)
 
-        # ---- 策略3：配置文件和增强标签匹配 ----
-        prices = self._extract_prices_label_match(text)
-        if self._has_enough_prices(prices):
-            avg = self._extract_average_price(text)
-            if avg is not None:
-                prices["average_price"] = avg
-            return prices
-
-        # ---- 策略4：通用模式（连续4个价格数字） ----
-        rules = self.extraction_rules.get("unit_price", {})
-        general_patterns = rules.get("patterns", [])
-        for pattern in general_patterns:
-            matches = re.findall(pattern, text)
-            if len(matches) >= 4:
-                try:
-                    candidates = [float(m) for m in matches[:4]]
-                    if all(self._is_valid_price(v) for v in candidates):
-                        prices["sharp_peak_price"] = candidates[0]
-                        prices["peak_price"] = candidates[1]
-                        prices["flat_price"] = candidates[2]
-                        prices["valley_price"] = candidates[3]
-                except (ValueError, IndexError):
-                    pass
-                break
-
-        if self._has_enough_prices(prices):
-            avg = self._extract_average_price(text)
-            if avg is not None:
-                prices["average_price"] = avg
-            return prices
-
-        # ---- 策略5：平均电价 / 单一电价（居民合表、大工业） ----
-        avg = self._extract_average_price(text)
-        if avg is not None:
-            prices["average_price"] = avg
-
-        # 单一电价行：只有"电量电费"（无尖峰平谷前缀）+ 一个单价
-        if not prices:
+        elif bill_type == 3:
+            # 第3种: 单一电价，所有时段统一
             single = self._extract_single_price(text)
             if single is not None:
-                prices["average_price"] = single
+                prices = {
+                    "sharp_peak_price": single,
+                    "peak_price": single,
+                    "flat_price": single,
+                    "valley_price": single,
+                    "average_price": single,
+                }
 
-        # ---- 策略6：兜底 - 提取所有像价格的数字（降序 → 尖 > 峰 > 平 > 谷） ----
-        if not prices:
+        # ---- Step 3: 若主策略不足，尝试后续策略 ----
+        if not self._has_enough_prices(prices):
+            # 尝试表格行级匹配
+            fallback = self._extract_prices_table_row(text)
+            if self._has_enough_prices(fallback):
+                prices = fallback
+
+        if not self._has_enough_prices(prices):
+            # 配置文件标签匹配
+            fallback = self._extract_prices_label_match(text)
+            if self._has_enough_prices(fallback):
+                prices = fallback
+
+        if not self._has_enough_prices(prices):
+            # 通用模式（连续4个价格数字）
+            rules = self.extraction_rules.get("unit_price", {})
+            general_patterns = rules.get("patterns", [])
+            for pattern in general_patterns:
+                matches = re.findall(pattern, text)
+                if len(matches) >= 4:
+                    try:
+                        candidates = [float(m) for m in matches[:4]]
+                        if all(self._is_valid_price(v) for v in candidates):
+                            prices["sharp_peak_price"] = candidates[0]
+                            prices["peak_price"] = candidates[1]
+                            prices["flat_price"] = candidates[2]
+                            prices["valley_price"] = candidates[3]
+                    except (ValueError, IndexError):
+                        pass
+                    break
+
+        if not self._has_enough_prices(prices):
+            # 单一电价兜底（第3种）
+            single = self._extract_single_price(text)
+            if single is not None:
+                prices = {
+                    "sharp_peak_price": single,
+                    "peak_price": single,
+                    "flat_price": single,
+                    "valley_price": single,
+                    "average_price": single,
+                }
+
+        if not self._has_enough_prices(prices):
+            # 最终兜底：所有像价格的数字（降序 → 尖 > 峰 > 平 > 谷）
             price_candidates = re.findall(r'(\d\.\d{2,8})', text)
             valid = sorted(set(
                 float(p) for p in price_candidates if self._is_valid_price(float(p))
@@ -425,7 +434,115 @@ class OCREngine:
                 prices["flat_price"] = valid[2]
                 prices["valley_price"] = valid[3]
 
+        # 补充平均电价
+        if "average_price" not in prices:
+            avg = self._extract_average_price(text)
+            if avg is not None:
+                prices["average_price"] = avg
+
         return prices
+
+    def _detect_bill_type(self, text: str) -> int:
+        """检测电费账单类型（1-5），返回类型编号。
+
+        检测特征：
+        第5种: 同一时段出现 "电费1"/"电费2" 两行 → 取平均
+        第4种: 含多种组件明细行(≥3种不同组件) → 逐项汇总
+        第2种: 含上网环节线损电费 + 其他组件 → 组件求和
+        第1种: 含 "X期电量电费"/"X期电费" 行 + 单价列 → 直接读
+        第3种: 只有 "电量电费"/"电费"（无尖峰平谷标记）→ 单一电价
+        """
+        lines = text.split("\n")
+
+        # 统计各种特征
+        has_period_fee_12 = False      # "电费1"/"电费2"
+        has_period_charge_rows = False  # "尖期电量电费"/"峰期电费" 等
+        has_single_charge = False      # "电量电费"（无时段前缀）
+        component_types = set()        # 不同的组件类型
+
+        component_groups = {
+            "电能": ["电度电费", "电能电费", "电能量电费", "电脑电费"],
+            "输配": ["输配电费", "输配电"],
+            "线损": ["上网环节", "环节线损"],
+            "运行": ["系统运行", "运行费用"],
+            "基金": ["基金及附加", "基金附加"],
+            "分摊": ["市场化分摊", "分摊费用"],
+        }
+
+        period_markers = ["尖", "峰", "平", "谷"]
+
+        # 收集"电费1"/"电费2"行的单价，用于区分第1种和第5种
+        fee1_prices = {}  # period -> price from 电费1
+        fee2_prices = {}  # period -> price from 电费2
+
+        for line in lines:
+            lc = line.strip()
+            if not lc:
+                continue
+
+            # 检查"电费1"/"电费2"标记，并记录其中的单价
+            m12 = re.search(r'([尖峰平谷])\s*期?\s*电费\s*([12])', lc)
+            if m12:
+                has_period_fee_12 = True
+                period_char = m12.group(1)
+                fee_num = m12.group(2)
+                # 提取行中的单价
+                nums = re.findall(r'(\d+\.\d{2,8})', lc)
+                price_val = None
+                for n in nums:
+                    v = float(n)
+                    if self._is_valid_price(v):
+                        price_val = v
+                        break
+                if price_val is not None:
+                    target = fee1_prices if fee_num == "1" else fee2_prices
+                    target[period_char] = price_val
+
+            # 检查分时段电费行（"尖期电量电费" 等）
+            if re.search(r'[尖峰平谷]\s*期?\s*(?:电量)?电费', lc):
+                has_period_charge_rows = True
+
+            # 检查无时段前缀的"电量电费"
+            if re.search(r'^(?:.*\s)?电量电费(?:\s|$)', lc) and \
+               not any(m in lc for m in period_markers):
+                has_single_charge = True
+
+            # 统计组件类型
+            for group, keywords in component_groups.items():
+                for kw in keywords:
+                    if kw in lc:
+                        # 确认是带时段标记的组件行
+                        if any(m in lc for m in period_markers):
+                            component_types.add(group)
+                        break
+
+        # 判定类型
+        # 第5种：电费1和电费2都有不同的非零单价 → 取平均
+        if has_period_fee_12:
+            # 检查是否真的有两套不同单价
+            common_periods = set(fee1_prices.keys()) & set(fee2_prices.keys())
+            has_diff_prices = any(
+                fee1_prices[p] != fee2_prices[p]
+                for p in common_periods
+            ) if common_periods else False
+            if has_diff_prices:
+                return 5  # 第5种：两行取平均
+            # 否则当作第1种（电费1/电费2只是标签不同，实际单价列可直接读）
+
+        if len(component_types) >= 3:
+            return 4  # 第4种：多组件明细汇总
+
+        if "线损" in component_types and len(component_types) >= 2:
+            return 2  # 第2种：含上网环节线损 + 其他组件
+
+        if has_period_charge_rows:
+            return 1  # 第1种：分时段电费行含单价
+
+        if has_single_charge:
+            return 3  # 第3种：单一电价
+
+        # 默认按第1种处理（最通用）
+        return 1
 
     def _has_enough_prices(self, prices: dict) -> bool:
         """至少有2个分时段价格或有平均电价即认为足够。"""
@@ -495,14 +612,14 @@ class OCREngine:
     def _extract_prices_industrial_components(self, text: str) -> dict:
         """大工业用电：从组件费用行提取并求和各时段单价。
 
-        大工业电费账单包含多个组件行（电度电费、输配电费、上网环节线损、系统运行费用），
-        每个组件分别列出尖/峰/平/谷的单价。总单价 = 各组件单价之和。
+        大工业电费账单包含多个组件行，每个组件分别列出尖/峰/平/谷的单价。
+        总单价 = 各组件单价之和。
 
-        典型格式：
-          电度电费(峰)   17550.00  0.62779000  11017.72
-          输配电费(峰)   17550.00  0.21420000   3759.21
-          上网环节线损电费(峰) 17550.00 0.02750000 482.63
-          系统运行费用(峰) 17550.00  0.11730000  2058.62
+        五种计价方式：
+        第1种: 电能量电费 + 输配电费 + 系统运行费 + 基金及附加费
+        第2种: 电能电费 + 输配电费 + 上网环节线损电费 + 系统运行费用 + 基金及附加费
+        第4种: 同上但更多明细行（含市场化分摊等）
+        第5种: (电费1 + 电费2) / 2（两行同类型取平均）
         """
         lines = text.split("\n")
 
@@ -514,12 +631,22 @@ class OCREngine:
             "valley_price": ["谷"],
         }
 
-        # 组件行关键字（只匹配包含这些关键字的行）
-        component_keywords = ["电度电费", "电脑电费", "输配电费", "输配电",
-                              "上网环节", "环节线损", "系统运行", "运行费用"]
+        # 组件行关键字（匹配所有可能的费用组件）
+        component_keywords = [
+            "电度电费", "电脑电费", "电能电费", "电能量电费", "电量电费",
+            "输配电费", "输配电",
+            "上网环节", "环节线损",
+            "系统运行", "运行费用",
+            "基金及附加", "基金附加", "附加费",
+            "市场化分摊", "分摊费用",
+        ]
 
         # 每个时段的组件单价列表
         period_components: dict[str, list[float]] = {k: [] for k in period_keys}
+
+        # 不分时段的固定费用（基金及附加费等，加到每个时段）
+        flat_fee_keywords = ["基金及附加", "基金附加"]
+        flat_fee_price = None
 
         for line in lines:
             line_clean = line.strip()
@@ -528,6 +655,24 @@ class OCREngine:
 
             # 必须包含至少一个组件关键字
             if not any(kw in line_clean for kw in component_keywords):
+                continue
+
+            # 检查是否是不分时段的固定费用行（无尖峰平谷标记）
+            is_flat_fee = any(kw in line_clean for kw in flat_fee_keywords)
+            has_period_marker = any(
+                re.search(rf'[(\(]\s*{kw}\s*[)\)]', line_clean) or
+                re.search(rf'{kw}\s*期', line_clean)
+                for kws in period_keys.values() for kw in kws
+            )
+
+            if is_flat_fee and not has_period_marker:
+                # 不分时段的基金附加费，提取单价
+                nums = re.findall(r'(\d+\.\d{2,8})', line_clean)
+                for n in nums:
+                    val = float(n)
+                    if 0.001 <= val <= 1.0:  # 基金附加费单价通常很小
+                        flat_fee_price = val
+                        break
                 continue
 
             # 判断属于哪个时段
@@ -549,13 +694,68 @@ class OCREngine:
                                 break  # 每行只取一个单价
                         break
 
-        # 求和得到各时段总单价
+        # 求和得到各时段总单价（加上固定费用）
         prices = {}
         for field, components in period_components.items():
             if components:
                 total = sum(components)
+                if flat_fee_price is not None:
+                    total += flat_fee_price
                 if self._is_valid_price(total):
                     prices[field] = round(total, 8)
+
+        return prices
+
+    def _extract_prices_two_average(self, text: str) -> dict:
+        """第5种计价方式：(电费1 + 电费2) / 2 = 各时段单价。
+
+        账单中同一时段出现两行电费（如 尖期电费1、尖期电费2），
+        分别含不同单价，取平均值作为该时段最终单价。
+        """
+        lines = text.split("\n")
+
+        period_map = {
+            "sharp_peak_price": r'尖',
+            "peak_price": r'(?<!尖)峰',
+            "flat_price": r'平',
+            "valley_price": r'谷',
+        }
+
+        # 收集每个时段的所有单价
+        period_prices: dict[str, list[float]] = {k: [] for k in period_map}
+
+        for line in lines:
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+
+            # 匹配含"电费"且含时段标记的行
+            if "电费" not in line_clean:
+                continue
+
+            for field, pat in period_map.items():
+                if re.search(pat, line_clean):
+                    # 排除 peak 行含 "尖"
+                    if field == "peak_price" and "尖" in line_clean:
+                        continue
+                    # 提取单价（高精度小数）
+                    nums = re.findall(r'(\d+\.\d{2,8})', line_clean)
+                    for n in nums:
+                        val = float(n)
+                        if self._is_valid_price(val):
+                            period_prices[field].append(val)
+                            break
+                    break
+
+        # 检查是否有时段出现了恰好 2 个不同单价 → 取平均
+        prices = {}
+        has_multi = any(len(v) >= 2 for v in period_prices.values())
+        if has_multi:
+            for field, vals in period_prices.items():
+                if len(vals) >= 2:
+                    prices[field] = round(sum(vals) / len(vals), 8)
+                elif len(vals) == 1:
+                    prices[field] = vals[0]
 
         return prices
 

@@ -443,13 +443,20 @@ class Pipeline:
                     )
 
                 # 如果记录里有电价和月份，也入库为 price_record
-                unit_price = rec.get("unit_price")
                 user_id = rec.get("user_id")
-                if unit_price and user_id and month and month != "unknown":
+                has_period_prices = any(rec.get(k) is not None for k in
+                                        ("sharp_peak_price", "peak_price",
+                                         "flat_price", "valley_price"))
+                unit_price = rec.get("unit_price")
+
+                if user_id and month and month != "unknown" and (has_period_prices or unit_price):
                     self.db.upsert_price(
                         user_id=user_id,
                         reading_month=month,
-                        flat_price=unit_price,
+                        sharp_peak_price=rec.get("sharp_peak_price"),
+                        peak_price=rec.get("peak_price"),
+                        flat_price=rec.get("flat_price") or unit_price,
+                        valley_price=rec.get("valley_price"),
                         source_file=rec.get("source_file"),
                     )
 
