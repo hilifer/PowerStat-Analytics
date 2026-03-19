@@ -1001,18 +1001,26 @@ class MultiPassExtractor:
         for uid, meter_list in by_user.items():
             proj = next((self.meters[mn]["project_name"] for mn in meter_list
                          if self.meters[mn].get("project_name")), None)
-            mult = next((self.meters[mn]["multiplier"] for mn in meter_list
-                         if self.meters[mn].get("multiplier")), None)
             disc = next((self.meters[mn]["discount"] for mn in meter_list
                          if self.meters[mn].get("discount")), None)
+            # 倍率按类型分组共享：发电表和上网表的倍率可以不同，
+            # 只在同类型电表间共享倍率
+            mult_by_type = {}
+            for mn in meter_list:
+                mtype = self.meters[mn].get("meter_type", "未知")
+                if self.meters[mn].get("multiplier"):
+                    mult_by_type.setdefault(mtype, self.meters[mn]["multiplier"])
             for mn in meter_list:
                 info = self.meters[mn]
                 if not info["project_name"] and proj:
                     info["project_name"] = proj
                     count += 1
-                if not info["multiplier"] and mult:
-                    info["multiplier"] = mult
-                    count += 1
+                if not info["multiplier"]:
+                    mtype = info.get("meter_type", "未知")
+                    type_mult = mult_by_type.get(mtype)
+                    if type_mult:
+                        info["multiplier"] = type_mult
+                        count += 1
                 if not info["discount"] and disc:
                     info["discount"] = disc
                     count += 1
