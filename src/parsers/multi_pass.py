@@ -1,15 +1,24 @@
 """多轮扫描提取器：笨方法版。
 
-每轮单独扫描所有文件的所有单元格，只关注一种数据：
-  预扫描：扫描配对块，收集用户号阻止名单（不注册电表）
-  第1轮：提取电表号 + 资产编号（基础身份，最先建立）
+按两层结构提取电表档案，再提取月度读数：
+
+第一层 · 核心身份（电表固有属性）：
+  预扫描：扫描配对块，收集用户号阻止名单
+  pass1：电表号 + 资产编号（基础身份，最先建立）
   配对注册：用预扫描缓存补充电表和配对关系
-  第2轮：提取用户编号，关联到最近的电表
-  第3轮：判定电表类型
-  第4轮：提取倍率、折扣、项目名
+  pass2：电表类型（发电表/上网表）
+  pass3：倍率 + 折扣（计量/商务属性）
+
+第二层 · 补充属性（关联/上下文）：
+  pass4：用户编号（关联到电表）
+  pass5：项目名 + 同用户互补共享
+
+整理：
   合并短电表号
-  第5轮：交叉验证（清理冲突数据）
-  第6轮：提取月度读数（尖峰平谷）
+  pass6：交叉验证（清理冲突数据）
+
+月度读数：
+  标准表格 + 转置表（尖峰平谷）
 
 固定数据全部找完，再找动态数据。文件全部在内存中，不会反复打开文件。
 """
@@ -120,35 +129,55 @@ class MultiPassExtractor:
     def _extract_meter_info(self):
         """提取电表档案信息。
 
-        执行顺序：
-          预扫描：扫描配对块，只收集用户号阻止名单（不注册电表）
-          第1轮：提取电表号 + 资产编号（基础身份，最先建立）
-          第1.5轮：用预扫描缓存注册配对电表块（补充 pass1 未覆盖的电表）
-          第2轮：提取用户编号，关联到最近的电表
-          第3轮：判定电表类型
-          第4轮：提取倍率、折扣、项目名
+        按两层结构组织：
+
+        第一层 · 核心身份（电表固有属性）：
+          预扫描：扫描配对块，收集用户号阻止名单（防止 pass1 误注册）
+          pass1：电表号 + 资产编号（基础身份，最先建立）
+          配对注册：用预扫描缓存补充电表和配对关系
+          pass2：电表类型（发电表/上网表）
+          pass3：倍率 + 折扣（计量/商务属性）
+
+        第二层 · 补充属性（关联/上下文）：
+          pass4：用户编号（关联到电表）
+          pass5：项目名 + 同用户互补共享
+
+        整理：
           合并短电表号
-          第5轮：交叉验证（清理冲突数据）
+          交叉验证（清理冲突数据）
         """
-        # === 预扫描：扫描配对块，只收集用户号阻止名单 ===
+        # ── 第一层：核心身份（电表固有属性） ──────────────
+
+        # 预扫描：扫描配对块，收集用户号阻止名单
         self._prescan_paired_blocks()
 
-        # === 基础身份：电表号 + 资产编号（最先建立） ===
+        # pass1：电表号 + 资产编号
         self._pass1_meters_and_assets()
 
-        # === 配对块注册：用预扫描缓存补充电表和配对关系 ===
+        # 配对注册：用预扫描缓存补充电表和配对关系
         self._register_paired_blocks()
 
-        # === 固定数据 ===
-        self._pass2_user_ids()
-        self._pass3_meter_types()
-        self._pass4_fixed_attrs()
+        # pass2：电表类型
+        self._pass2_meter_types()
+
+        # pass3：倍率 + 折扣
+        self._pass3_multiplier_and_discount()
+
+        # ── 第二层：补充属性（关联/上下文） ──────────────
+
+        # pass4：用户编号
+        self._pass4_user_ids()
+
+        # pass5：项目名 + 折扣 + 同用户互补共享
+        self._pass5_supplementary_attrs()
+
+        # ── 整理 ─────────────────────────────────────
 
         # 合并短电表号
         self._merge_short_meters()
 
-        # === 交叉验证：检测并清除冲突数据 ===
-        self._pass5_cross_validate()
+        # 交叉验证：检测并清除冲突数据
+        self._pass6_cross_validate()
 
         # 打印电表档案
         log.info("电表档案建立完成: %d 个电表", len(self.meters))
@@ -314,7 +343,8 @@ class MultiPassExtractor:
 
             # 注册发电表
             if gen_meter and is_valid_meter_number(gen_meter):
-                self._register_meter(gen_meter, filepath.name, sheet_name, "发电表")
+                self._register_meter(gen_meter, filepath.name, sheet_name, "发电表",
+                                     explicit_meter=True)
                 info = self.meters[gen_meter]
                 if gen_asset and not info["asset_number"]:
                     info["asset_number"] = gen_asset
@@ -327,7 +357,8 @@ class MultiPassExtractor:
 
             # 注册上网表
             if grid_meter and is_valid_meter_number(grid_meter):
-                self._register_meter(grid_meter, filepath.name, sheet_name, "上网表")
+                self._register_meter(grid_meter, filepath.name, sheet_name, "上网表",
+                                     explicit_meter=True)
                 info = self.meters[grid_meter]
                 if grid_asset and not info["asset_number"]:
                     info["asset_number"] = grid_asset
@@ -475,9 +506,10 @@ class MultiPassExtractor:
                         val = clean_id(_cell_str(df.iloc[r, mc]))
                         if not is_valid_meter_number(val):
                             continue
-                        self._register_meter(val, filepath.name, sheet_name, mtype)
+                        self._register_meter(val, filepath.name, sheet_name, mtype,
+                                             explicit_meter=True)
                         if val not in self.meters:
-                            continue  # pass0 blocked this value as user_id
+                            continue
                         # 同行最近资产编号
                         nearest_ac = meter_asset_map.get(mc)
                         if nearest_ac is not None:
@@ -528,7 +560,8 @@ class MultiPassExtractor:
                         mtype = {"gen_meter": "发电表", "grid_meter": "上网表"}.get(cat)
                         val = clean_id(self._find_value_near(df, r, c, field_name=cat))
                         if is_valid_meter_number(val):
-                            self._register_meter(val, filepath.name, sheet_name, mtype)
+                            self._register_meter(val, filepath.name, sheet_name, mtype,
+                                                 explicit_meter=True)
 
                     # 内嵌格式："电表号：12345678" 或 "发电表号0950050038124235"
                     for pattern, mtype in [
@@ -540,21 +573,22 @@ class MultiPassExtractor:
                         if m:
                             val = clean_id(m.group(1))
                             if is_valid_meter_number(val):
-                                self._register_meter(val, filepath.name, sheet_name, mtype)
+                                self._register_meter(val, filepath.name, sheet_name, mtype,
+                                                     explicit_meter=True)
 
         log.info("  找到 %d 个电表, 关联 %d 个资产编号", len(self.meters), asset_count)
 
     # ================================================================
-    # 第2轮：提取用户编号，关联到最近电表
+    # pass4：用户编号（补充属性）
     # ================================================================
 
     def _is_known_meter_number(self, val: str) -> bool:
         """检查值是否是已知的电表号，防止电表号被误当用户编号。"""
         return val in self.meters
 
-    def _pass2_user_ids(self):
+    def _pass4_user_ids(self):
         """扫描所有文件，找用户编号并关联到电表。"""
-        log.info("[第2轮] 扫描用户编号...")
+        log.info("[pass4] 扫描用户编号...")
         count = 0
 
         for df, filepath, sheet_name, source_info in self._sheets:
@@ -643,12 +677,12 @@ class MultiPassExtractor:
         log.info("  关联 %d 个用户编号", count)
 
     # ================================================================
-    # 第3轮：判定电表类型
+    # pass2：电表类型（核心身份）
     # ================================================================
 
-    def _pass3_meter_types(self):
+    def _pass2_meter_types(self):
         """扫描所有文件，判定电表类型。"""
-        log.info("[第3轮] 判定电表类型...")
+        log.info("[pass2] 判定电表类型...")
         count = 0
 
         for df, filepath, sheet_name, source_info in self._sheets:
@@ -723,12 +757,12 @@ class MultiPassExtractor:
         log.info("  判定 %d 个电表类型", count)
 
     # ================================================================
-    # 第4轮：提取倍率、折扣、项目名
+    # pass3：倍率 + 折扣（核心身份 — 计量属性）
     # ================================================================
 
-    def _pass4_fixed_attrs(self):
-        """扫描所有文件，找倍率、折扣、项目名并关联到电表。"""
-        log.info("[第4轮] 扫描倍率/折扣/项目名...")
+    def _pass3_multiplier_and_discount(self):
+        """扫描所有文件，提取倍率和折扣并关联到电表。"""
+        log.info("[pass3] 提取倍率/折扣...")
         count = 0
 
         for df, filepath, sheet_name, source_info in self._sheets:
@@ -736,8 +770,7 @@ class MultiPassExtractor:
 
             # A. 表头列同行关联
             if header_idx is not None:
-                meter_cols = []
-                mult_cols, disc_cols, proj_cols = [], [], []
+                meter_cols, mult_cols, disc_cols = [], [], []
                 for c in range(len(df.columns)):
                     hdr = _cell_str(df.iloc[header_idx, c])
                     if not hdr:
@@ -748,16 +781,13 @@ class MultiPassExtractor:
                         mult_cols.append(c)
                     if self._matches_any(hdr, self._discount_aliases):
                         disc_cols.append(c)
-                    if self._matches_any(hdr, self._project_aliases):
-                        proj_cols.append(c)
 
-                if meter_cols:
+                if meter_cols and (mult_cols or disc_cols):
                     for r in range(header_idx + 1, len(df)):
                         mn = self._find_meter_in_row(df, r, meter_cols)
                         if not mn:
                             continue
                         info = self.meters[mn]
-
                         if not info["multiplier"]:
                             for mc in mult_cols:
                                 v = _to_float(df.iloc[r, mc])
@@ -765,7 +795,6 @@ class MultiPassExtractor:
                                     info["multiplier"] = v
                                     count += 1
                                     break
-
                         if not info["discount"]:
                             for dc in disc_cols:
                                 v = _to_float(df.iloc[r, dc])
@@ -774,6 +803,64 @@ class MultiPassExtractor:
                                     count += 1
                                     break
 
+            # B. 标签配对
+            for r in range(len(df)):
+                for c in range(len(df.columns)):
+                    cell = _cell_str(df.iloc[r, c])
+                    if not cell:
+                        continue
+                    if self._matches_any(cell, self._multiplier_aliases):
+                        val = self._find_value_near(df, r, c, field_name="multiplier")
+                        fv = _to_float(val)
+                        if fv and fv >= 1:
+                            nearest = self._find_nearest_meter(df, r, c, filepath.name)
+                            if nearest and not self.meters[nearest]["multiplier"]:
+                                self.meters[nearest]["multiplier"] = fv
+                                count += 1
+                    elif self._matches_any(cell, self._discount_aliases):
+                        val = self._find_value_near(df, r, c, field_name="discount")
+                        m = re.search(r'(\d+\.?\d*)', val) if val else None
+                        if m:
+                            dv = float(m.group(1))
+                            if dv > 1:
+                                dv = dv / 10
+                            nearest = self._find_nearest_meter(df, r, c, filepath.name)
+                            if nearest and not self.meters[nearest]["discount"]:
+                                self.meters[nearest]["discount"] = dv
+                                count += 1
+
+        log.info("  提取 %d 个倍率/折扣", count)
+
+    # ================================================================
+    # pass5：项目名 + 同用户互补共享（补充属性）
+    # ================================================================
+
+    def _pass5_supplementary_attrs(self):
+        """扫描所有文件，提取项目名，并做同用户互补共享。"""
+        log.info("[pass5] 提取项目名 + 同用户互补共享...")
+        count = 0
+
+        for df, filepath, sheet_name, source_info in self._sheets:
+            header_idx = self._find_header_row(df)
+
+            # A. 表头列同行关联
+            if header_idx is not None:
+                meter_cols, proj_cols = [], []
+                for c in range(len(df.columns)):
+                    hdr = _cell_str(df.iloc[header_idx, c])
+                    if not hdr:
+                        continue
+                    if self._matches_any(hdr, self._meter_aliases | self._gen_aliases | self._grid_aliases):
+                        meter_cols.append(c)
+                    if self._matches_any(hdr, self._project_aliases):
+                        proj_cols.append(c)
+
+                if meter_cols and proj_cols:
+                    for r in range(header_idx + 1, len(df)):
+                        mn = self._find_meter_in_row(df, r, meter_cols)
+                        if not mn:
+                            continue
+                        info = self.meters[mn]
                         if not info["project_name"]:
                             for pc in proj_cols:
                                 v = _cell_str(df.iloc[r, pc])
@@ -788,32 +875,7 @@ class MultiPassExtractor:
                     cell = _cell_str(df.iloc[r, c])
                     if not cell:
                         continue
-
-                    # 倍率
-                    if self._matches_any(cell, self._multiplier_aliases):
-                        val = self._find_value_near(df, r, c, field_name="multiplier")
-                        fv = _to_float(val)
-                        if fv and fv >= 1:
-                            nearest = self._find_nearest_meter(df, r, c, filepath.name)
-                            if nearest and not self.meters[nearest]["multiplier"]:
-                                self.meters[nearest]["multiplier"] = fv
-                                count += 1
-
-                    # 折扣
-                    elif self._matches_any(cell, self._discount_aliases):
-                        val = self._find_value_near(df, r, c, field_name="discount")
-                        m = re.search(r'(\d+\.?\d*)', val) if val else None
-                        if m:
-                            dv = float(m.group(1))
-                            if dv > 1:
-                                dv = dv / 10
-                            nearest = self._find_nearest_meter(df, r, c, filepath.name)
-                            if nearest and not self.meters[nearest]["discount"]:
-                                self.meters[nearest]["discount"] = dv
-                                count += 1
-
-                    # 项目名
-                    elif self._matches_any(cell, self._project_aliases):
+                    if self._matches_any(cell, self._project_aliases):
                         val = self._find_value_near(df, r, c, field_name="project")
                         if val and not re.match(r'^\d+$', val) and len(val) >= 2:
                             nearest = self._find_nearest_meter(df, r, c, filepath.name)
@@ -830,7 +892,7 @@ class MultiPassExtractor:
                         info["project_name"] = proj
                         count += 1
 
-        # D. 同用户电表互补（倍率、折扣、项目名）
+        # D. 同用户电表互补共享（倍率、折扣、项目名）
         by_user = {}
         for mn, info in self.meters.items():
             uid = info.get("user_id")
@@ -856,10 +918,10 @@ class MultiPassExtractor:
                     info["discount"] = disc
                     count += 1
 
-        log.info("  关联 %d 个固定属性", count)
+        log.info("  关联 %d 个补充属性", count)
 
     # ================================================================
-    # 第6轮：提取月度读数
+    # 月度读数
     # ================================================================
 
     def _pass6_readings(self):
@@ -1448,10 +1510,10 @@ class MultiPassExtractor:
             log.info("  合并: %s -> %s", short, long)
 
     # ================================================================
-    # 第5轮：交叉验证
+    # pass6：交叉验证
     # ================================================================
 
-    def _pass5_cross_validate(self):
+    def _pass6_cross_validate(self):
         """交叉验证：检测字段冲突，从候选列表中选替代值修复。
 
         规则：
@@ -1549,9 +1611,18 @@ class MultiPassExtractor:
     # 工具方法
     # ================================================================
 
-    def _register_meter(self, meter_number: str, source_file="", source_sheet="", meter_type=None):
-        # pass0 已识别为用户编号的值不注册为电表
-        if meter_number in self._pass0_user_ids:
+    def _register_meter(self, meter_number: str, source_file="", source_sheet="",
+                        meter_type=None, *, explicit_meter=False):
+        """注册一个电表。
+
+        Args:
+            explicit_meter: 为 True 时绕过用户号阻止名单。
+                当上下文明确标识为电表号时使用（如表头列写"电表号"、
+                配对块中标注为"发电表号/上网表号"），即使该数字也出现
+                在其他地方作为用户号，也应注册为电表。
+        """
+        # 预扫描已识别为用户编号的值：除非上下文明确是电表号，否则不注册
+        if meter_number in self._pass0_user_ids and not explicit_meter:
             return
         if meter_number not in self.meters:
             self.meters[meter_number] = {
