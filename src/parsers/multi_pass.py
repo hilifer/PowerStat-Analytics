@@ -170,6 +170,15 @@ class MultiPassExtractor:
         # 合并短电表号
         self._merge_short_meters()
 
+        # 配对去重
+        seen_pairs = set()
+        unique_pairs = []
+        for pair in self.pairs:
+            if pair not in seen_pairs:
+                seen_pairs.add(pair)
+                unique_pairs.append(pair)
+        self.pairs = unique_pairs
+
         # 交叉验证：检测并清除冲突数据
         self._pass6_cross_validate()
 
@@ -347,6 +356,11 @@ class MultiPassExtractor:
                 blocks.append(current_block)
                 current_block = {}
 
+            # 如果同一字段已有不同值，说明进入了新的记录块，需要拆分
+            if field in current_block and current_block[field] != value:
+                blocks.append(current_block)
+                current_block = {}
+
             # 同一字段取第一个值（不覆盖）
             if field not in current_block:
                 # 值去重：检查是否已被更高优先级字段占用
@@ -449,7 +463,11 @@ class MultiPassExtractor:
                     row_gen = None
                     row_grid = None
                     for mc, mtype in meter_cols:
-                        val = clean_id(_cell_str(df.iloc[r, mc]))
+                        raw_cell = _cell_str(df.iloc[r, mc])
+                        # 跳过包含用户号/资产号前缀的单元格（这不是电表号）
+                        if self._cell_has_non_meter_prefix(raw_cell):
+                            continue
+                        val = clean_id(raw_cell)
                         if not is_valid_meter_number(val):
                             continue
                         self._register_meter(val, filepath.name, sheet_name, mtype)
@@ -459,7 +477,7 @@ class MultiPassExtractor:
                         nearest_ac = meter_asset_map.get(mc)
                         if nearest_ac is not None:
                             av = clean_id(_cell_str(df.iloc[r, nearest_ac]))
-                            if av and len(av) >= 4 and not _CHINESE_RE.search(av):
+                            if av and len(av) >= 8 and not _CHINESE_RE.search(av) and not self._looks_like_reading(av):
                                 if av not in self.meters[val]["_asset_candidates"]:
                                     self.meters[val]["_asset_candidates"].append(av)
                                 if not self.meters[val]["asset_number"]:
@@ -493,7 +511,7 @@ class MultiPassExtractor:
                     cat = self._classify_header(cell)
                     if cat == "asset":
                         val = clean_id(self._find_value_near(df, r, c, field_name="asset"))
-                        if val and len(val) >= 4 and not _CHINESE_RE.search(val):
+                        if val and len(val) >= 8 and not _CHINESE_RE.search(val) and not self._looks_like_reading(val):
                             nearest = self._find_nearest_meter(df, r, c, filepath.name)
                             if nearest:
                                 if val not in self.meters[nearest]["_asset_candidates"]:
@@ -525,9 +543,20 @@ class MultiPassExtractor:
     # pass4：用户编号（补充属性）
     # ================================================================
 
-    def _is_known_meter_number(self, val: str) -> bool:
-        """检查值是否是已知的电表号，防止电表号被误当用户编号。"""
-        return val in self.meters
+    def _is_known_meter_number(self, val: str, for_meter: str = None) -> bool:
+        """检查值是否是已知的电表号，防止电表号被误当用户编号。
+
+        特例：如果 val 是 for_meter 的配对方电表号，返回 False（允许作为用户号）。
+        华尔特9个表中 用户号=上网表号 是合法的双重身份。
+        """
+        if val not in self.meters:
+            return False
+        # 如果是配对方，允许作为用户号
+        if for_meter:
+            for gen, grid in self.pairs:
+                if (gen == for_meter and grid == val) or (grid == for_meter and gen == val):
+                    return False
+        return True
 
     def _pass4_user_ids(self):
         """扫描所有文件，找用户编号并关联到电表。"""
@@ -561,15 +590,17 @@ class MultiPassExtractor:
                                 # 收集所有候选值
                                 if uv not in self.meters[mn]["_user_id_candidates"]:
                                     self.meters[mn]["_user_id_candidates"].append(uv)
-                                if not self._is_known_meter_number(uv):
+                                if not self._is_known_meter_number(uv, for_meter=mn):
                                     if not self.meters[mn]["user_id"]:
                                         self.meters[mn]["user_id"] = uv
                                         count += 1
                                     sheet_users.add(uv)
                                     break
 
-            # B. 标签配对
+            # B. 标签配对（跳过表头行，避免误将表头中的编号当作数据）
             for r in range(len(df)):
+                if header_idx is not None and r == header_idx:
+                    continue
                 for c in range(len(df.columns)):
                     cell = _cell_str(df.iloc[r, c])
                     if not cell or not self._matches_any(cell, self._user_aliases):
@@ -580,29 +611,41 @@ class MultiPassExtractor:
                         if nearest:
                             if val not in self.meters[nearest]["_user_id_candidates"]:
                                 self.meters[nearest]["_user_id_candidates"].append(val)
-                        if not self._is_known_meter_number(val):
+                        if not self._is_known_meter_number(val, for_meter=nearest):
                             sheet_users.add(val)
                             if nearest and not self.meters[nearest]["user_id"]:
                                 self.meters[nearest]["user_id"] = val
                                 count += 1
 
-                    # 内嵌格式（兼容冒号可选）
-                    m = re.search(r'(?:用户编号|用户号|户号|用电户号)\s*[:：]?\s*(\d{6,20})', cell)
+                    # 内嵌格式（兼容冒号可选、引号可选）
+                    m = re.search(r'(?:用户编号|用户号|户号|用电户号)\s*[:：]?\s*[\'\"''""]*\s*(\d{6,20})', cell)
                     if m:
                         uid = m.group(1)
                         nearest = self._find_nearest_meter(df, r, c, filepath.name)
                         if nearest:
                             if uid not in self.meters[nearest]["_user_id_candidates"]:
                                 self.meters[nearest]["_user_id_candidates"].append(uid)
-                        if not self._is_known_meter_number(uid):
+                        if not self._is_known_meter_number(uid, for_meter=nearest):
                             sheet_users.add(uid)
                             if nearest and not self.meters[nearest]["user_id"]:
                                 self.meters[nearest]["user_id"] = uid
                                 count += 1
 
             # C. 单用户 sheet → 关联给所有本文件电表
-            # 再次过滤，排除可能混入的电表号
-            sheet_users = {u for u in sheet_users if not self._is_known_meter_number(u)}
+            # 再次过滤，排除可能混入的电表号（但允许配对方电表号作为用户号）
+            file_meters = {mn for mn, info in self.meters.items()
+                          if info["source_file"] == filepath.name}
+            def _is_pure_meter(u):
+                """是否为纯粹的电表号（非配对方用户号）"""
+                if u not in self.meters:
+                    return False
+                # 如果 u 是本文件某个电表的配对方，允许它作为用户号
+                for fm in file_meters:
+                    for gen, grid in self.pairs:
+                        if (gen == fm and grid == u) or (grid == fm and gen == u):
+                            return False
+                return True
+            sheet_users = {u for u in sheet_users if not _is_pure_meter(u)}
             if len(sheet_users) == 1:
                 uid = sheet_users.pop()
                 for mn, info in self.meters.items():
@@ -616,6 +659,17 @@ class MultiPassExtractor:
             uid = info.get("user_id")
             if uid:
                 by_user.setdefault(uid, []).append(mn)
+
+        # E. 配对方用户互补：如果配对中一方有user_id，另一方没有则继承
+        for gen, grid in self.pairs:
+            gen_uid = self.meters.get(gen, {}).get("user_id")
+            grid_uid = self.meters.get(grid, {}).get("user_id")
+            if gen_uid and not grid_uid:
+                self.meters[grid]["user_id"] = gen_uid
+                count += 1
+            elif grid_uid and not gen_uid:
+                self.meters[gen]["user_id"] = grid_uid
+                count += 1
 
         log.info("  关联 %d 个用户编号", count)
 
@@ -1449,6 +1503,9 @@ class MultiPassExtractor:
                     if new_key not in self.readings:
                         self.readings[new_key] = self.readings[key]
                     del self.readings[key]
+            # 更新配对引用
+            self.pairs = [(long if g == short else g, long if n == short else n)
+                          for g, n in self.pairs]
             del self.meters[short]
             log.info("  合并: %s -> %s", short, long)
 
@@ -1472,6 +1529,12 @@ class MultiPassExtractor:
         all_meter_numbers = set(self.meters.keys())
         fixed = 0
         cleared = 0
+
+        # 构建配对关系集合：如果 user_id 是当前电表的配对方，允许
+        paired_with = {}  # meter_number -> set of paired meter numbers
+        for gen, grid in self.pairs:
+            paired_with.setdefault(gen, set()).add(grid)
+            paired_with.setdefault(grid, set()).add(gen)
 
         def _pick_valid_user_id(info):
             """从候选列表中选第一个合格的 user_id。"""
@@ -1498,18 +1561,23 @@ class MultiPassExtractor:
             uid = info.get("user_id") or ""
             asset = info.get("asset_number") or ""
 
-            # 规则1：user_id 不能是其他电表的 meter_number（自身相同是允许的）
+            # 规则1：user_id 不能是其他电表的 meter_number（自身和配对方除外）
+            # 华尔特9个表中 用户号=上网表号 是合法的双重身份
             if uid and uid in all_meter_numbers and uid != mn:
-                new_uid = _pick_valid_user_id(info)
-                if new_uid:
-                    log.info("  电表 %s: user_id '%s' 与电表号冲突，替换为候选值 '%s'",
-                             mn, uid, new_uid)
-                    fixed += 1
+                # 如果 user_id 是配对方的电表号，允许（双重身份）
+                if uid in paired_with.get(mn, set()):
+                    pass  # 合法：用户号即配对方电表号
                 else:
-                    log.warning("  电表 %s: user_id '%s' 与电表号冲突，无合格候选值，已清除",
-                                mn, uid)
-                    cleared += 1
-                info["user_id"] = new_uid
+                    new_uid = _pick_valid_user_id(info)
+                    if new_uid:
+                        log.info("  电表 %s: user_id '%s' 与电表号冲突，替换为候选值 '%s'",
+                                 mn, uid, new_uid)
+                        fixed += 1
+                    else:
+                        log.warning("  电表 %s: user_id '%s' 与电表号冲突，无合格候选值，已清除",
+                                    mn, uid)
+                        cleared += 1
+                    info["user_id"] = new_uid
 
             # 规则2：asset_number 不能是任何已知电表号
             if asset and asset in all_meter_numbers:
@@ -1553,6 +1621,40 @@ class MultiPassExtractor:
     # ================================================================
     # 工具方法
     # ================================================================
+
+    # 用户号/资产号前缀正则：出现这些前缀说明单元格不是电表号
+    _NON_METER_PREFIX_RE = re.compile(
+        r'(?:用户编号|用电户号|用户号|客户编号|户号|'
+        r'资产编号|资产号|电表资产号?|设备编号)',
+    )
+
+    @staticmethod
+    def _looks_like_reading(val: str) -> bool:
+        """检查值是否像表码读数（小数或短纯数字），而非资产编号。
+
+        资产编号通常含字母（如09001SF...）且长度>=18。
+        纯数字短串或含小数点的值是读数，不是资产号。
+        """
+        if not val:
+            return True
+        # 含小数点 → 读数
+        if '.' in val:
+            return True
+        # 纯数字且长度<10 → 不像资产编号
+        if re.match(r'^\d+$', val) and len(val) < 10:
+            return True
+        return False
+
+    def _cell_has_non_meter_prefix(self, raw_cell: str) -> bool:
+        """检查单元格原始文本是否以用户号/资产号前缀开头。
+
+        用于"电表号"列中混合了用户号、资产号的情况（如首熙/鑫海盈文件）。
+        """
+        if not raw_cell:
+            return False
+        # 去掉引号后检查
+        s = raw_cell.strip("'\"''""` ")
+        return bool(self._NON_METER_PREFIX_RE.match(s))
 
     def _register_meter(self, meter_number: str, source_file="", source_sheet="",
                         meter_type=None):
