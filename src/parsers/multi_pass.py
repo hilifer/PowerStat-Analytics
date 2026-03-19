@@ -1,8 +1,9 @@
 """多轮扫描提取器：笨方法版。
 
 每轮单独扫描所有文件的所有单元格，只关注一种数据：
-  第0轮：预扫描配对电表块（用户号+发电表+上网表）
-  第1轮：提取电表号 + 资产编号（同行直接关联）
+  预扫描：扫描配对块，收集用户号阻止名单（不注册电表）
+  第1轮：提取电表号 + 资产编号（基础身份，最先建立）
+  配对注册：用预扫描缓存补充电表和配对关系
   第2轮：提取用户编号，关联到最近的电表
   第3轮：判定电表类型
   第4轮：提取倍率、折扣、项目名
@@ -117,12 +118,28 @@ class MultiPassExtractor:
         return self._build_records()
 
     def _extract_meter_info(self):
-        """提取电表档案信息（pass0-pass4 + 交叉验证）。"""
-        # === 预扫描：配对电表块 ===
-        self._pass0_paired_blocks()
+        """提取电表档案信息。
+
+        执行顺序：
+          预扫描：扫描配对块，只收集用户号阻止名单（不注册电表）
+          第1轮：提取电表号 + 资产编号（基础身份，最先建立）
+          第1.5轮：用预扫描缓存注册配对电表块（补充 pass1 未覆盖的电表）
+          第2轮：提取用户编号，关联到最近的电表
+          第3轮：判定电表类型
+          第4轮：提取倍率、折扣、项目名
+          合并短电表号
+          第5轮：交叉验证（清理冲突数据）
+        """
+        # === 预扫描：扫描配对块，只收集用户号阻止名单 ===
+        self._prescan_paired_blocks()
+
+        # === 基础身份：电表号 + 资产编号（最先建立） ===
+        self._pass1_meters_and_assets()
+
+        # === 配对块注册：用预扫描缓存补充电表和配对关系 ===
+        self._register_paired_blocks()
 
         # === 固定数据 ===
-        self._pass1_meters_and_assets()
         self._pass2_user_ids()
         self._pass3_meter_types()
         self._pass4_fixed_attrs()
@@ -173,17 +190,16 @@ class MultiPassExtractor:
         "multiplier":  ["倍率", "CT倍率", "变比"],
     }
 
-    def _pass0_paired_blocks(self):
-        """预扫描：识别统计表中用户号+发电表+上网表配对块。
+    def _prescan_paired_blocks(self):
+        """预扫描：扫描统计表中的配对块，只收集用户号阻止名单。
 
-        支持两种格式：
-        格式1（表格型）：标签在一个单元格，值在相邻单元格
-        格式2（文本型）：标签和值在同一单元格内（如"用电户号0950000088133431"）
-
-        配对块的特征：在一个较小区域（约10行内）同时出现用户号、发电表号、上网表号。
+        扫描结果缓存到 self._paired_block_cache，供 _register_paired_blocks 使用。
+        这一步不注册任何电表，只做两件事：
+          1. 扫描所有 sheet 识别配对块
+          2. 收集 _pass0_user_ids 阻止名单（防止 pass1 把用户号误注册为电表）
         """
-        log.info("[预扫描] 识别配对电表块...")
-        block_count = 0
+        log.info("[预扫描] 扫描配对块，收集用户号阻止名单...")
+        self._paired_block_cache = []  # [(block_dict, filepath, sheet_name, project_name)]
 
         for df, filepath, sheet_name, source_info in self._sheets:
             # 收集所有标签命中：(row, field_name, value)
@@ -203,12 +219,11 @@ class MultiPassExtractor:
                             break  # 一个单元格只取第一个匹配
 
                     # 策略B：标签单元格（纯标签，值在右侧或下方）
-                    # 用最长关键字匹配，避免 "上网表资产产" 被 "上网表" 先匹配到 grid_meter
                     best_field, best_kw_len = None, 0
                     for field_name, kws in self._BLOCK_LABEL_KW.items():
                         for kw in kws:
                             if cell.strip() == kw:
-                                kw_len = len(kw) + 1000  # 精确匹配最优
+                                kw_len = len(kw) + 1000
                             elif kw in cell and len(cell) <= len(kw) + 3:
                                 kw_len = len(kw)
                             else:
@@ -217,7 +232,6 @@ class MultiPassExtractor:
                                 best_kw_len = kw_len
                                 best_field = field_name
                     if best_field:
-                        # 收集本区域已提取的值，避免同一个值被多个字段抢占
                         nearby_vals = {v for (hr, hf, v) in hits if abs(hr - r) <= 10}
                         val = self._find_value_near(df, r, c,
                                                     field_name=best_field,
@@ -237,7 +251,6 @@ class MultiPassExtractor:
                     # 策略C：处理 "上网表7月新装09001SG..." 这类非标准标签
                     m = re.search(r'(?:上网表|发电表)\d{1,2}月新装\s*[:：]?\s*([0-9A-Za-z]{8,30})', cell)
                     if m:
-                        # 判断是上网还是发电
                         if "上网" in cell:
                             hits.append((r, "grid_asset", m.group(1)))
                         elif "发电" in cell:
@@ -246,13 +259,9 @@ class MultiPassExtractor:
             if not hits:
                 continue
 
-            # 按行排序
             hits.sort(key=lambda x: x[0])
-
-            # 用滑动窗口聚合块：在10行范围内的命中归为一个块
             blocks = self._cluster_hits_into_blocks(hits, max_gap=10)
 
-            # 提取项目名：目录路径 → sheet标题 → 文件名
             project_name = (self._extract_project_from_path(filepath)
                             or self._extract_project_from_filename(filepath.name))
 
@@ -260,62 +269,84 @@ class MultiPassExtractor:
                 user_id = block.get("user_id")
                 gen_meter = block.get("gen_meter")
                 grid_meter = block.get("grid_meter")
-                # 值冲突去重：同一个值不可能既是用户号又是电表号
-                # user_id 标签更具体（"用户号"），电表号更可能是 _find_value_near 误取
+                # 值冲突去重
                 if user_id and user_id == gen_meter:
                     gen_meter = None
+                    block["gen_meter"] = None
                 if user_id and user_id == grid_meter:
                     grid_meter = None
-                # 发电表和上网表号也不能相同
+                    block["grid_meter"] = None
                 if gen_meter and gen_meter == grid_meter:
                     grid_meter = None
-                # 记录 pass0 识别的用户编号，防止 pass1 误注册为电表
+                    block["grid_meter"] = None
+
+                # 只收集用户号阻止名单（这一步的核心目的）
                 if user_id:
                     self._pass0_user_ids.add(user_id)
-                gen_asset = block.get("gen_asset")
-                grid_asset = block.get("grid_asset")
-                multiplier_str = block.get("multiplier")
-                multiplier = _to_float(multiplier_str) if multiplier_str else None
 
-                # 必须至少有一个电表号才有意义
-                if not gen_meter and not grid_meter:
-                    continue
+                # 至少有一个电表号才缓存
+                if gen_meter or grid_meter:
+                    self._paired_block_cache.append(
+                        (block, filepath, sheet_name, project_name))
 
-                block_count += 1
+        log.info("  预扫描发现 %d 个配对块，收集 %d 个用户号",
+                 len(self._paired_block_cache), len(self._pass0_user_ids))
 
-                # 注册发电表
-                if gen_meter and is_valid_meter_number(gen_meter):
-                    self._register_meter(gen_meter, filepath.name, sheet_name, "发电表")
-                    info = self.meters[gen_meter]
-                    if gen_asset and not info["asset_number"]:
-                        info["asset_number"] = gen_asset
-                    if user_id and not info["user_id"]:
-                        info["user_id"] = user_id
-                    if multiplier and not info["multiplier"]:
-                        info["multiplier"] = multiplier
-                    if project_name and not info["project_name"]:
-                        info["project_name"] = project_name
+    def _register_paired_blocks(self):
+        """用预扫描缓存注册配对电表块（在 pass1 之后执行）。
 
-                # 注册上网表
-                if grid_meter and is_valid_meter_number(grid_meter):
-                    self._register_meter(grid_meter, filepath.name, sheet_name, "上网表")
-                    info = self.meters[grid_meter]
-                    if grid_asset and not info["asset_number"]:
-                        info["asset_number"] = grid_asset
-                    if user_id and not info["user_id"]:
-                        info["user_id"] = user_id
-                    if multiplier and not info["multiplier"]:
-                        info["multiplier"] = multiplier
-                    if project_name and not info["project_name"]:
-                        info["project_name"] = project_name
+        此时 self.meters 已有 pass1 注册的基础电表，
+        本步骤补充统计表中发现的电表并建立配对关系。
+        """
+        log.info("[配对注册] 处理 %d 个缓存配对块...", len(self._paired_block_cache))
+        block_count = 0
 
-                # 配对
-                if gen_meter and grid_meter and is_valid_meter_number(gen_meter) and is_valid_meter_number(grid_meter):
-                    self.pairs.append((gen_meter, grid_meter))
-                    log.info("  配对块: 用户=%s 发电表=%s 上网表=%s 项目=%s",
-                             user_id, gen_meter, grid_meter, project_name)
+        for block, filepath, sheet_name, project_name in self._paired_block_cache:
+            user_id = block.get("user_id")
+            gen_meter = block.get("gen_meter")
+            grid_meter = block.get("grid_meter")
+            gen_asset = block.get("gen_asset")
+            grid_asset = block.get("grid_asset")
+            multiplier_str = block.get("multiplier")
+            multiplier = _to_float(multiplier_str) if multiplier_str else None
 
-        log.info("  预扫描发现 %d 个配对块", block_count)
+            block_count += 1
+
+            # 注册发电表
+            if gen_meter and is_valid_meter_number(gen_meter):
+                self._register_meter(gen_meter, filepath.name, sheet_name, "发电表")
+                info = self.meters[gen_meter]
+                if gen_asset and not info["asset_number"]:
+                    info["asset_number"] = gen_asset
+                if user_id and not info["user_id"]:
+                    info["user_id"] = user_id
+                if multiplier and not info["multiplier"]:
+                    info["multiplier"] = multiplier
+                if project_name and not info["project_name"]:
+                    info["project_name"] = project_name
+
+            # 注册上网表
+            if grid_meter and is_valid_meter_number(grid_meter):
+                self._register_meter(grid_meter, filepath.name, sheet_name, "上网表")
+                info = self.meters[grid_meter]
+                if grid_asset and not info["asset_number"]:
+                    info["asset_number"] = grid_asset
+                if user_id and not info["user_id"]:
+                    info["user_id"] = user_id
+                if multiplier and not info["multiplier"]:
+                    info["multiplier"] = multiplier
+                if project_name and not info["project_name"]:
+                    info["project_name"] = project_name
+
+            # 配对
+            if gen_meter and grid_meter and is_valid_meter_number(gen_meter) and is_valid_meter_number(grid_meter):
+                self.pairs.append((gen_meter, grid_meter))
+                log.info("  配对块: 用户=%s 发电表=%s 上网表=%s 项目=%s",
+                         user_id, gen_meter, grid_meter, project_name)
+
+        log.info("  注册 %d 个配对块", block_count)
+        # 释放缓存
+        self._paired_block_cache = []
 
     def _cluster_hits_into_blocks(self, hits: list, max_gap: int = 10) -> list[dict]:
         """将按行排序的命中项聚合为块。同一块内行间距不超过 max_gap。
