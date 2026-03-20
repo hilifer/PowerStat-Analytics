@@ -951,13 +951,14 @@ def _register_routes(app: Flask, db: Database):
 
     @app.route("/api/files/images")
     def files_images():
-        """列出所有（或指定关键词匹配的）邮件附件图片。"""
+        """列出所有邮件附件图片，按邮件（目录）分组返回。"""
         keyword = request.args.get("q", "")
         temp_dir = Path(config.get("attachments", "temp_dir",
                                    default="output/temp_attachments"))
         archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
         IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
-        images = []
+        from collections import OrderedDict
+        groups = OrderedDict()  # group_name -> [images]
         seen = set()
         for scan_root, prefix in [(temp_dir, "temp"), (archive_root, "archive")]:
             if not scan_root.exists():
@@ -967,7 +968,6 @@ def _register_routes(app: Flask, db: Database):
                     continue
                 if f.name.startswith("~$"):
                     continue
-                # 关键词过滤：匹配文件名或上级目录名
                 if keyword:
                     path_str = str(f.relative_to(scan_root))
                     if keyword.lower() not in path_str.lower():
@@ -977,13 +977,23 @@ def _register_routes(app: Flask, db: Database):
                 if key in seen:
                     continue
                 seen.add(key)
-                images.append({
+                # 分组：顶层目录名（邮件名称）
+                top_dir = rel.parts[0] if len(rel.parts) > 1 else ("其他" if prefix == "temp" else "归档")
+                group_key = f"{prefix}:{top_dir}"
+                if group_key not in groups:
+                    groups[group_key] = {"name": top_dir, "source": prefix, "images": []}
+                groups[group_key]["images"].append({
                     "filename": f.name,
                     "path": f"{prefix}/{rel}",
                     "dir": str(rel.parent),
                     "url": url_for("file_image", source=prefix, filepath=str(rel)),
                 })
-        return jsonify({"images": images, "total": len(images)})
+        all_images = []
+        grouped = []
+        for gk, gv in groups.items():
+            grouped.append(gv)
+            all_images.extend(gv["images"])
+        return jsonify({"images": all_images, "groups": grouped, "total": len(all_images)})
 
     @app.route("/api/readings/ocr-extract", methods=["POST"])
     def readings_ocr_extract():
