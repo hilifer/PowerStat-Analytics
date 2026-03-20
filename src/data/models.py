@@ -728,7 +728,7 @@ class Database:
 
     def get_readings_grouped(self, project_name: str = None, user_id: str = None,
                              reading_month: str = None) -> list[dict]:
-        """获取抄表数据，按用户分组，发电表+上网表并排。"""
+        """获取抄表数据，按用户分组，发电表+上网表并排，含单价信息。"""
         query = """
             SELECT m.id AS meter_id, m.meter_number, m.asset_number, m.user_id,
                    m.meter_type, m.multiplier, m.discount, m.project_name,
@@ -738,9 +738,12 @@ class Database:
                    r.cur_sharp_peak, r.cur_peak, r.cur_flat, r.cur_valley, r.cur_total,
                    r.prev_sharp_peak, r.prev_peak, r.prev_flat, r.prev_valley, r.prev_total,
                    r.is_locked AS reading_locked,
-                   r.source_file
+                   r.source_file,
+                   p.sharp_peak_price, p.peak_price, p.flat_price, p.valley_price,
+                   p.average_price, p.source_file AS price_source
             FROM meters m
             JOIN monthly_readings r ON r.meter_id = m.id
+            LEFT JOIN price_records p ON p.user_id = m.user_id AND p.reading_month = r.reading_month
             WHERE 1=1
         """
         params = []

@@ -944,6 +944,102 @@ def _register_routes(app: Flask, db: Database):
             log.error("批量锁定失败: %s", e)
             return jsonify({"ok": False, "error": str(e)})
 
+    @app.route("/api/archive/images-by-month")
+    def archive_images_by_month():
+        """列出指定月份归档目录下的所有图片文件。"""
+        month = request.args.get("month", "")
+        archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
+        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
+        images = []
+        if month and archive_root.exists():
+            month_dir = archive_root / month
+            if month_dir.exists():
+                for f in sorted(month_dir.rglob("*")):
+                    if f.is_file() and f.suffix.lower() in IMAGE_EXTS:
+                        rel = f.relative_to(archive_root)
+                        images.append({
+                            "filename": f.name,
+                            "path": str(rel),
+                            "url": url_for("archive_image", filepath=str(rel)),
+                        })
+        return jsonify({"images": images, "month": month})
+
+    @app.route("/api/readings/ocr-extract", methods=["POST"])
+    def readings_ocr_extract():
+        """手动选择图片重新 OCR 提取单价，用户编号由前端指定（人工确认）。"""
+        data = request.get_json()
+        image_path = data.get("image_path", "")  # 相对于 archive_root
+        user_id = data.get("user_id", "")
+        month = data.get("month", "")
+        if not image_path or not user_id or not month:
+            return jsonify({"ok": False, "error": "缺少 image_path / user_id / month"})
+
+        archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
+        full_path = archive_root / image_path
+        if not full_path.exists():
+            return jsonify({"ok": False, "error": "图片文件不存在"})
+
+        try:
+            from src.pipeline import SmartDispatcher
+            dispatcher = SmartDispatcher()
+            ocr = dispatcher.ocr_engine.extract_from_image(
+                str(full_path), {"filename": full_path.name, "archive_month": month})
+
+            if not ocr.has_price_data():
+                return jsonify({"ok": False, "error": "OCR 未识别到单价数据",
+                                "ocr_user_id": ocr.user_id})
+
+            # 用前端指定的 user_id 和 month（人工已确认），不依赖 OCR 的提取结果
+            db.upsert_price(
+                user_id=user_id,
+                reading_month=month,
+                sharp_peak_price=ocr.sharp_peak_price,
+                peak_price=ocr.peak_price,
+                flat_price=ocr.flat_price,
+                valley_price=ocr.valley_price,
+                average_price=ocr.average_price,
+                source_file=full_path.name,
+            )
+            return jsonify({
+                "ok": True,
+                "prices": {
+                    "sharp_peak_price": ocr.sharp_peak_price,
+                    "peak_price": ocr.peak_price,
+                    "flat_price": ocr.flat_price,
+                    "valley_price": ocr.valley_price,
+                    "average_price": ocr.average_price,
+                },
+                "ocr_user_id": ocr.user_id,
+                "source_file": full_path.name,
+            })
+        except Exception as e:
+            log.error("手动 OCR 提取失败: %s", e)
+            return jsonify({"ok": False, "error": str(e)})
+
+    @app.route("/api/readings/update-price", methods=["POST"])
+    def readings_update_price():
+        """手动更新单价数据。"""
+        data = request.get_json()
+        user_id = data.get("user_id", "")
+        month = data.get("month", "")
+        prices = data.get("prices", {})
+        if not user_id or not month:
+            return jsonify({"ok": False, "error": "缺少 user_id / month"})
+        try:
+            db.upsert_price(
+                user_id=user_id,
+                reading_month=month,
+                sharp_peak_price=prices.get("sharp_peak_price"),
+                peak_price=prices.get("peak_price"),
+                flat_price=prices.get("flat_price"),
+                valley_price=prices.get("valley_price"),
+                average_price=prices.get("average_price"),
+            )
+            return jsonify({"ok": True})
+        except Exception as e:
+            log.error("更新单价失败: %s", e)
+            return jsonify({"ok": False, "error": str(e)})
+
     # ---- 归档浏览（按年月分类） ----
     @app.route("/archive")
     def archive_index():

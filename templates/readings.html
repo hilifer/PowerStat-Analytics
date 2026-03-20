@@ -9,7 +9,7 @@
 </div>
 
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem; flex-wrap:wrap; gap:0.5rem;">
-    <h1 style="margin:0;">抄表数据</h1>
+    <h1 style="margin:0;">月度审核工作台</h1>
 </div>
 
 <!-- 筛选栏 -->
@@ -49,123 +49,203 @@
 {% for group in grouped_data %}
 <div class="card reading-group">
     <div class="card-header" style="flex-wrap:wrap; gap:0.5rem;">
-        <div>
-            <h2 style="margin:0;">
-                {{ group.project_name or '未分类' }}
-                <span style="font-weight:400; font-size:0.85rem; color:var(--text-secondary); margin-left:0.5rem;">
-                    用户 {{ group.user_id }}
-                </span>
-            </h2>
-        </div>
+        <h2 style="margin:0;">
+            {{ group.project_name or '未分类' }}
+            <span style="font-weight:400; font-size:0.85rem; color:var(--text-secondary); margin-left:0.5rem;">
+                用户 {{ group.user_id }}
+            </span>
+        </h2>
     </div>
 
     {% for month_data in group.months %}
-    <div class="month-block" style="margin-bottom:1.5rem;">
-        <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.5rem;">
+    {% set first_r = month_data.gen or month_data.grid %}
+    {% set any_locked = (month_data.gen.reading_locked if month_data.gen else false) or (month_data.grid.reading_locked if month_data.grid else false) %}
+    {% set has_price = first_r and first_r.sharp_peak_price is not none %}
+    {% set price_missing = first_r and first_r.sharp_peak_price is none and first_r.peak_price is none and first_r.flat_price is none and first_r.valley_price is none and first_r.average_price is none %}
+    <div class="month-block" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
+        {# ---- 月份标题栏 ---- #}
+        <div class="month-header">
             <h3 style="margin:0; font-size:1rem;">{{ month_data.month }}</h3>
-            {% set any_locked = month_data.gen.reading_locked or month_data.grid.reading_locked if month_data.gen and month_data.grid else (month_data.gen.reading_locked if month_data.gen else (month_data.grid.reading_locked if month_data.grid else false)) %}
-            <button class="btn btn-sm {% if any_locked %}btn-danger{% else %}btn-outline{% endif %}"
-                    onclick="toggleMonthLock('{{ group.user_id }}', '{{ month_data.month }}', {{ 'true' if any_locked else 'false' }})"
-                    title="{{ '解锁此月数据' if any_locked else '锁定此月数据' }}">
-                {% if any_locked %}&#128274; 已锁定{% else %}&#128275; 未锁定{% endif %}
-            </button>
-            <button class="btn btn-sm btn-primary" onclick="saveMonth(this, '{{ group.user_id }}', '{{ month_data.month }}')"
-                    {% if any_locked %}disabled{% endif %}>保存</button>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+                <button class="btn btn-sm {% if any_locked %}btn-danger{% else %}btn-outline{% endif %}"
+                        onclick="toggleMonthLock('{{ group.user_id }}', '{{ month_data.month }}', {{ 'true' if any_locked else 'false' }})"
+                        title="{{ '解锁此月数据' if any_locked else '锁定此月数据' }}">
+                    {% if any_locked %}&#128274; 已锁定{% else %}&#128275; 未锁定{% endif %}
+                </button>
+                <button class="btn btn-sm btn-primary save-btn"
+                        onclick="saveAll(this, '{{ group.user_id }}', '{{ month_data.month }}')"
+                        {% if any_locked %}disabled{% endif %}>保存</button>
+            </div>
         </div>
 
-        <div class="table-wrap">
-            <table class="reading-table">
-                <thead>
-                    <tr>
-                        <th style="min-width:80px;">类型</th>
-                        <th>电表号</th>
-                        <th class="num">倍率</th>
-                        <th class="num">尖峰</th>
-                        <th class="num">峰</th>
-                        <th class="num">平</th>
-                        <th class="num">谷</th>
-                        <th class="num">总电量</th>
-                        <th>状态</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {# 发电表行 #}
-                    {% if month_data.gen %}
-                    {% set r = month_data.gen %}
-                    {% set incomplete = r.sharp_peak is none and r.peak is none and r.flat is none and r.valley is none and r.total_kwh is none %}
-                    <tr class="{% if incomplete %}row-incomplete{% endif %}{% if r.reading_locked %} row-locked{% endif %}"
-                        data-meter-id="{{ r.meter_id }}" data-month="{{ month_data.month }}">
-                        <td><span class="tag tag-gen">发电表</span></td>
-                        <td class="meter-num">{{ r.meter_number }}</td>
-                        <td class="num">{{ r.multiplier }}</td>
-                        <td class="num"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
-                            value="{{ '%.2f'|format(r.sharp_peak) if r.sharp_peak is not none else '' }}"
-                            {% if r.reading_locked %}disabled{% endif %}></td>
-                        <td class="num"><input type="number" step="0.01" class="cell-input" name="peak"
-                            value="{{ '%.2f'|format(r.peak) if r.peak is not none else '' }}"
-                            {% if r.reading_locked %}disabled{% endif %}></td>
-                        <td class="num"><input type="number" step="0.01" class="cell-input" name="flat"
-                            value="{{ '%.2f'|format(r.flat) if r.flat is not none else '' }}"
-                            {% if r.reading_locked %}disabled{% endif %}></td>
-                        <td class="num"><input type="number" step="0.01" class="cell-input" name="valley"
-                            value="{{ '%.2f'|format(r.valley) if r.valley is not none else '' }}"
-                            {% if r.reading_locked %}disabled{% endif %}></td>
-                        <td class="num"><input type="number" step="0.01" class="cell-input total-input" name="total_kwh"
-                            value="{{ '%.2f'|format(r.total_kwh) if r.total_kwh is not none else '' }}"
-                            {% if r.reading_locked %}disabled{% endif %}></td>
-                        <td>
-                            {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
-                            {% elif incomplete %}<span class="status-badge badge-incomplete">&#9888; 数据不全</span>
-                            {% else %}<span class="status-badge badge-ok">&#10003;</span>{% endif %}
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr class="row-incomplete row-missing">
-                        <td><span class="tag tag-gen">发电表</span></td>
-                        <td colspan="7" style="text-align:center; color:var(--text-secondary);">无数据</td>
-                        <td><span class="status-badge badge-incomplete">&#9888; 缺失</span></td>
-                    </tr>
-                    {% endif %}
+        <div class="month-content">
+            {# ---- 抄表数据区 ---- #}
+            <div class="section-label">抄表数据</div>
+            <div class="table-wrap">
+                <table class="reading-table">
+                    <thead>
+                        <tr>
+                            <th style="min-width:70px;">类型</th>
+                            <th>电表号</th>
+                            <th class="num">倍率</th>
+                            <th class="num">尖峰</th>
+                            <th class="num">峰</th>
+                            <th class="num">平</th>
+                            <th class="num">谷</th>
+                            <th class="num">总电量</th>
+                            <th>状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {# 发电表 #}
+                        {% if month_data.gen %}
+                        {% set r = month_data.gen %}
+                        {% set incomplete = r.sharp_peak is none and r.peak is none and r.flat is none and r.valley is none and r.total_kwh is none %}
+                        <tr class="{% if incomplete %}row-incomplete{% endif %}{% if r.reading_locked %} row-locked{% endif %}"
+                            data-meter-id="{{ r.meter_id }}" data-month="{{ month_data.month }}">
+                            <td><span class="tag tag-gen">发电表</span></td>
+                            <td class="meter-num">{{ r.meter_number }}</td>
+                            <td class="num">{{ r.multiplier }}</td>
+                            <td class="num"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
+                                value="{{ '%.2f'|format(r.sharp_peak) if r.sharp_peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num"><input type="number" step="0.01" class="cell-input" name="peak"
+                                value="{{ '%.2f'|format(r.peak) if r.peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num"><input type="number" step="0.01" class="cell-input" name="flat"
+                                value="{{ '%.2f'|format(r.flat) if r.flat is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num"><input type="number" step="0.01" class="cell-input" name="valley"
+                                value="{{ '%.2f'|format(r.valley) if r.valley is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num"><input type="number" step="0.01" class="cell-input total-input" name="total_kwh"
+                                value="{{ '%.2f'|format(r.total_kwh) if r.total_kwh is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td>
+                                {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
+                                {% elif incomplete %}<span class="status-badge badge-incomplete">&#9888; 数据不全</span>
+                                {% else %}<span class="status-badge badge-ok">&#10003;</span>{% endif %}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr class="row-incomplete row-missing">
+                            <td><span class="tag tag-gen">发电表</span></td>
+                            <td colspan="7" style="text-align:center; color:var(--text-secondary);">无数据</td>
+                            <td><span class="status-badge badge-incomplete">&#9888; 缺失</span></td>
+                        </tr>
+                        {% endif %}
 
-                    {# 上网表行 #}
-                    {% if month_data.grid %}
-                    {% set r = month_data.grid %}
-                    {% set incomplete = r.sharp_peak is none and r.peak is none and r.flat is none and r.valley is none and r.total_kwh is none %}
-                    <tr class="{% if incomplete %}row-incomplete{% endif %}{% if r.reading_locked %} row-locked{% endif %}"
-                        data-meter-id="{{ r.meter_id }}" data-month="{{ month_data.month }}">
-                        <td><span class="tag tag-grid">上网表</span></td>
-                        <td class="meter-num">{{ r.meter_number }}</td>
-                        <td class="num">{{ r.multiplier }}</td>
-                        <td class="num"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
-                            value="{{ '%.2f'|format(r.sharp_peak) if r.sharp_peak is not none else '' }}"
-                            {% if r.reading_locked %}disabled{% endif %}></td>
-                        <td class="num"><input type="number" step="0.01" class="cell-input" name="peak"
-                            value="{{ '%.2f'|format(r.peak) if r.peak is not none else '' }}"
-                            {% if r.reading_locked %}disabled{% endif %}></td>
-                        <td class="num"><input type="number" step="0.01" class="cell-input" name="flat"
-                            value="{{ '%.2f'|format(r.flat) if r.flat is not none else '' }}"
-                            {% if r.reading_locked %}disabled{% endif %}></td>
-                        <td class="num"><input type="number" step="0.01" class="cell-input" name="valley"
-                            value="{{ '%.2f'|format(r.valley) if r.valley is not none else '' }}"
-                            {% if r.reading_locked %}disabled{% endif %}></td>
-                        <td class="num"><input type="number" step="0.01" class="cell-input total-input" name="total_kwh"
-                            value="{{ '%.2f'|format(r.total_kwh) if r.total_kwh is not none else '' }}"
-                            {% if r.reading_locked %}disabled{% endif %}></td>
-                        <td>
-                            {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
-                            {% elif incomplete %}<span class="status-badge badge-incomplete">&#9888; 数据不全</span>
-                            {% else %}<span class="status-badge badge-ok">&#10003;</span>{% endif %}
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr class="row-incomplete row-missing">
-                        <td><span class="tag tag-grid">上网表</span></td>
-                        <td colspan="7" style="text-align:center; color:var(--text-secondary);">无数据</td>
-                        <td><span class="status-badge badge-incomplete">&#9888; 缺失</span></td>
-                    </tr>
+                        {# 上网表 #}
+                        {% if month_data.grid %}
+                        {% set r = month_data.grid %}
+                        {% set incomplete = r.sharp_peak is none and r.peak is none and r.flat is none and r.valley is none and r.total_kwh is none %}
+                        <tr class="{% if incomplete %}row-incomplete{% endif %}{% if r.reading_locked %} row-locked{% endif %}"
+                            data-meter-id="{{ r.meter_id }}" data-month="{{ month_data.month }}">
+                            <td><span class="tag tag-grid">上网表</span></td>
+                            <td class="meter-num">{{ r.meter_number }}</td>
+                            <td class="num">{{ r.multiplier }}</td>
+                            <td class="num"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
+                                value="{{ '%.2f'|format(r.sharp_peak) if r.sharp_peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num"><input type="number" step="0.01" class="cell-input" name="peak"
+                                value="{{ '%.2f'|format(r.peak) if r.peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num"><input type="number" step="0.01" class="cell-input" name="flat"
+                                value="{{ '%.2f'|format(r.flat) if r.flat is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num"><input type="number" step="0.01" class="cell-input" name="valley"
+                                value="{{ '%.2f'|format(r.valley) if r.valley is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num"><input type="number" step="0.01" class="cell-input total-input" name="total_kwh"
+                                value="{{ '%.2f'|format(r.total_kwh) if r.total_kwh is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td>
+                                {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
+                                {% elif incomplete %}<span class="status-badge badge-incomplete">&#9888; 数据不全</span>
+                                {% else %}<span class="status-badge badge-ok">&#10003;</span>{% endif %}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr class="row-incomplete row-missing">
+                            <td><span class="tag tag-grid">上网表</span></td>
+                            <td colspan="7" style="text-align:center; color:var(--text-secondary);">无数据</td>
+                            <td><span class="status-badge badge-incomplete">&#9888; 缺失</span></td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+
+            {# ---- 单价数据区 ---- #}
+            <div class="price-section {% if price_missing %}price-missing{% endif %}">
+                <div class="section-label" style="display:flex; align-items:center; justify-content:space-between;">
+                    <span>
+                        单价数据
+                        {% if price_missing %}<span class="status-badge badge-incomplete" style="margin-left:0.5rem;">&#9888; 单价未匹配</span>{% endif %}
+                    </span>
+                    <div style="display:flex; gap:0.5rem; align-items:center;">
+                        {% if first_r and first_r.price_source %}
+                        <span class="price-source-tag" onclick="showPriceImage('{{ first_r.price_source }}')" title="点击查看来源图片">
+                            &#128065; {{ first_r.price_source|truncate(25) }}
+                        </span>
+                        {% endif %}
+                        <button class="btn btn-sm btn-outline" onclick="openImagePicker(this, '{{ group.user_id }}', '{{ month_data.month }}')"
+                                {% if any_locked %}disabled{% endif %}
+                                title="手动选择图片重新提取单价">&#128247; 选图提取</button>
+                    </div>
+                </div>
+                <div class="price-grid" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
+                    <div class="price-item">
+                        <label>尖峰价</label>
+                        <input type="number" step="0.0001" class="cell-input price-input" name="sharp_peak_price"
+                            value="{{ '%.4f'|format(first_r.sharp_peak_price) if first_r and first_r.sharp_peak_price is not none else '' }}"
+                            {% if any_locked %}disabled{% endif %}>
+                    </div>
+                    <div class="price-item">
+                        <label>峰价</label>
+                        <input type="number" step="0.0001" class="cell-input price-input" name="peak_price"
+                            value="{{ '%.4f'|format(first_r.peak_price) if first_r and first_r.peak_price is not none else '' }}"
+                            {% if any_locked %}disabled{% endif %}>
+                    </div>
+                    <div class="price-item">
+                        <label>平价</label>
+                        <input type="number" step="0.0001" class="cell-input price-input" name="flat_price"
+                            value="{{ '%.4f'|format(first_r.flat_price) if first_r and first_r.flat_price is not none else '' }}"
+                            {% if any_locked %}disabled{% endif %}>
+                    </div>
+                    <div class="price-item">
+                        <label>谷价</label>
+                        <input type="number" step="0.0001" class="cell-input price-input" name="valley_price"
+                            value="{{ '%.4f'|format(first_r.valley_price) if first_r and first_r.valley_price is not none else '' }}"
+                            {% if any_locked %}disabled{% endif %}>
+                    </div>
+                    <div class="price-item">
+                        <label>均价</label>
+                        <input type="number" step="0.0001" class="cell-input price-input" name="average_price"
+                            value="{{ '%.4f'|format(first_r.average_price) if first_r and first_r.average_price is not none else '' }}"
+                            {% if any_locked %}disabled{% endif %}>
+                    </div>
+                </div>
+            </div>
+
+            {# ---- 金额预览区 ---- #}
+            <div class="amount-preview">
+                <div class="section-label">金额预览 <span style="font-weight:400; font-size:0.75rem; color:var(--text-secondary);">(自动计算)</span></div>
+                <div class="amount-grid" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
+                    {% if month_data.gen %}
+                    <div class="amount-item">
+                        <span class="tag tag-gen" style="font-size:0.7rem;">发电</span>
+                        <span class="amount-value" data-type="gen">--</span>
+                    </div>
                     {% endif %}
-                </tbody>
-            </table>
+                    {% if month_data.grid %}
+                    <div class="amount-item">
+                        <span class="tag tag-grid" style="font-size:0.7rem;">上网</span>
+                        <span class="amount-value" data-type="grid">--</span>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
         </div>
     </div>
     {% endfor %}
@@ -177,127 +257,268 @@
 </div>
 {% endif %}
 
+{# ---- 图片选择弹窗 ---- #}
+<div id="imagePickerModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeImagePicker()">
+    <div class="modal-box">
+        <div class="modal-header">
+            <h3 style="margin:0;">选择单价来源图片</h3>
+            <button onclick="closeImagePicker()" style="background:none; border:none; font-size:1.5rem; cursor:pointer; color:var(--text-secondary);">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="imagePickerLoading" style="text-align:center; padding:2rem; color:var(--text-secondary);">加载图片列表中...</div>
+            <div id="imagePickerGrid" class="image-picker-grid" style="display:none;"></div>
+            <div id="imagePickerEmpty" style="display:none; text-align:center; padding:2rem; color:var(--text-secondary);">当月无归档图片</div>
+        </div>
+        <div class="modal-footer" id="imagePickerFooter" style="display:none;">
+            <div id="imagePickerSelected" style="font-size:0.85rem; color:var(--text-secondary);"></div>
+            <div style="display:flex; gap:0.5rem;">
+                <button class="btn btn-sm btn-outline" onclick="closeImagePicker()">取消</button>
+                <button class="btn btn-sm btn-primary" id="imagePickerConfirm" onclick="confirmImagePick()" disabled>OCR 提取单价</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# ---- 图片预览弹窗 ---- #}
+<div id="priceImageModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%;
+     background:rgba(0,0,0,0.85); z-index:9999; cursor:pointer; overflow:auto;"
+     onclick="closePriceImage()">
+    <div style="position:absolute; top:10px; right:20px; color:#fff; font-size:2rem; cursor:pointer; z-index:10000;"
+         onclick="closePriceImage()">&times;</div>
+    <div style="display:flex; align-items:center; justify-content:center; min-height:100vh; padding:2rem;">
+        <div id="priceImageLoading" style="color:#fff; font-size:1.2rem;">加载中...</div>
+        <img id="priceImageImg" style="display:none; max-width:95%; max-height:95vh; border-radius:8px;
+             box-shadow:0 4px 20px rgba(0,0,0,0.5);" onclick="event.stopPropagation();">
+    </div>
+</div>
+
 <style>
-/* 内联编辑输入框 */
+/* 月份块 */
+.month-block { margin-bottom:1.5rem; }
+.month-header {
+    display:flex; align-items:center; justify-content:space-between;
+    gap:0.75rem; margin-bottom:0.5rem; flex-wrap:wrap;
+}
+.month-content { display:flex; flex-direction:column; gap:0.75rem; }
+.section-label {
+    font-size:0.8rem; font-weight:600; color:var(--text-secondary);
+    text-transform:uppercase; letter-spacing:0.03em; margin-bottom:0.25rem;
+}
+.reading-group .month-block:not(:last-child) {
+    border-bottom:1px solid var(--border); padding-bottom:1rem;
+}
+
+/* 输入框 */
 .cell-input {
-    width: 90px;
-    padding: 0.2rem 0.4rem;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    font-size: 0.83rem;
-    text-align: right;
-    background: #fff;
-    font-variant-numeric: tabular-nums;
+    width:90px; padding:0.2rem 0.4rem; border:1px solid var(--border);
+    border-radius:4px; font-size:0.83rem; text-align:right; background:#fff;
+    font-variant-numeric:tabular-nums;
 }
-.cell-input:focus {
-    outline: none;
-    border-color: var(--primary);
-    box-shadow: 0 0 0 2px rgba(37,99,235,0.15);
-}
-.cell-input:disabled {
-    background: #f1f5f9;
-    color: var(--text-secondary);
-    cursor: not-allowed;
-}
-.cell-input.total-input { font-weight: 600; }
+.cell-input:focus { outline:none; border-color:var(--primary); box-shadow:0 0 0 2px rgba(37,99,235,0.15); }
+.cell-input:disabled { background:#f1f5f9; color:var(--text-secondary); cursor:not-allowed; }
+.cell-input.total-input { font-weight:600; }
 
-/* 数据不全行 — 左侧橙色边框 + 浅黄背景 */
-.row-incomplete {
-    background: #fffbeb !important;
-}
-.row-incomplete td:first-child {
-    box-shadow: inset 4px 0 0 var(--warning);
-}
-
-/* 锁定行 — 左侧蓝色边框 + 浅蓝背景 */
-.row-locked {
-    background: #eff6ff !important;
-}
-.row-locked td:first-child {
-    box-shadow: inset 4px 0 0 var(--primary);
-}
-
-/* 缺失行 */
-.row-missing {
-    background: #fef2f2 !important;
-}
-.row-missing td:first-child {
-    box-shadow: inset 4px 0 0 var(--danger);
-}
+/* 行状态 */
+.row-incomplete { background:#fffbeb !important; }
+.row-incomplete td:first-child { box-shadow:inset 4px 0 0 var(--warning); }
+.row-locked { background:#eff6ff !important; }
+.row-locked td:first-child { box-shadow:inset 4px 0 0 var(--primary); }
+.row-missing { background:#fef2f2 !important; }
+.row-missing td:first-child { box-shadow:inset 4px 0 0 var(--danger); }
 
 /* 状态标识 */
 .status-badge {
-    display: inline-block;
-    padding: 0.15rem 0.5rem;
-    border-radius: 999px;
-    font-size: 0.75rem;
-    font-weight: 500;
-    white-space: nowrap;
+    display:inline-block; padding:0.15rem 0.5rem; border-radius:999px;
+    font-size:0.75rem; font-weight:500; white-space:nowrap;
 }
-.badge-locked { background: #dbeafe; color: #1e40af; }
-.badge-incomplete { background: #fef3c7; color: #92400e; }
-.badge-ok { background: #dcfce7; color: #166534; }
+.badge-locked { background:#dbeafe; color:#1e40af; }
+.badge-incomplete { background:#fef3c7; color:#92400e; }
+.badge-ok { background:#dcfce7; color:#166534; }
 
-/* 读表组间距 */
-.reading-group .month-block:not(:last-child) {
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 1rem;
+/* 表格 */
+.reading-table th, .reading-table td { padding:0.4rem 0.5rem; }
+.reading-table { margin:0; }
+
+/* 单价区 */
+.price-section {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius); padding:0.75rem;
+}
+.price-missing { border-color:var(--warning); background:#fffbeb; }
+.price-grid {
+    display:flex; gap:1rem; flex-wrap:wrap; align-items:flex-end;
+}
+.price-item { display:flex; flex-direction:column; gap:0.15rem; }
+.price-item label { font-size:0.75rem; color:var(--text-secondary); font-weight:500; }
+.price-input { width:100px; }
+.price-source-tag {
+    font-size:0.75rem; color:var(--primary); cursor:pointer;
+    background:#eff6ff; padding:0.15rem 0.5rem; border-radius:4px;
+    border:1px dashed var(--primary); white-space:nowrap;
+}
+.price-source-tag:hover { background:#dbeafe; }
+
+/* 金额预览 */
+.amount-preview {
+    background:#f8fafc; border:1px solid var(--border);
+    border-radius:var(--radius); padding:0.75rem;
+}
+.amount-grid { display:flex; gap:1.5rem; flex-wrap:wrap; }
+.amount-item { display:flex; align-items:center; gap:0.5rem; }
+.amount-value {
+    font-size:1.1rem; font-weight:700; color:var(--text);
+    font-variant-numeric:tabular-nums;
 }
 
-/* 表格紧凑 */
-.reading-table th, .reading-table td { padding: 0.4rem 0.5rem; }
-.reading-table { margin: 0; }
+/* 弹窗 */
+.modal-overlay {
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    background:rgba(0,0,0,0.5); z-index:9998;
+    display:flex; align-items:center; justify-content:center;
+}
+.modal-box {
+    background:#fff; border-radius:var(--radius); box-shadow:var(--shadow-md);
+    max-width:800px; width:95%; max-height:85vh; display:flex; flex-direction:column;
+}
+.modal-header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:1rem 1.25rem; border-bottom:1px solid var(--border);
+}
+.modal-body { padding:1rem 1.25rem; overflow-y:auto; flex:1; }
+.modal-footer {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:0.75rem 1.25rem; border-top:1px solid var(--border); flex-wrap:wrap; gap:0.5rem;
+}
+
+/* 图片选择网格 */
+.image-picker-grid {
+    display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));
+    gap:0.75rem;
+}
+.image-pick-item {
+    border:2px solid var(--border); border-radius:var(--radius);
+    overflow:hidden; cursor:pointer; transition:all 0.15s;
+}
+.image-pick-item:hover { border-color:var(--primary); box-shadow:0 0 0 2px rgba(37,99,235,0.15); }
+.image-pick-item.selected { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,0.3); }
+.image-pick-item img { width:100%; height:120px; object-fit:cover; display:block; }
+.image-pick-item .image-pick-name {
+    padding:0.25rem 0.5rem; font-size:0.7rem; color:var(--text-secondary);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
 </style>
 
 <script>
-function saveMonth(btn, userId, month) {
-    var card = btn.closest('.month-block');
-    var rows = card.querySelectorAll('tr[data-meter-id]');
-    var saves = [];
+/* === 金额实时计算 === */
+function recalcAmounts(block) {
+    var priceGrid = block.querySelector('.price-grid');
+    if (!priceGrid) return;
+    var prices = {};
+    priceGrid.querySelectorAll('.price-input').forEach(function(inp) {
+        var v = inp.value.trim();
+        prices[inp.name] = v === '' ? 0 : parseFloat(v);
+    });
 
+    block.querySelectorAll('tr[data-meter-id]').forEach(function(row) {
+        var type = row.querySelector('.tag-gen') ? 'gen' : 'grid';
+        var fields = {};
+        row.querySelectorAll('.cell-input').forEach(function(inp) {
+            var v = inp.value.trim();
+            fields[inp.name] = v === '' ? 0 : parseFloat(v);
+        });
+        var multiplier = parseFloat(row.querySelector('.num').textContent) || 1;
+        var amount =
+            (fields.sharp_peak || 0) * multiplier * (prices.sharp_peak_price || 0) +
+            (fields.peak || 0) * multiplier * (prices.peak_price || 0) +
+            (fields.flat || 0) * multiplier * (prices.flat_price || 0) +
+            (fields.valley || 0) * multiplier * (prices.valley_price || 0);
+        if (amount === 0 && prices.average_price) {
+            amount = (fields.total_kwh || 0) * multiplier * prices.average_price;
+        }
+        var el = block.querySelector('.amount-value[data-type="' + type + '"]');
+        if (el) {
+            el.textContent = amount > 0 ? '¥' + amount.toFixed(2) : '--';
+            el.style.color = amount > 0 ? 'var(--text)' : 'var(--text-secondary)';
+        }
+    });
+}
+
+// 初始化 + 监听
+document.querySelectorAll('.month-block').forEach(function(block) {
+    recalcAmounts(block);
+    block.querySelectorAll('.cell-input, .price-input').forEach(function(inp) {
+        inp.addEventListener('input', function() { recalcAmounts(block); });
+    });
+});
+
+/* === 保存（抄表 + 单价一起保存） === */
+function saveAll(btn, userId, month) {
+    var block = btn.closest('.month-block');
+    var rows = block.querySelectorAll('tr[data-meter-id]');
+    var saves = [];
     rows.forEach(function(row) {
         var meterId = row.getAttribute('data-meter-id');
         var fields = {};
         row.querySelectorAll('input.cell-input').forEach(function(inp) {
-            var val = inp.value.trim();
-            fields[inp.name] = val === '' ? null : parseFloat(val);
+            var v = inp.value.trim();
+            fields[inp.name] = v === '' ? null : parseFloat(v);
         });
         saves.push({ meter_id: parseInt(meterId), month: month, fields: fields });
     });
 
-    btn.disabled = true;
-    btn.textContent = '保存中…';
+    // 收集单价
+    var priceGrid = block.querySelector('.price-grid');
+    var prices = {};
+    var hasPrice = false;
+    priceGrid.querySelectorAll('.price-input').forEach(function(inp) {
+        var v = inp.value.trim();
+        prices[inp.name] = v === '' ? null : parseFloat(v);
+        if (v !== '') hasPrice = true;
+    });
 
-    fetch('/api/readings/batch-update', {
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+
+    // 并行保存抄表和单价
+    var p1 = fetch('/api/readings/batch-update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ updates: saves })
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-        if (data.ok) {
+    }).then(function(r) { return r.json(); });
+
+    var p2 = hasPrice ? fetch('/api/readings/update-price', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, month: month, prices: prices })
+    }).then(function(r) { return r.json(); }) : Promise.resolve({ ok: true });
+
+    Promise.all([p1, p2]).then(function(results) {
+        var allOk = results.every(function(r) { return r.ok; });
+        if (allOk) {
             btn.textContent = '已保存';
-            setTimeout(function() { btn.textContent = '保存'; btn.disabled = false; }, 1500);
+            btn.style.background = 'var(--success)';
+            setTimeout(function() {
+                btn.textContent = '保存'; btn.disabled = false;
+                btn.style.background = '';
+            }, 1500);
         } else {
-            alert('保存失败: ' + (data.error || '未知错误'));
-            btn.textContent = '保存';
-            btn.disabled = false;
+            var errs = results.filter(function(r) { return !r.ok; }).map(function(r) { return r.error; });
+            alert('保存失败: ' + errs.join('; '));
+            btn.textContent = '保存'; btn.disabled = false;
         }
-    })
-    .catch(function(e) {
+    }).catch(function(e) {
         alert('请求失败: ' + e);
-        btn.textContent = '保存';
-        btn.disabled = false;
+        btn.textContent = '保存'; btn.disabled = false;
     });
 }
 
+/* === 锁定/解锁 === */
 function toggleMonthLock(userId, month, currentlyLocked) {
     var action = currentlyLocked ? '解锁' : '锁定';
     if (!confirm('确定' + action + '用户 ' + userId + ' 的 ' + month + ' 数据？\n\n' +
-                 (currentlyLocked ? '解锁后程序可以自动更新此月数据。' : '锁定后程序不能自动更改此月数据。'))) {
+                 (currentlyLocked ? '解锁后数据可编辑，程序也可自动更新。' : '锁定后所有数据不可编辑，程序不能自动更改。'))) {
         return;
     }
-
     fetch('/api/readings/batch-lock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -305,13 +526,164 @@ function toggleMonthLock(userId, month, currentlyLocked) {
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
-        if (data.ok) {
-            location.reload();
-        } else {
-            alert('操作失败: ' + (data.error || '未知错误'));
-        }
+        if (data.ok) location.reload();
+        else alert('操作失败: ' + (data.error || '未知错误'));
     })
     .catch(function(e) { alert('请求失败: ' + e); });
 }
+
+/* === 图片选择器 === */
+var pickerState = { userId: '', month: '', selectedPath: '', selectedName: '' };
+
+function openImagePicker(btn, userId, month) {
+    pickerState = { userId: userId, month: month, selectedPath: '', selectedName: '' };
+    var modal = document.getElementById('imagePickerModal');
+    modal.style.display = 'flex';
+    document.getElementById('imagePickerLoading').style.display = '';
+    document.getElementById('imagePickerGrid').style.display = 'none';
+    document.getElementById('imagePickerEmpty').style.display = 'none';
+    document.getElementById('imagePickerFooter').style.display = 'none';
+    document.getElementById('imagePickerConfirm').disabled = true;
+    document.getElementById('imagePickerSelected').textContent = '';
+
+    fetch('/api/archive/images-by-month?month=' + encodeURIComponent(month))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            document.getElementById('imagePickerLoading').style.display = 'none';
+            if (!data.images || data.images.length === 0) {
+                document.getElementById('imagePickerEmpty').style.display = '';
+                return;
+            }
+            var grid = document.getElementById('imagePickerGrid');
+            grid.innerHTML = '';
+            grid.style.display = '';
+            document.getElementById('imagePickerFooter').style.display = '';
+
+            data.images.forEach(function(img) {
+                var item = document.createElement('div');
+                item.className = 'image-pick-item';
+                item.setAttribute('data-path', img.path);
+                item.setAttribute('data-name', img.filename);
+                item.innerHTML = '<img src="' + img.url + '" alt="' + escapeHtml(img.filename) + '" loading="lazy">' +
+                    '<div class="image-pick-name" title="' + escapeHtml(img.filename) + '">' + escapeHtml(img.filename) + '</div>';
+                item.onclick = function() { selectImage(this); };
+                grid.appendChild(item);
+            });
+        })
+        .catch(function(e) {
+            document.getElementById('imagePickerLoading').textContent = '加载失败: ' + e;
+        });
+}
+
+function selectImage(el) {
+    document.querySelectorAll('.image-pick-item.selected').forEach(function(x) { x.classList.remove('selected'); });
+    el.classList.add('selected');
+    pickerState.selectedPath = el.getAttribute('data-path');
+    pickerState.selectedName = el.getAttribute('data-name');
+    document.getElementById('imagePickerSelected').textContent = '已选: ' + pickerState.selectedName;
+    document.getElementById('imagePickerConfirm').disabled = false;
+}
+
+function confirmImagePick() {
+    if (!pickerState.selectedPath) return;
+    var btn = document.getElementById('imagePickerConfirm');
+    btn.disabled = true;
+    btn.textContent = 'OCR 识别中...';
+
+    fetch('/api/readings/ocr-extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            image_path: pickerState.selectedPath,
+            user_id: pickerState.userId,
+            month: pickerState.month
+        })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.ok) {
+            closeImagePicker();
+            // 填充单价到对应月份
+            var block = document.querySelector('.month-block[data-user-id="' + pickerState.userId + '"][data-month="' + pickerState.month + '"]');
+            if (block && data.prices) {
+                var pg = block.querySelector('.price-grid');
+                Object.keys(data.prices).forEach(function(k) {
+                    var inp = pg.querySelector('[name="' + k + '"]');
+                    if (inp && data.prices[k] != null) {
+                        inp.value = data.prices[k].toFixed(4);
+                    }
+                });
+                // 更新来源标识
+                var sec = block.querySelector('.price-section');
+                sec.classList.remove('price-missing');
+                recalcAmounts(block);
+            }
+            var msg = 'OCR 提取成功！';
+            if (data.ocr_user_id && data.ocr_user_id !== pickerState.userId) {
+                msg += '\n\n注意：图片中识别的用户编号为 ' + data.ocr_user_id + '，与当前用户 ' + pickerState.userId + ' 不同。\n单价已按您选择的用户保存。';
+            }
+            alert(msg);
+        } else {
+            alert('OCR 提取失败: ' + (data.error || '未知错误'));
+            btn.textContent = 'OCR 提取单价';
+            btn.disabled = false;
+        }
+    })
+    .catch(function(e) {
+        alert('请求失败: ' + e);
+        btn.textContent = 'OCR 提取单价';
+        btn.disabled = false;
+    });
+}
+
+function closeImagePicker() {
+    document.getElementById('imagePickerModal').style.display = 'none';
+}
+
+/* === 来源图片预览 === */
+function showPriceImage(sourceFile) {
+    if (!sourceFile || sourceFile === '-') return;
+    var modal = document.getElementById('priceImageModal');
+    var img = document.getElementById('priceImageImg');
+    var loading = document.getElementById('priceImageLoading');
+    modal.style.display = 'block';
+    img.style.display = 'none';
+    loading.style.display = '';
+    document.body.style.overflow = 'hidden';
+
+    fetch('/api/archive/find-image/' + encodeURIComponent(sourceFile))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            loading.style.display = 'none';
+            if (data.found) {
+                img.src = data.url;
+                img.style.display = 'block';
+            } else {
+                loading.style.display = '';
+                loading.textContent = '未找到图片: ' + sourceFile;
+            }
+        })
+        .catch(function() {
+            loading.textContent = '加载失败';
+        });
+}
+
+function closePriceImage() {
+    document.getElementById('priceImageModal').style.display = 'none';
+    document.body.style.overflow = '';
+}
+
+function escapeHtml(s) {
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        closePriceImage();
+        closeImagePicker();
+    }
+});
 </script>
 {% endblock %}
