@@ -75,7 +75,7 @@ def _apply_cell(cell, value, font=None, fill=None, alignment=None, number_format
 
 
 def generate_bill_excel(db, project_name: str = None, user_id: str = None,
-                        month: str = None) -> io.BytesIO:
+                        month: str = None, selected_items: list = None) -> io.BytesIO:
     """生成月度电费单 Excel 文件。
 
     Args:
@@ -83,14 +83,26 @@ def generate_bill_excel(db, project_name: str = None, user_id: str = None,
         project_name: 项目名筛选
         user_id: 用户编号筛选
         month: 月份 (YYYY-MM)，不传则导出所有月份
+        selected_items: 可选，指定导出的 [{user_id, month}] 列表
 
     Returns:
         BytesIO 流，可直接发送给浏览器
     """
-    bills = db.get_monthly_bill(
-        project_name=project_name, user_id=user_id,
-        month_from=month, month_to=month,
-    )
+    if selected_items:
+        # 收集所有需要的月份范围
+        months = sorted(set(it["month"] for it in selected_items))
+        bills = db.get_monthly_bill(
+            project_name=project_name, user_id=user_id,
+            month_from=months[0], month_to=months[-1],
+        )
+        # 只保留选中的 user_id+month 组合
+        selected_keys = {(it["user_id"], it["month"]) for it in selected_items}
+        bills = [b for b in bills if (b.get("user_id"), b.get("reading_month")) in selected_keys]
+    else:
+        bills = db.get_monthly_bill(
+            project_name=project_name, user_id=user_id,
+            month_from=month, month_to=month,
+        )
 
     if not bills:
         # 返回空工作簿

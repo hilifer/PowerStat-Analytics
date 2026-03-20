@@ -1377,9 +1377,23 @@ def _register_routes(app: Flask, db: Database):
         return render_template("processed.html", records=records)
 
     # ---- 导出校验 ----
-    @app.route("/api/export/validate")
+    @app.route("/api/export/validate", methods=["GET", "POST"])
     def export_validate():
-        """校验数据完整性，返回可导出的月份和不可导出的原因。"""
+        """校验数据完整性，返回可导出的月份和不可导出的原因。
+
+        GET: 按筛选条件校验全部
+        POST: 校验指定的 user_id+month 列表 (items)
+        """
+        from collections import defaultdict
+
+        # 获取指定项或全量
+        selected_keys = None
+        if request.method == "POST":
+            data = request.get_json() or {}
+            items = data.get("items", [])
+            if items:
+                selected_keys = {(it["user_id"], it["month"]) for it in items}
+
         project = request.args.get("project") or None
         user_id = request.args.get("user_id") or None
         month = request.args.get("month") or None
@@ -1388,10 +1402,11 @@ def _register_routes(app: Flask, db: Database):
             project_name=project, user_id=user_id, reading_month=month)
 
         # 按用户+月份分组检查
-        from collections import defaultdict
         groups = defaultdict(lambda: {"gen": None, "grid": None, "price": False, "user_id": None, "project": None})
         for r in raw:
             key = (r["user_id"], r["reading_month"])
+            if selected_keys and key not in selected_keys:
+                continue
             g = groups[key]
             g["user_id"] = r["user_id"]
             g["project"] = r["project_name"]
@@ -1405,13 +1420,11 @@ def _register_routes(app: Flask, db: Database):
         exportable = []
         issues = []
         for (uid, month_val), g in sorted(groups.items()):
-            # 规则：有上网表和发电表时都要完整；只有发电表时发电表要完整
             gen_ok = g["gen"] and g["gen"]["total_kwh"] is not None
             grid_ok = g["grid"] and g["grid"]["total_kwh"] is not None
             price_ok = g["price"]
 
             if g["grid"]:
-                # 有上网表：两表都要完整
                 if gen_ok and grid_ok and price_ok:
                     exportable.append({"user_id": uid, "month": month_val, "project": g["project"]})
                 else:
@@ -1424,7 +1437,6 @@ def _register_routes(app: Flask, db: Database):
                         reasons.append("单价缺失")
                     issues.append({"user_id": uid, "month": month_val, "reasons": reasons})
             else:
-                # 无上网表：发电表要完整
                 if gen_ok and price_ok:
                     exportable.append({"user_id": uid, "month": month_val, "project": g["project"]})
                 else:
@@ -1445,16 +1457,31 @@ def _register_routes(app: Flask, db: Database):
         flash(f"CSV 已导出到 {csv_dir}", "success")
         return redirect(url_for("index"))
 
-    @app.route("/bills/export-excel")
+    @app.route("/bills/export-excel", methods=["GET", "POST"])
     def bills_export_excel():
-        """导出月度电费单 Excel 文件。"""
+        """导出月度电费单 Excel 文件。
+
+        GET: 按 project/user_id/month 筛选导出全部
+        POST: 导出指定的 user_id+month 组合 (items JSON)
+        """
+        import json
         from src.web.bill_export import generate_bill_excel
+
+        selected_items = None
+        if request.method == "POST":
+            items_json = request.form.get("items", "")
+            if items_json:
+                try:
+                    selected_items = json.loads(items_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
         project = request.args.get("project") or None
         user_id = request.args.get("user_id") or None
         month = request.args.get("month") or None
 
-        buf = generate_bill_excel(db, project_name=project, user_id=user_id, month=month)
+        buf = generate_bill_excel(db, project_name=project, user_id=user_id,
+                                  month=month, selected_items=selected_items)
 
         # 文件名
         parts = []
@@ -1462,6 +1489,12 @@ def _register_routes(app: Flask, db: Database):
             parts.append(project)
         if month:
             parts.append(month)
+        elif selected_items:
+            months = sorted(set(it["month"] for it in selected_items))
+            if len(months) == 1:
+                parts.append(months[0])
+            elif len(months) <= 3:
+                parts.append("_".join(months))
         parts.append("电费单")
         filename = "_".join(parts) + ".xlsx"
 

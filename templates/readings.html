@@ -33,6 +33,9 @@
     <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
                 background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
         <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">导出</span>
+        <label style="font-size:0.8rem; display:flex; align-items:center; gap:0.25rem; cursor:pointer; color:var(--text-secondary);">
+            <input type="checkbox" id="toggleSelectAll" onchange="toggleSelectAll(this.checked)"> 全选
+        </label>
         <button type="button" class="btn btn-primary btn-sm" onclick="doExportExcel()">导出电费单 Excel</button>
         <button type="button" class="btn btn-outline btn-sm" onclick="doExportCSV()">导出 CSV</button>
     </div>
@@ -106,7 +109,12 @@
     <div class="month-block" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
         {# ---- 月份标题栏 ---- #}
         <div class="month-header">
-            <h3 style="margin:0; font-size:1rem;">{{ month_data.month }}</h3>
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                <input type="checkbox" class="export-check"
+                       data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}"
+                       onchange="updateSelectAllState()">
+                <h3 style="margin:0; font-size:1rem;">{{ month_data.month }}</h3>
+            </div>
             <div style="display:flex; gap:0.5rem; align-items:center;">
                 <button class="btn btn-sm {% if any_locked %}btn-danger{% else %}btn-outline{% endif %}"
                         onclick="toggleMonthLock('{{ group.user_id }}', '{{ month_data.month }}', {{ 'true' if any_locked else 'false' }})"
@@ -379,6 +387,11 @@
 }
 .reading-group .month-block:not(:last-child) {
     border-bottom:1px solid var(--border); padding-bottom:1rem;
+}
+
+/* 导出选择框 */
+.export-check {
+    width:16px; height:16px; cursor:pointer; accent-color:var(--primary);
 }
 
 /* 输入框 */
@@ -780,16 +793,42 @@ document.addEventListener('keydown', function(e) {
 });
 
 /* === 导出 === */
-function doExportExcel() {
-    // 先校验数据完整性
-    var params = new URLSearchParams(window.location.search);
-    var checkUrl = '/api/export/validate?';
-    if (params.get('project')) checkUrl += 'project=' + encodeURIComponent(params.get('project')) + '&';
-    if (params.get('user_id')) checkUrl += 'user_id=' + encodeURIComponent(params.get('user_id')) + '&';
-    if (params.get('month')) checkUrl += 'month=' + encodeURIComponent(params.get('month')) + '&';
+function getSelectedItems() {
+    var items = [];
+    document.querySelectorAll('.export-check:checked').forEach(function(cb) {
+        items.push({ user_id: cb.getAttribute('data-user-id'), month: cb.getAttribute('data-month') });
+    });
+    return items;
+}
 
-    fetch(checkUrl).then(function(r) { return r.json(); }).then(function(data) {
-        var msg = '可导出 ' + data.exportable + '/' + data.total + ' 组数据。';
+function toggleSelectAll(checked) {
+    document.querySelectorAll('.export-check').forEach(function(cb) { cb.checked = checked; });
+}
+
+function updateSelectAllState() {
+    var all = document.querySelectorAll('.export-check');
+    var checked = document.querySelectorAll('.export-check:checked');
+    var toggle = document.getElementById('toggleSelectAll');
+    if (toggle) {
+        toggle.checked = all.length > 0 && checked.length === all.length;
+        toggle.indeterminate = checked.length > 0 && checked.length < all.length;
+    }
+}
+
+function doExportExcel() {
+    var selected = getSelectedItems();
+    if (selected.length === 0) {
+        alert('请先勾选要导出的月份数据');
+        return;
+    }
+
+    // 校验选中项的数据完整性
+    fetch('/api/export/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: selected })
+    }).then(function(r) { return r.json(); }).then(function(data) {
+        var msg = '已选 ' + selected.length + ' 组，可导出 ' + data.exportable + ' 组。';
         if (data.issues.length > 0) {
             msg += '\n\n以下数据不完整，将被跳过：\n';
             data.issues.slice(0, 10).forEach(function(it) {
@@ -798,16 +837,23 @@ function doExportExcel() {
             if (data.issues.length > 10) msg += '  ...及其他 ' + (data.issues.length - 10) + ' 条\n';
         }
         if (data.exportable === 0) {
-            alert('无可导出数据。\n\n' + msg);
+            alert('选中的数据均不完整，无法导出。\n\n' + msg);
             return;
         }
         if (!confirm(msg + '\n确定导出？')) return;
 
-        var exportUrl = '/bills/export-excel?';
-        if (params.get('project')) exportUrl += 'project=' + encodeURIComponent(params.get('project')) + '&';
-        if (params.get('user_id')) exportUrl += 'user_id=' + encodeURIComponent(params.get('user_id')) + '&';
-        if (params.get('month')) exportUrl += 'month=' + encodeURIComponent(params.get('month')) + '&';
-        window.location.href = exportUrl;
+        // 通过表单 POST 提交选中项导出
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = '/bills/export-excel';
+        var input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'items';
+        input.value = JSON.stringify(selected);
+        form.appendChild(input);
+        document.body.appendChild(form);
+        form.submit();
+        document.body.removeChild(form);
     }).catch(function(e) { alert('校验失败: ' + e); });
 }
 
