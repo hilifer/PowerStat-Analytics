@@ -738,7 +738,7 @@ class Database:
                    r.cur_sharp_peak, r.cur_peak, r.cur_flat, r.cur_valley, r.cur_total,
                    r.prev_sharp_peak, r.prev_peak, r.prev_flat, r.prev_valley, r.prev_total,
                    r.is_locked AS reading_locked,
-                   r.source_file,
+                   r.source_file, r.source_sheet,
                    p.sharp_peak_price, p.peak_price, p.flat_price, p.valley_price,
                    p.average_price, p.source_file AS price_source
             FROM meters m

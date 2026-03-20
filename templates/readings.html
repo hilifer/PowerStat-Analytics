@@ -263,6 +263,44 @@
                 </div>
             </div>
 
+            {# ---- 数据来源区 ---- #}
+            <details class="source-section">
+                <summary class="section-label" style="cursor:pointer; user-select:none; display:flex; align-items:center; gap:0.5rem;">
+                    <span>&#128196; 数据来源</span>
+                    <span style="font-weight:400; font-size:0.7rem; color:var(--text-secondary);">(点击展开)</span>
+                </summary>
+                <div class="source-list">
+                    {% if month_data.gen and month_data.gen.source_file %}
+                    <div class="source-item">
+                        <span class="tag tag-gen" style="font-size:0.7rem;">发电表</span>
+                        <span class="source-file" title="{{ month_data.gen.source_file }}">{{ month_data.gen.source_file }}</span>
+                        {% if month_data.gen.source_sheet %}
+                        <span class="source-sheet">/ {{ month_data.gen.source_sheet }}</span>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                    {% if month_data.grid and month_data.grid.source_file %}
+                    <div class="source-item">
+                        <span class="tag tag-grid" style="font-size:0.7rem;">上网表</span>
+                        <span class="source-file" title="{{ month_data.grid.source_file }}">{{ month_data.grid.source_file }}</span>
+                        {% if month_data.grid.source_sheet %}
+                        <span class="source-sheet">/ {{ month_data.grid.source_sheet }}</span>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                    {% if first_r and first_r.price_source %}
+                    <div class="source-item">
+                        <span class="tag" style="font-size:0.7rem; background:#e0e7ff; color:#3730a3;">单价</span>
+                        <span class="source-file price-source-link" title="{{ first_r.price_source }}"
+                              onclick="showPriceImage('{{ first_r.price_source }}')">{{ first_r.price_source }}</span>
+                    </div>
+                    {% endif %}
+                    {% if not (month_data.gen and month_data.gen.source_file) and not (month_data.grid and month_data.grid.source_file) and not (first_r and first_r.price_source) %}
+                    <div class="source-item" style="color:var(--text-secondary); font-style:italic;">暂无来源信息</div>
+                    {% endif %}
+                </div>
+            </details>
+
             {# ---- 金额预览区 ---- #}
             <div class="amount-preview">
                 <div class="section-label">金额预览 <span style="font-weight:400; font-size:0.75rem; color:var(--text-secondary);">(自动计算)</span></div>
@@ -392,6 +430,29 @@
     border:1px dashed var(--primary); white-space:nowrap;
 }
 .price-source-tag:hover { background:#dbeafe; }
+
+/* 数据来源 */
+.source-section {
+    background:#f8fafc; border:1px solid var(--border);
+    border-radius:var(--radius); padding:0; overflow:hidden;
+}
+.source-section summary {
+    padding:0.5rem 0.75rem; margin:0; list-style:none;
+}
+.source-section summary::-webkit-details-marker { display:none; }
+.source-section[open] summary { border-bottom:1px solid var(--border); }
+.source-list { padding:0.5rem 0.75rem; }
+.source-item {
+    display:flex; align-items:center; gap:0.5rem;
+    padding:0.25rem 0; font-size:0.8rem;
+}
+.source-file {
+    color:var(--text); overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; max-width:400px;
+}
+.source-sheet { color:var(--text-secondary); font-size:0.75rem; white-space:nowrap; }
+.price-source-link { color:var(--primary); cursor:pointer; border-bottom:1px dashed var(--primary); }
+.price-source-link:hover { border-bottom-style:solid; }
 
 /* 金额预览 */
 .amount-preview {
