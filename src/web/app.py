@@ -852,6 +852,98 @@ def _register_routes(app: Flask, db: Database):
             ),
         })
 
+    # ---- 抄表数据查看/编辑 ----
+    @app.route("/readings")
+    def readings():
+        sel_project = request.args.get("project", "")
+        sel_user_id = request.args.get("user_id", "")
+        sel_month = request.args.get("month", "")
+
+        raw = db.get_readings_grouped(
+            project_name=sel_project or None,
+            user_id=sel_user_id or None,
+            reading_month=sel_month or None,
+        )
+
+        # 构建 按用户→按月→发电表/上网表 的分组结构
+        from collections import OrderedDict
+        user_groups = OrderedDict()  # user_id -> {project_name, months: {month -> {gen, grid}}}
+        for r in raw:
+            uid = r["user_id"] or "unknown"
+            if uid not in user_groups:
+                user_groups[uid] = {"user_id": uid, "project_name": r["project_name"], "months_dict": OrderedDict()}
+            md = user_groups[uid]["months_dict"]
+            month = r["reading_month"]
+            if month not in md:
+                md[month] = {"month": month, "gen": None, "grid": None}
+            if r["meter_type"] == "发电表":
+                md[month]["gen"] = r
+            elif r["meter_type"] == "上网表":
+                md[month]["grid"] = r
+
+        grouped_data = []
+        for uid, gdata in user_groups.items():
+            grouped_data.append({
+                "user_id": uid,
+                "project_name": gdata["project_name"],
+                "months": list(gdata["months_dict"].values()),
+            })
+
+        return render_template("readings.html",
+                               grouped_data=grouped_data,
+                               projects=db.get_projects(),
+                               user_ids=db.get_user_ids(),
+                               months=db.get_months(),
+                               sel_project=sel_project,
+                               sel_user_id=sel_user_id,
+                               sel_month=sel_month)
+
+    @app.route("/api/readings/batch-update", methods=["POST"])
+    def readings_batch_update():
+        """批量更新抄表数据。"""
+        data = request.get_json()
+        if not data or "updates" not in data:
+            return jsonify({"ok": False, "error": "缺少 updates 参数"})
+        try:
+            for item in data["updates"]:
+                meter_id = item["meter_id"]
+                month = item["month"]
+                fields = item.get("fields", {})
+                # 检查是否锁定
+                with db.connection() as conn:
+                    row = conn.execute(
+                        "SELECT is_locked FROM monthly_readings WHERE meter_id = ? AND reading_month = ?",
+                        (meter_id, month)).fetchone()
+                    if row and row["is_locked"]:
+                        continue  # 跳过锁定记录
+                db.update_reading(meter_id, month, **fields)
+            return jsonify({"ok": True})
+        except Exception as e:
+            log.error("批量更新抄表数据失败: %s", e)
+            return jsonify({"ok": False, "error": str(e)})
+
+    @app.route("/api/readings/batch-lock", methods=["POST"])
+    def readings_batch_lock():
+        """按用户+月份批量锁定/解锁抄表数据。"""
+        data = request.get_json()
+        user_id = data.get("user_id")
+        month = data.get("month")
+        locked = data.get("locked", True)
+        if not user_id or not month:
+            return jsonify({"ok": False, "error": "缺少 user_id 或 month"})
+        try:
+            with db.connection() as conn:
+                conn.execute("""
+                    UPDATE monthly_readings SET is_locked = ?
+                    WHERE reading_month = ? AND meter_id IN (
+                        SELECT id FROM meters WHERE user_id = ?
+                    )
+                """, (1 if locked else 0, month, user_id))
+            return jsonify({"ok": True})
+        except Exception as e:
+            log.error("批量锁定失败: %s", e)
+            return jsonify({"ok": False, "error": str(e)})
+
     # ---- 归档浏览（按年月分类） ----
     @app.route("/archive")
     def archive_index():

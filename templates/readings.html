@@ -1,0 +1,317 @@
+{% extends "base.html" %}
+{% block title %}抄表数据 - PowerStat{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <span>抄表数据</span>
+</div>
+
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem; flex-wrap:wrap; gap:0.5rem;">
+    <h1 style="margin:0;">抄表数据</h1>
+</div>
+
+<!-- 筛选栏 -->
+<form method="GET" action="{{ url_for('readings') }}" class="filter-bar">
+    <div class="filter-group">
+        <label>项目</label>
+        <select name="project" class="auto-submit">
+            <option value="">全部项目</option>
+            {% for p in projects %}
+            <option value="{{ p }}" {% if sel_project == p %}selected{% endif %}>{{ p }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>用户编号</label>
+        <select name="user_id" class="auto-submit">
+            <option value="">全部用户</option>
+            {% for u in user_ids %}
+            <option value="{{ u }}" {% if sel_user_id == u %}selected{% endif %}>{{ u }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>月份</label>
+        <select name="month" class="auto-submit">
+            <option value="">全部月份</option>
+            {% for m in months %}
+            <option value="{{ m }}" {% if sel_month == m %}selected{% endif %}>{{ m }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <button type="submit" class="btn btn-secondary btn-sm">查询</button>
+    <a href="{{ url_for('readings') }}" class="btn btn-outline btn-sm">重置</a>
+</form>
+
+{% if grouped_data %}
+{% for group in grouped_data %}
+<div class="card reading-group">
+    <div class="card-header" style="flex-wrap:wrap; gap:0.5rem;">
+        <div>
+            <h2 style="margin:0;">
+                {{ group.project_name or '未分类' }}
+                <span style="font-weight:400; font-size:0.85rem; color:var(--text-secondary); margin-left:0.5rem;">
+                    用户 {{ group.user_id }}
+                </span>
+            </h2>
+        </div>
+    </div>
+
+    {% for month_data in group.months %}
+    <div class="month-block" style="margin-bottom:1.5rem;">
+        <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.5rem;">
+            <h3 style="margin:0; font-size:1rem;">{{ month_data.month }}</h3>
+            {% set any_locked = month_data.gen.reading_locked or month_data.grid.reading_locked if month_data.gen and month_data.grid else (month_data.gen.reading_locked if month_data.gen else (month_data.grid.reading_locked if month_data.grid else false)) %}
+            <button class="btn btn-sm {% if any_locked %}btn-danger{% else %}btn-outline{% endif %}"
+                    onclick="toggleMonthLock('{{ group.user_id }}', '{{ month_data.month }}', {{ 'true' if any_locked else 'false' }})"
+                    title="{{ '解锁此月数据' if any_locked else '锁定此月数据' }}">
+                {% if any_locked %}&#128274; 已锁定{% else %}&#128275; 未锁定{% endif %}
+            </button>
+            <button class="btn btn-sm btn-primary" onclick="saveMonth(this, '{{ group.user_id }}', '{{ month_data.month }}')"
+                    {% if any_locked %}disabled{% endif %}>保存</button>
+        </div>
+
+        <div class="table-wrap">
+            <table class="reading-table">
+                <thead>
+                    <tr>
+                        <th style="min-width:80px;">类型</th>
+                        <th>电表号</th>
+                        <th class="num">倍率</th>
+                        <th class="num">尖峰</th>
+                        <th class="num">峰</th>
+                        <th class="num">平</th>
+                        <th class="num">谷</th>
+                        <th class="num">总电量</th>
+                        <th>状态</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {# 发电表行 #}
+                    {% if month_data.gen %}
+                    {% set r = month_data.gen %}
+                    {% set incomplete = r.sharp_peak is none and r.peak is none and r.flat is none and r.valley is none and r.total_kwh is none %}
+                    <tr class="{% if incomplete %}row-incomplete{% endif %}{% if r.reading_locked %} row-locked{% endif %}"
+                        data-meter-id="{{ r.meter_id }}" data-month="{{ month_data.month }}">
+                        <td><span class="tag tag-gen">发电表</span></td>
+                        <td class="meter-num">{{ r.meter_number }}</td>
+                        <td class="num">{{ r.multiplier }}</td>
+                        <td class="num"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
+                            value="{{ '%.2f'|format(r.sharp_peak) if r.sharp_peak is not none else '' }}"
+                            {% if r.reading_locked %}disabled{% endif %}></td>
+                        <td class="num"><input type="number" step="0.01" class="cell-input" name="peak"
+                            value="{{ '%.2f'|format(r.peak) if r.peak is not none else '' }}"
+                            {% if r.reading_locked %}disabled{% endif %}></td>
+                        <td class="num"><input type="number" step="0.01" class="cell-input" name="flat"
+                            value="{{ '%.2f'|format(r.flat) if r.flat is not none else '' }}"
+                            {% if r.reading_locked %}disabled{% endif %}></td>
+                        <td class="num"><input type="number" step="0.01" class="cell-input" name="valley"
+                            value="{{ '%.2f'|format(r.valley) if r.valley is not none else '' }}"
+                            {% if r.reading_locked %}disabled{% endif %}></td>
+                        <td class="num"><input type="number" step="0.01" class="cell-input total-input" name="total_kwh"
+                            value="{{ '%.2f'|format(r.total_kwh) if r.total_kwh is not none else '' }}"
+                            {% if r.reading_locked %}disabled{% endif %}></td>
+                        <td>
+                            {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
+                            {% elif incomplete %}<span class="status-badge badge-incomplete">&#9888; 数据不全</span>
+                            {% else %}<span class="status-badge badge-ok">&#10003;</span>{% endif %}
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr class="row-incomplete row-missing">
+                        <td><span class="tag tag-gen">发电表</span></td>
+                        <td colspan="7" style="text-align:center; color:var(--text-secondary);">无数据</td>
+                        <td><span class="status-badge badge-incomplete">&#9888; 缺失</span></td>
+                    </tr>
+                    {% endif %}
+
+                    {# 上网表行 #}
+                    {% if month_data.grid %}
+                    {% set r = month_data.grid %}
+                    {% set incomplete = r.sharp_peak is none and r.peak is none and r.flat is none and r.valley is none and r.total_kwh is none %}
+                    <tr class="{% if incomplete %}row-incomplete{% endif %}{% if r.reading_locked %} row-locked{% endif %}"
+                        data-meter-id="{{ r.meter_id }}" data-month="{{ month_data.month }}">
+                        <td><span class="tag tag-grid">上网表</span></td>
+                        <td class="meter-num">{{ r.meter_number }}</td>
+                        <td class="num">{{ r.multiplier }}</td>
+                        <td class="num"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
+                            value="{{ '%.2f'|format(r.sharp_peak) if r.sharp_peak is not none else '' }}"
+                            {% if r.reading_locked %}disabled{% endif %}></td>
+                        <td class="num"><input type="number" step="0.01" class="cell-input" name="peak"
+                            value="{{ '%.2f'|format(r.peak) if r.peak is not none else '' }}"
+                            {% if r.reading_locked %}disabled{% endif %}></td>
+                        <td class="num"><input type="number" step="0.01" class="cell-input" name="flat"
+                            value="{{ '%.2f'|format(r.flat) if r.flat is not none else '' }}"
+                            {% if r.reading_locked %}disabled{% endif %}></td>
+                        <td class="num"><input type="number" step="0.01" class="cell-input" name="valley"
+                            value="{{ '%.2f'|format(r.valley) if r.valley is not none else '' }}"
+                            {% if r.reading_locked %}disabled{% endif %}></td>
+                        <td class="num"><input type="number" step="0.01" class="cell-input total-input" name="total_kwh"
+                            value="{{ '%.2f'|format(r.total_kwh) if r.total_kwh is not none else '' }}"
+                            {% if r.reading_locked %}disabled{% endif %}></td>
+                        <td>
+                            {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
+                            {% elif incomplete %}<span class="status-badge badge-incomplete">&#9888; 数据不全</span>
+                            {% else %}<span class="status-badge badge-ok">&#10003;</span>{% endif %}
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr class="row-incomplete row-missing">
+                        <td><span class="tag tag-grid">上网表</span></td>
+                        <td colspan="7" style="text-align:center; color:var(--text-secondary);">无数据</td>
+                        <td><span class="status-badge badge-incomplete">&#9888; 缺失</span></td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <p>暂无抄表数据</p>
+</div>
+{% endif %}
+
+<style>
+/* 内联编辑输入框 */
+.cell-input {
+    width: 90px;
+    padding: 0.2rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 0.83rem;
+    text-align: right;
+    background: #fff;
+    font-variant-numeric: tabular-nums;
+}
+.cell-input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(37,99,235,0.15);
+}
+.cell-input:disabled {
+    background: #f1f5f9;
+    color: var(--text-secondary);
+    cursor: not-allowed;
+}
+.cell-input.total-input { font-weight: 600; }
+
+/* 数据不全行 — 左侧橙色边框 + 浅黄背景 */
+.row-incomplete {
+    background: #fffbeb !important;
+}
+.row-incomplete td:first-child {
+    box-shadow: inset 4px 0 0 var(--warning);
+}
+
+/* 锁定行 — 左侧蓝色边框 + 浅蓝背景 */
+.row-locked {
+    background: #eff6ff !important;
+}
+.row-locked td:first-child {
+    box-shadow: inset 4px 0 0 var(--primary);
+}
+
+/* 缺失行 */
+.row-missing {
+    background: #fef2f2 !important;
+}
+.row-missing td:first-child {
+    box-shadow: inset 4px 0 0 var(--danger);
+}
+
+/* 状态标识 */
+.status-badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    white-space: nowrap;
+}
+.badge-locked { background: #dbeafe; color: #1e40af; }
+.badge-incomplete { background: #fef3c7; color: #92400e; }
+.badge-ok { background: #dcfce7; color: #166534; }
+
+/* 读表组间距 */
+.reading-group .month-block:not(:last-child) {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1rem;
+}
+
+/* 表格紧凑 */
+.reading-table th, .reading-table td { padding: 0.4rem 0.5rem; }
+.reading-table { margin: 0; }
+</style>
+
+<script>
+function saveMonth(btn, userId, month) {
+    var card = btn.closest('.month-block');
+    var rows = card.querySelectorAll('tr[data-meter-id]');
+    var saves = [];
+
+    rows.forEach(function(row) {
+        var meterId = row.getAttribute('data-meter-id');
+        var fields = {};
+        row.querySelectorAll('input.cell-input').forEach(function(inp) {
+            var val = inp.value.trim();
+            fields[inp.name] = val === '' ? null : parseFloat(val);
+        });
+        saves.push({ meter_id: parseInt(meterId), month: month, fields: fields });
+    });
+
+    btn.disabled = true;
+    btn.textContent = '保存中…';
+
+    fetch('/api/readings/batch-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ updates: saves })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.ok) {
+            btn.textContent = '已保存';
+            setTimeout(function() { btn.textContent = '保存'; btn.disabled = false; }, 1500);
+        } else {
+            alert('保存失败: ' + (data.error || '未知错误'));
+            btn.textContent = '保存';
+            btn.disabled = false;
+        }
+    })
+    .catch(function(e) {
+        alert('请求失败: ' + e);
+        btn.textContent = '保存';
+        btn.disabled = false;
+    });
+}
+
+function toggleMonthLock(userId, month, currentlyLocked) {
+    var action = currentlyLocked ? '解锁' : '锁定';
+    if (!confirm('确定' + action + '用户 ' + userId + ' 的 ' + month + ' 数据？\n\n' +
+                 (currentlyLocked ? '解锁后程序可以自动更新此月数据。' : '锁定后程序不能自动更改此月数据。'))) {
+        return;
+    }
+
+    fetch('/api/readings/batch-lock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, month: month, locked: !currentlyLocked })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.ok) {
+            location.reload();
+        } else {
+            alert('操作失败: ' + (data.error || '未知错误'));
+        }
+    })
+    .catch(function(e) { alert('请求失败: ' + e); });
+}
+</script>
+{% endblock %}

@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS monthly_readings (
     prev_flat       REAL,  -- 上月表数：平
     prev_valley     REAL,  -- 上月表数：谷
     prev_total      REAL,  -- 上月表数：总
+    is_locked       INTEGER DEFAULT 0,               -- 锁定标志 (1=锁定, 0=未锁定)
     source_file     TEXT,
     source_sheet    TEXT,
     email_date      TIMESTAMP,
@@ -141,6 +142,8 @@ SELECT
             ELSE 0
         END,
     2) AS total_amount,
+    r.is_locked AS reading_locked,
+    m.is_locked AS meter_locked,
     r.source_file AS reading_source,
     p.source_file AS price_source
 FROM meters m
@@ -198,6 +201,11 @@ class Database:
             if col not in reading_columns:
                 log.info("迁移: 添加 monthly_readings.%s 列", col)
                 conn.execute(f"ALTER TABLE monthly_readings ADD COLUMN {col} REAL")
+
+        # 添加 monthly_readings.is_locked 列（如果缺失）
+        if "is_locked" not in reading_columns:
+            log.info("迁移: 添加 monthly_readings.is_locked 列")
+            conn.execute("ALTER TABLE monthly_readings ADD COLUMN is_locked INTEGER DEFAULT 0")
 
         # 添加 average_price 列（如果缺失）
         price_columns = {row[1] for row in conn.execute("PRAGMA table_info(price_records)").fetchall()}
@@ -257,6 +265,8 @@ class Database:
                         ELSE 0
                     END,
                 2) AS total_amount,
+                r.is_locked AS reading_locked,
+                m.is_locked AS meter_locked,
                 r.source_file AS reading_source,
                 p.source_file AS price_source
             FROM meters m
@@ -644,11 +654,20 @@ class Database:
                        prev_sharp_peak: float = None, prev_peak: float = None,
                        prev_flat: float = None, prev_valley: float = None,
                        prev_total: float = None):
-        """插入或更新月度抄表数据。"""
+        """插入或更新月度抄表数据。已锁定的记录不会被自动更新。"""
         if total_kwh is None:
             total_kwh = sum(v for v in [sharp_peak, peak, flat, valley] if v is not None)
 
         with self.connection() as conn:
+            # 检查是否已锁定
+            existing = conn.execute(
+                "SELECT is_locked FROM monthly_readings WHERE meter_id = ? AND reading_month = ?",
+                (meter_id, reading_month),
+            ).fetchone()
+            if existing and existing["is_locked"]:
+                log.debug("抄表数据已锁定，跳过: meter_id=%d, month=%s", meter_id, reading_month)
+                return
+
             conn.execute(
                 """INSERT INTO monthly_readings
                    (meter_id, reading_month, sharp_peak, peak, flat, valley, total_kwh,
@@ -682,6 +701,62 @@ class Database:
                  email_date.isoformat() if email_date else None),
             )
             log.debug("抄表数据 upsert: meter_id=%d, month=%s", meter_id, reading_month)
+
+    def update_reading(self, meter_id: int, reading_month: str, **fields):
+        """手动更新抄表数据（用于前端编辑，不受锁定限制）。"""
+        allowed = {"sharp_peak", "peak", "flat", "valley", "total_kwh",
+                   "cur_sharp_peak", "cur_peak", "cur_flat", "cur_valley", "cur_total",
+                   "prev_sharp_peak", "prev_peak", "prev_flat", "prev_valley", "prev_total"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [meter_id, reading_month]
+        with self.connection() as conn:
+            conn.execute(
+                f"UPDATE monthly_readings SET {set_clause} WHERE meter_id = ? AND reading_month = ?",
+                values,
+            )
+
+    def lock_reading(self, meter_id: int, reading_month: str, locked: bool = True):
+        """锁定/解锁某条抄表记录。"""
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE monthly_readings SET is_locked = ? WHERE meter_id = ? AND reading_month = ?",
+                (1 if locked else 0, meter_id, reading_month),
+            )
+
+    def get_readings_grouped(self, project_name: str = None, user_id: str = None,
+                             reading_month: str = None) -> list[dict]:
+        """获取抄表数据，按用户分组，发电表+上网表并排。"""
+        query = """
+            SELECT m.id AS meter_id, m.meter_number, m.asset_number, m.user_id,
+                   m.meter_type, m.multiplier, m.discount, m.project_name,
+                   m.paired_meter_id, m.is_locked AS meter_locked,
+                   r.reading_month,
+                   r.sharp_peak, r.peak, r.flat, r.valley, r.total_kwh,
+                   r.cur_sharp_peak, r.cur_peak, r.cur_flat, r.cur_valley, r.cur_total,
+                   r.prev_sharp_peak, r.prev_peak, r.prev_flat, r.prev_valley, r.prev_total,
+                   r.is_locked AS reading_locked,
+                   r.source_file
+            FROM meters m
+            JOIN monthly_readings r ON r.meter_id = m.id
+            WHERE 1=1
+        """
+        params = []
+        if project_name:
+            query += " AND m.project_name = ?"
+            params.append(project_name)
+        if user_id:
+            query += " AND m.user_id = ?"
+            params.append(user_id)
+        if reading_month:
+            query += " AND r.reading_month = ?"
+            params.append(reading_month)
+        query += " ORDER BY m.user_id, r.reading_month, m.meter_type"
+        with self.connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
 
     def upsert_price(self, user_id: str, reading_month: str,
                      sharp_peak_price: float = None, peak_price: float = None,
@@ -758,6 +833,14 @@ class Database:
         with self.connection() as conn:
             rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
+
+    def get_months(self) -> list[str]:
+        """获取所有抄表月份（降序）。"""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT reading_month FROM monthly_readings ORDER BY reading_month DESC"
+            ).fetchall()
+            return [r["reading_month"] for r in rows]
 
     def get_projects(self) -> list[str]:
         """获取所有项目名称。"""
