@@ -54,6 +54,8 @@ class OCRResult:
             "average_price": self.average_price,
             "reading_month": self.reading_month,
             "source_file": self.source_file,
+            "meter_records": self.meter_records,
+            "raw_text": self.raw_text,
         }
 
 

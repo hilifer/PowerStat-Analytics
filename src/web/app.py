@@ -1028,23 +1028,27 @@ def _register_routes(app: Flask, db: Database):
             ocr = dispatcher.ocr_engine.extract_from_image(
                 str(full_path), {"filename": full_path.name, "archive_month": month})
 
-            if not ocr.has_price_data():
-                return jsonify({"ok": False, "error": "OCR 未识别到单价数据",
-                                "ocr_user_id": ocr.user_id})
+            if not ocr.has_any_data():
+                return jsonify({"ok": False, "error": "OCR 未识别到任何数据",
+                                "raw_text": ocr.raw_text[:500] if ocr.raw_text else ""})
 
-            # 用前端指定的 user_id 和 month（人工已确认），不依赖 OCR 的提取结果
-            db.upsert_price(
-                user_id=user_id,
-                reading_month=month,
-                sharp_peak_price=ocr.sharp_peak_price,
-                peak_price=ocr.peak_price,
-                flat_price=ocr.flat_price,
-                valley_price=ocr.valley_price,
-                average_price=ocr.average_price,
-                source_file=full_path.name,
-            )
+            # 有单价时保存到数据库
+            if ocr.has_price_data():
+                db.upsert_price(
+                    user_id=user_id,
+                    reading_month=month,
+                    sharp_peak_price=ocr.sharp_peak_price,
+                    peak_price=ocr.peak_price,
+                    flat_price=ocr.flat_price,
+                    valley_price=ocr.valley_price,
+                    average_price=ocr.average_price,
+                    source_file=full_path.name,
+                )
+
+            # 返回所有提取到的数据
             return jsonify({
                 "ok": True,
+                "has_prices": ocr.has_price_data(),
                 "prices": {
                     "sharp_peak_price": ocr.sharp_peak_price,
                     "peak_price": ocr.peak_price,
@@ -1053,7 +1057,10 @@ def _register_routes(app: Flask, db: Database):
                     "average_price": ocr.average_price,
                 },
                 "ocr_user_id": ocr.user_id,
+                "reading_month": ocr.reading_month,
+                "meter_records": ocr.meter_records or [],
                 "source_file": full_path.name,
+                "raw_text": ocr.raw_text[:1000] if ocr.raw_text else "",
             })
         except Exception as e:
             log.error("手动 OCR 提取失败: %s", e)
@@ -1242,38 +1249,51 @@ def _register_routes(app: Flask, db: Database):
 
     @app.route("/api/archive/preview/<filename>")
     def archive_file_preview(filename):
-        """预览归档文件：图片返回 URL，Excel/PDF 转 HTML 表格。"""
+        """预览文件：图片返回 URL，Excel/PDF 转 HTML 表格。搜索 temp 和 archive。"""
+        temp_dir = Path(config.get("attachments", "temp_dir",
+                                   default="output/temp_attachments"))
         archive_root = Path(config.get("storage", "archive_root",
                                        default="output/archive"))
         IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
         EXCEL_EXTS = {".xlsx", ".xls", ".csv"}
 
-        # 查找文件
+        # 查找文件（优先 temp，再 archive；精确匹配优先）
         found = None
-        if archive_root.exists():
-            for f in archive_root.rglob("*"):
+        found_root = None
+        found_prefix = None
+        for scan_root, prefix in [(temp_dir, "temp"), (archive_root, "archive")]:
+            if not scan_root.exists():
+                continue
+            for f in scan_root.rglob("*"):
                 if f.is_file() and f.name == filename:
-                    found = f
+                    found, found_root, found_prefix = f, scan_root, prefix
                     break
-            if not found:
-                stem = Path(filename).stem
-                for f in archive_root.rglob("*"):
+            if found:
+                break
+        if not found:
+            stem = Path(filename).stem
+            for scan_root, prefix in [(temp_dir, "temp"), (archive_root, "archive")]:
+                if not scan_root.exists():
+                    continue
+                for f in scan_root.rglob("*"):
                     if f.is_file() and stem in f.stem:
-                        found = f
+                        found, found_root, found_prefix = f, scan_root, prefix
                         break
+                if found:
+                    break
 
         if not found:
             return jsonify({"found": False})
 
-        rel = found.relative_to(archive_root)
+        rel = found.relative_to(found_root)
         ext = found.suffix.lower()
-        download_url = url_for("archive_download", filepath=str(rel))
+        download_url = url_for("file_image", source=found_prefix, filepath=str(rel))
 
         if ext in IMAGE_EXTS:
             return jsonify({
                 "found": True,
                 "type": "image",
-                "url": url_for("archive_image", filepath=str(rel)),
+                "url": url_for("file_image", source=found_prefix, filepath=str(rel)),
                 "download_url": download_url,
                 "filename": found.name,
             })
@@ -1324,7 +1344,7 @@ def _register_routes(app: Flask, db: Database):
             return jsonify({
                 "found": True,
                 "type": "pdf",
-                "url": url_for("archive_image", filepath=str(rel)),
+                "url": url_for("file_image", source=found_prefix, filepath=str(rel)),
                 "download_url": download_url,
                 "filename": found.name,
             })

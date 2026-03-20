@@ -234,7 +234,7 @@
                     </span>
                     <div style="display:flex; gap:0.5rem; align-items:center;">
                         {% if first_r and first_r.price_source %}
-                        <span class="price-source-tag" onclick="showPriceImage('{{ first_r.price_source }}')" title="点击查看来源图片">
+                        <span class="price-source-tag" onclick="showSourcePreview('{{ first_r.price_source }}')" title="点击查看来源图片">
                             &#128065; {{ first_r.price_source|truncate(25) }}
                         </span>
                         {% endif %}
@@ -281,7 +281,8 @@
                     {% if month_data.gen and month_data.gen.source_file %}
                     <div class="source-item">
                         <span class="tag tag-gen" style="font-size:0.7rem;">发电表</span>
-                        <span class="source-file" title="{{ month_data.gen.source_file }}">{{ month_data.gen.source_file }}</span>
+                        <span class="source-file source-link" title="点击查看: {{ month_data.gen.source_file }}"
+                              onclick="showSourcePreview('{{ month_data.gen.source_file }}')">{{ month_data.gen.source_file }}</span>
                         {% if month_data.gen.source_sheet %}
                         <span class="source-sheet">/ {{ month_data.gen.source_sheet }}</span>
                         {% endif %}
@@ -290,7 +291,8 @@
                     {% if month_data.grid and month_data.grid.source_file %}
                     <div class="source-item">
                         <span class="tag tag-grid" style="font-size:0.7rem;">上网表</span>
-                        <span class="source-file" title="{{ month_data.grid.source_file }}">{{ month_data.grid.source_file }}</span>
+                        <span class="source-file source-link" title="点击查看: {{ month_data.grid.source_file }}"
+                              onclick="showSourcePreview('{{ month_data.grid.source_file }}')">{{ month_data.grid.source_file }}</span>
                         {% if month_data.grid.source_sheet %}
                         <span class="source-sheet">/ {{ month_data.grid.source_sheet }}</span>
                         {% endif %}
@@ -299,8 +301,8 @@
                     {% if first_r and first_r.price_source %}
                     <div class="source-item">
                         <span class="tag" style="font-size:0.7rem; background:#e0e7ff; color:#3730a3;">单价</span>
-                        <span class="source-file price-source-link" title="{{ first_r.price_source }}"
-                              onclick="showPriceImage('{{ first_r.price_source }}')">{{ first_r.price_source }}</span>
+                        <span class="source-file source-link" title="点击查看: {{ first_r.price_source }}"
+                              onclick="showSourcePreview('{{ first_r.price_source }}')">{{ first_r.price_source }}</span>
                     </div>
                     {% endif %}
                     {% if not (month_data.gen and month_data.gen.source_file) and not (month_data.grid and month_data.grid.source_file) and not (first_r and first_r.price_source) %}
@@ -366,7 +368,44 @@
     </div>
 </div>
 
-{# ---- 图片预览弹窗 ---- #}
+{# ---- OCR 结果弹窗 ---- #}
+<div id="ocrResultModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeOcrResult()">
+    <div class="modal-box" style="max-width:700px;">
+        <div class="modal-header">
+            <h3 style="margin:0;">OCR 提取结果</h3>
+            <button onclick="closeOcrResult()" style="background:none; border:none; font-size:1.5rem; cursor:pointer; color:var(--text-secondary);">&times;</button>
+        </div>
+        <div class="modal-body" style="max-height:70vh; overflow-y:auto;">
+            <div id="ocrResultContent"></div>
+        </div>
+        <div class="modal-footer">
+            <div style="font-size:0.8rem; color:var(--text-secondary);" id="ocrResultNote"></div>
+            <div style="display:flex; gap:0.5rem;">
+                <button class="btn btn-sm btn-outline" onclick="closeOcrResult()">关闭</button>
+                <button class="btn btn-sm btn-primary" id="ocrApplyBtn" onclick="applyOcrPrices()" style="display:none;">应用单价数据</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# ---- 来源文件预览弹窗 ---- #}
+<div id="sourcePreviewModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeSourcePreview()">
+    <div class="modal-box" style="max-width:900px; max-height:90vh;">
+        <div class="modal-header">
+            <h3 style="margin:0;" id="sourcePreviewTitle">文件预览</h3>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+                <a id="sourcePreviewDownload" href="#" class="btn btn-sm btn-outline" style="display:none; text-decoration:none;" download>下载</a>
+                <button onclick="closeSourcePreview()" style="background:none; border:none; font-size:1.5rem; cursor:pointer; color:var(--text-secondary);">&times;</button>
+            </div>
+        </div>
+        <div class="modal-body" style="max-height:75vh; overflow:auto; padding:0;">
+            <div id="sourcePreviewLoading" style="text-align:center; padding:3rem; color:var(--text-secondary);">加载中...</div>
+            <div id="sourcePreviewContent" style="display:none;"></div>
+        </div>
+    </div>
+</div>
+
+{# ---- 图片预览弹窗（旧版保留兼容） ---- #}
 <div id="priceImageModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%;
      background:rgba(0,0,0,0.85); z-index:9999; cursor:pointer; overflow:auto;"
      onclick="closePriceImage()">
@@ -470,8 +509,37 @@
     white-space:nowrap; max-width:400px;
 }
 .source-sheet { color:var(--text-secondary); font-size:0.75rem; white-space:nowrap; }
-.price-source-link { color:var(--primary); cursor:pointer; border-bottom:1px dashed var(--primary); }
-.price-source-link:hover { border-bottom-style:solid; }
+.source-link { color:var(--primary); cursor:pointer; border-bottom:1px dashed var(--primary); }
+.source-link:hover { border-bottom-style:solid; }
+
+/* OCR 结果样式 */
+.ocr-section { margin-bottom:1rem; }
+.ocr-section-title {
+    font-weight:600; font-size:0.85rem; color:var(--text);
+    padding:0.4rem 0; border-bottom:1px solid var(--border); margin-bottom:0.5rem;
+}
+.ocr-table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+.ocr-table td { padding:0.3rem 0.5rem; border-bottom:1px solid #f1f5f9; }
+.ocr-label { color:var(--text-secondary); white-space:nowrap; width:100px; }
+.ocr-value { font-family:'Cascadia Code','Fira Code',monospace; font-weight:500; }
+.ocr-raw-text {
+    background:#f8fafc; border:1px solid var(--border); border-radius:var(--radius);
+    padding:0.75rem; font-size:0.75rem; max-height:200px; overflow:auto;
+    white-space:pre-wrap; word-break:break-all; color:var(--text-secondary);
+    margin-top:0.5rem;
+}
+
+/* 来源预览弹窗内容 */
+.source-preview-image { max-width:100%; height:auto; display:block; margin:0 auto; }
+.source-preview-excel { padding:1rem; overflow:auto; }
+.source-preview-excel .preview-table { width:100%; border-collapse:collapse; font-size:0.8rem; }
+.source-preview-excel .preview-table td,
+.source-preview-excel .preview-table th {
+    padding:0.3rem 0.5rem; border:1px solid var(--border); text-align:left;
+    white-space:nowrap; max-width:200px; overflow:hidden; text-overflow:ellipsis;
+}
+.source-preview-excel .preview-table tr:nth-child(even) { background:#f8fafc; }
+.source-preview-error { padding:2rem; text-align:center; color:var(--text-secondary); }
 
 /* 金额预览 */
 .amount-preview {
@@ -757,6 +825,8 @@ function selectImage(el) {
     document.getElementById('imagePickerConfirm').disabled = false;
 }
 
+var ocrResultData = null; // 保存OCR结果数据
+
 function confirmImagePick() {
     if (!pickerState.selectedPath) return;
     var btn = document.getElementById('imagePickerConfirm');
@@ -774,32 +844,21 @@ function confirmImagePick() {
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
+        btn.textContent = 'OCR 提取单价';
+        btn.disabled = false;
         if (data.ok) {
             closeImagePicker();
-            // 填充单价到对应月份
-            var block = document.querySelector('.month-block[data-user-id="' + pickerState.userId + '"][data-month="' + pickerState.month + '"]');
-            if (block && data.prices) {
-                var pg = block.querySelector('.price-grid');
-                Object.keys(data.prices).forEach(function(k) {
-                    var inp = pg.querySelector('[name="' + k + '"]');
-                    if (inp && data.prices[k] != null) {
-                        inp.value = data.prices[k].toFixed(4);
-                    }
-                });
-                // 更新来源标识
-                var sec = block.querySelector('.price-section');
-                sec.classList.remove('price-missing');
-                recalcAmounts(block);
-            }
-            var msg = 'OCR 提取成功！';
-            if (data.ocr_user_id && data.ocr_user_id !== pickerState.userId) {
-                msg += '\n\n注意：图片中识别的用户编号为 ' + data.ocr_user_id + '，与当前用户 ' + pickerState.userId + ' 不同。\n单价已按您选择的用户保存。';
-            }
-            alert(msg);
+            ocrResultData = data;
+            showOcrResult(data);
         } else {
-            alert('OCR 提取失败: ' + (data.error || '未知错误'));
-            btn.textContent = 'OCR 提取单价';
-            btn.disabled = false;
+            // 即使失败也展示原始文本（如果有）
+            if (data.raw_text) {
+                closeImagePicker();
+                ocrResultData = null;
+                showOcrResult(data);
+            } else {
+                alert('OCR 提取失败: ' + (data.error || '未知错误'));
+            }
         }
     })
     .catch(function(e) {
@@ -809,11 +868,175 @@ function confirmImagePick() {
     });
 }
 
+function showOcrResult(data) {
+    var html = '';
+    var priceLabels = {
+        sharp_peak_price: '尖峰单价',
+        peak_price: '峰单价',
+        flat_price: '平单价',
+        valley_price: '谷单价',
+        average_price: '平均电价'
+    };
+
+    // 基本信息
+    html += '<div class="ocr-section">';
+    html += '<div class="ocr-section-title">基本信息</div>';
+    html += '<table class="ocr-table"><tbody>';
+    html += '<tr><td class="ocr-label">来源文件</td><td>' + escapeHtml(data.source_file || '-') + '</td></tr>';
+    if (data.ocr_user_id) {
+        var mismatch = data.ocr_user_id !== pickerState.userId;
+        html += '<tr><td class="ocr-label">识别用户编号</td><td>' + escapeHtml(data.ocr_user_id) +
+            (mismatch ? ' <span style="color:var(--danger);font-size:0.8rem;">（与当前用户 ' + escapeHtml(pickerState.userId) + ' 不同）</span>' : ' <span style="color:var(--success);">✓</span>') +
+            '</td></tr>';
+    }
+    if (data.reading_month) {
+        html += '<tr><td class="ocr-label">识别月份</td><td>' + escapeHtml(data.reading_month) + '</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    // 单价数据
+    if (data.prices) {
+        var hasAnyPrice = Object.keys(data.prices).some(function(k) { return data.prices[k] != null; });
+        html += '<div class="ocr-section">';
+        html += '<div class="ocr-section-title">单价数据' + (data.has_prices ? '' : ' <span style="color:var(--text-secondary);font-size:0.8rem;">（未识别到）</span>') + '</div>';
+        if (hasAnyPrice) {
+            html += '<table class="ocr-table"><tbody>';
+            Object.keys(priceLabels).forEach(function(k) {
+                if (data.prices[k] != null) {
+                    html += '<tr><td class="ocr-label">' + priceLabels[k] + '</td><td class="ocr-value">' +
+                        data.prices[k].toFixed(4) + ' 元/kWh</td></tr>';
+                }
+            });
+            html += '</tbody></table>';
+        } else {
+            html += '<div style="color:var(--text-secondary); font-size:0.85rem; padding:0.5rem 0;">未提取到单价</div>';
+        }
+        html += '</div>';
+    }
+
+    // 电表记录
+    if (data.meter_records && data.meter_records.length > 0) {
+        html += '<div class="ocr-section">';
+        html += '<div class="ocr-section-title">电表记录（' + data.meter_records.length + ' 条）</div>';
+        data.meter_records.forEach(function(rec, i) {
+            html += '<table class="ocr-table" style="margin-bottom:0.5rem;"><tbody>';
+            if (rec.meter_number) html += '<tr><td class="ocr-label">电表号</td><td>' + escapeHtml(rec.meter_number) + '</td></tr>';
+            if (rec.project_name) html += '<tr><td class="ocr-label">项目</td><td>' + escapeHtml(rec.project_name) + '</td></tr>';
+            var readingFields = [
+                ['sharp_peak', '尖峰读数'], ['peak', '峰读数'], ['flat', '平读数'],
+                ['valley', '谷读数'], ['total_kwh', '总电量']
+            ];
+            readingFields.forEach(function(f) {
+                if (rec[f[0]] != null) {
+                    html += '<tr><td class="ocr-label">' + f[1] + '</td><td class="ocr-value">' + rec[f[0]] + '</td></tr>';
+                }
+            });
+            html += '</tbody></table>';
+        });
+        html += '</div>';
+    }
+
+    // OCR 原始文本
+    if (data.raw_text) {
+        html += '<div class="ocr-section">';
+        html += '<details><summary class="ocr-section-title" style="cursor:pointer;">OCR 原始文本</summary>';
+        html += '<pre class="ocr-raw-text">' + escapeHtml(data.raw_text) + '</pre>';
+        html += '</details></div>';
+    }
+
+    document.getElementById('ocrResultContent').innerHTML = html;
+
+    // 应用按钮
+    var applyBtn = document.getElementById('ocrApplyBtn');
+    if (data.ok && data.has_prices) {
+        applyBtn.style.display = '';
+        document.getElementById('ocrResultNote').textContent = '单价数据已保存，点击"应用单价数据"填充到表格。';
+    } else {
+        applyBtn.style.display = 'none';
+        document.getElementById('ocrResultNote').textContent = data.ok ? '未识别到单价，其他数据仅供参考。' : ('提取失败: ' + (data.error || ''));
+    }
+
+    document.getElementById('ocrResultModal').style.display = 'flex';
+}
+
+function applyOcrPrices() {
+    if (!ocrResultData || !ocrResultData.prices) return;
+    var block = document.querySelector('.month-block[data-user-id="' + pickerState.userId + '"][data-month="' + pickerState.month + '"]');
+    if (block) {
+        var pg = block.querySelector('.price-grid');
+        Object.keys(ocrResultData.prices).forEach(function(k) {
+            var inp = pg.querySelector('[name="' + k + '"]');
+            if (inp && ocrResultData.prices[k] != null) {
+                inp.value = ocrResultData.prices[k].toFixed(4);
+            }
+        });
+        var sec = block.querySelector('.price-section');
+        sec.classList.remove('price-missing');
+        recalcAmounts(block);
+    }
+    closeOcrResult();
+}
+
+function closeOcrResult() {
+    document.getElementById('ocrResultModal').style.display = 'none';
+    ocrResultData = null;
+}
+
 function closeImagePicker() {
     document.getElementById('imagePickerModal').style.display = 'none';
 }
 
-/* === 来源图片预览 === */
+/* === 来源文件预览（支持图片/Excel/PDF） === */
+function showSourcePreview(filename) {
+    if (!filename || filename === '-') return;
+    var modal = document.getElementById('sourcePreviewModal');
+    var loading = document.getElementById('sourcePreviewLoading');
+    var content = document.getElementById('sourcePreviewContent');
+    var dlBtn = document.getElementById('sourcePreviewDownload');
+    document.getElementById('sourcePreviewTitle').textContent = filename;
+    loading.style.display = '';
+    loading.textContent = '加载中...';
+    content.style.display = 'none';
+    content.innerHTML = '';
+    dlBtn.style.display = 'none';
+    modal.style.display = 'flex';
+
+    fetch('/api/archive/preview/' + encodeURIComponent(filename))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            loading.style.display = 'none';
+            if (!data.found) {
+                content.innerHTML = '<div class="source-preview-error">未找到文件: ' + escapeHtml(filename) + '</div>';
+                content.style.display = '';
+                return;
+            }
+            if (data.download_url) {
+                dlBtn.href = data.download_url;
+                dlBtn.style.display = '';
+            }
+            if (data.type === 'image') {
+                content.innerHTML = '<img src="' + data.url + '" class="source-preview-image" alt="' + escapeHtml(data.filename) + '">';
+            } else if (data.type === 'excel') {
+                content.innerHTML = '<div class="source-preview-excel">' + data.html + '</div>';
+            } else if (data.type === 'pdf') {
+                content.innerHTML = '<iframe src="' + data.url + '" style="width:100%;height:70vh;border:none;"></iframe>';
+            } else if (data.type === 'error') {
+                content.innerHTML = '<div class="source-preview-error">' + escapeHtml(data.message) + '</div>';
+            } else {
+                content.innerHTML = '<div class="source-preview-error">不支持预览此类型文件</div>';
+            }
+            content.style.display = '';
+        })
+        .catch(function(e) {
+            loading.textContent = '加载失败: ' + e;
+        });
+}
+
+function closeSourcePreview() {
+    document.getElementById('sourcePreviewModal').style.display = 'none';
+}
+
+/* === 来源图片预览（旧版） === */
 function showPriceImage(sourceFile) {
     if (!sourceFile || sourceFile === '-') return;
     var modal = document.getElementById('priceImageModal');
