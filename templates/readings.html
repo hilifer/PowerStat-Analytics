@@ -12,8 +12,8 @@
     <h1 style="margin:0;">月度审核工作台</h1>
 </div>
 
-<!-- 数据提取操作区 -->
-<div style="display:flex; gap:1rem; margin-bottom:0.75rem; flex-wrap:wrap;">
+<!-- 操作区 -->
+<div style="display:flex; gap:1rem; margin-bottom:0.75rem; flex-wrap:wrap; align-items:center;">
     <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
                 background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
         <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">抄表数据</span>
@@ -29,6 +29,12 @@
                 onclick="startDataUpdate('incremental','prices')">增量提取</button>
         <button type="button" class="btn btn-danger btn-sm update-btn"
                 onclick="startDataUpdate('full','prices')">全量提取</button>
+    </div>
+    <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
+                background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
+        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">导出</span>
+        <button type="button" class="btn btn-primary btn-sm" onclick="doExportExcel()">导出电费单 Excel</button>
+        <button type="button" class="btn btn-outline btn-sm" onclick="doExportCSV()">导出 CSV</button>
     </div>
 </div>
 
@@ -96,7 +102,7 @@
     {% set first_r = month_data.gen or month_data.grid %}
     {% set any_locked = (month_data.gen.reading_locked if month_data.gen else false) or (month_data.grid.reading_locked if month_data.grid else false) %}
     {% set has_price = first_r and first_r.sharp_peak_price is not none %}
-    {% set price_missing = first_r and first_r.sharp_peak_price is none and first_r.peak_price is none and first_r.flat_price is none and first_r.valley_price is none and first_r.average_price is none %}
+    {% set price_missing = first_r and first_r.sharp_peak_price is none and first_r.peak_price is none and first_r.flat_price is none and first_r.valley_price is none %}
     <div class="month-block" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
         {# ---- 月份标题栏 ---- #}
         <div class="month-header">
@@ -252,12 +258,6 @@
                         <label>谷价</label>
                         <input type="number" step="0.0001" class="cell-input price-input" name="valley_price"
                             value="{{ '%.4f'|format(first_r.valley_price) if first_r and first_r.valley_price is not none else '' }}"
-                            {% if any_locked %}disabled{% endif %}>
-                    </div>
-                    <div class="price-item">
-                        <label>均价</label>
-                        <input type="number" step="0.0001" class="cell-input price-input" name="average_price"
-                            value="{{ '%.4f'|format(first_r.average_price) if first_r and first_r.average_price is not none else '' }}"
                             {% if any_locked %}disabled{% endif %}>
                     </div>
                 </div>
@@ -467,9 +467,6 @@ function recalcAmounts(block) {
             (fields.peak || 0) * multiplier * (prices.peak_price || 0) +
             (fields.flat || 0) * multiplier * (prices.flat_price || 0) +
             (fields.valley || 0) * multiplier * (prices.valley_price || 0);
-        if (amount === 0 && prices.average_price) {
-            amount = (fields.total_kwh || 0) * multiplier * prices.average_price;
-        }
         var el = block.querySelector('.amount-value[data-type="' + type + '"]');
         if (el) {
             el.textContent = amount > 0 ? '¥' + amount.toFixed(2) : '--';
@@ -720,6 +717,42 @@ document.addEventListener('keydown', function(e) {
         closeImagePicker();
     }
 });
+
+/* === 导出 === */
+function doExportExcel() {
+    // 先校验数据完整性
+    var params = new URLSearchParams(window.location.search);
+    var checkUrl = '/api/export/validate?';
+    if (params.get('project')) checkUrl += 'project=' + encodeURIComponent(params.get('project')) + '&';
+    if (params.get('user_id')) checkUrl += 'user_id=' + encodeURIComponent(params.get('user_id')) + '&';
+    if (params.get('month')) checkUrl += 'month=' + encodeURIComponent(params.get('month')) + '&';
+
+    fetch(checkUrl).then(function(r) { return r.json(); }).then(function(data) {
+        var msg = '可导出 ' + data.exportable + '/' + data.total + ' 组数据。';
+        if (data.issues.length > 0) {
+            msg += '\n\n以下数据不完整，将被跳过：\n';
+            data.issues.slice(0, 10).forEach(function(it) {
+                msg += '  ' + it.user_id + ' ' + it.month + ': ' + it.reasons.join('、') + '\n';
+            });
+            if (data.issues.length > 10) msg += '  ...及其他 ' + (data.issues.length - 10) + ' 条\n';
+        }
+        if (data.exportable === 0) {
+            alert('无可导出数据。\n\n' + msg);
+            return;
+        }
+        if (!confirm(msg + '\n确定导出？')) return;
+
+        var exportUrl = '/bills/export-excel?';
+        if (params.get('project')) exportUrl += 'project=' + encodeURIComponent(params.get('project')) + '&';
+        if (params.get('user_id')) exportUrl += 'user_id=' + encodeURIComponent(params.get('user_id')) + '&';
+        if (params.get('month')) exportUrl += 'month=' + encodeURIComponent(params.get('month')) + '&';
+        window.location.href = exportUrl;
+    }).catch(function(e) { alert('校验失败: ' + e); });
+}
+
+function doExportCSV() {
+    window.location.href = '/export';
+}
 
 /* === 数据提取更新 === */
 var taskLabels = { readings: '抄表数据', prices: '单价提取', all: '全部' };

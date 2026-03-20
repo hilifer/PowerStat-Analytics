@@ -1376,6 +1376,67 @@ def _register_routes(app: Flask, db: Database):
             records = [dict(r) for r in rows]
         return render_template("processed.html", records=records)
 
+    # ---- 导出校验 ----
+    @app.route("/api/export/validate")
+    def export_validate():
+        """校验数据完整性，返回可导出的月份和不可导出的原因。"""
+        project = request.args.get("project") or None
+        user_id = request.args.get("user_id") or None
+        month = request.args.get("month") or None
+
+        raw = db.get_readings_grouped(
+            project_name=project, user_id=user_id, reading_month=month)
+
+        # 按用户+月份分组检查
+        from collections import defaultdict
+        groups = defaultdict(lambda: {"gen": None, "grid": None, "price": False, "user_id": None, "project": None})
+        for r in raw:
+            key = (r["user_id"], r["reading_month"])
+            g = groups[key]
+            g["user_id"] = r["user_id"]
+            g["project"] = r["project_name"]
+            if r["meter_type"] == "发电表":
+                g["gen"] = r
+            elif r["meter_type"] == "上网表":
+                g["grid"] = r
+            if r.get("sharp_peak_price") is not None or r.get("peak_price") is not None:
+                g["price"] = True
+
+        exportable = []
+        issues = []
+        for (uid, month_val), g in sorted(groups.items()):
+            # 规则：有上网表和发电表时都要完整；只有发电表时发电表要完整
+            gen_ok = g["gen"] and g["gen"]["total_kwh"] is not None
+            grid_ok = g["grid"] and g["grid"]["total_kwh"] is not None
+            price_ok = g["price"]
+
+            if g["grid"]:
+                # 有上网表：两表都要完整
+                if gen_ok and grid_ok and price_ok:
+                    exportable.append({"user_id": uid, "month": month_val, "project": g["project"]})
+                else:
+                    reasons = []
+                    if not gen_ok:
+                        reasons.append("发电表数据不全")
+                    if not grid_ok:
+                        reasons.append("上网表数据不全")
+                    if not price_ok:
+                        reasons.append("单价缺失")
+                    issues.append({"user_id": uid, "month": month_val, "reasons": reasons})
+            else:
+                # 无上网表：发电表要完整
+                if gen_ok and price_ok:
+                    exportable.append({"user_id": uid, "month": month_val, "project": g["project"]})
+                else:
+                    reasons = []
+                    if not gen_ok:
+                        reasons.append("发电表数据不全")
+                    if not price_ok:
+                        reasons.append("单价缺失")
+                    issues.append({"user_id": uid, "month": month_val, "reasons": reasons})
+
+        return jsonify({"exportable": len(exportable), "issues": issues, "total": len(groups)})
+
     # ---- 导出 CSV ----
     @app.route("/export")
     def export_csv():
