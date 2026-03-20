@@ -13,7 +13,6 @@ from src.email_fetcher.fetcher import EmailFetcher, EmailAttachment
 from src.parsers.multi_pass import MultiPassExtractor
 from src.parsers.text_extractor import extract_meters_from_text, read_text_file
 from src.ocr.ocr_engine import OCREngine, OCRResult
-from src.archive.archiver import Archiver
 from src.visualization.charts import ChartGenerator
 from src.logger import log
 
@@ -260,7 +259,6 @@ class Pipeline:
     def __init__(self, db: Database = None):
         self.db = db or Database()
         self.dispatcher = SmartDispatcher()
-        self.archiver = Archiver(self.db)
         self.chart_gen = ChartGenerator(self.db)
 
     def run_full(self, skip_fetch: bool = False, skip_viz: bool = False):
@@ -282,13 +280,10 @@ class Pipeline:
         # 2. 智能解析所有内容并入库
         self._process_all(attachments)
 
-        # 3. 归档
-        self._archive_all(attachments)
-
-        # 4. 导出 CSV
+        # 3. 导出 CSV
         self.db.export_csv()
 
-        # 5. 生成图表
+        # 4. 生成图表
         if not skip_viz:
             self._generate_visualizations()
 
@@ -679,58 +674,6 @@ class Pipeline:
                     updates_count += 1
 
         log.info("  关联补齐完成: %d 条更新", updates_count)
-
-    def _archive_all(self, attachments: list[EmailAttachment]):
-        """归档所有附件到月份/项目目录。"""
-        log.info("[阶段3] 归档附件...")
-        for att in attachments:
-            if att.is_body:
-                continue  # 邮件正文不归档
-            month = self._infer_month_for_file(att)
-            project = self._infer_project_for_file(att)
-            self.archiver.archive_attachment(att.filepath, month, project)
-
-        self.archiver.generate_monthly_summaries()
-
-    def _infer_month_for_file(self, att: EmailAttachment) -> str:
-        """推断文件对应的月份。"""
-        import re
-        for text in [att.filename, att.email_subject]:
-            for match in re.finditer(r'(\d{4})[-_年]?(\d{1,2})', text):
-                year, month = int(match.group(1)), int(match.group(2))
-                if 2015 <= year <= 2030 and 1 <= month <= 12:
-                    return f"{year}-{str(month).zfill(2)}"
-        if att.email_date:
-            return att.email_date.strftime("%Y-%m")
-        return "unknown"
-
-    def _infer_project_for_file(self, att: EmailAttachment) -> Optional[str]:
-        """推断文件对应的项目（从已有项目列表匹配，或从文件名/邮件主题提取）。"""
-        import re
-        projects = self.db.get_projects()
-        for proj in projects:
-            if proj in att.filename or proj in att.email_subject:
-                return proj
-
-        # 从邮件主题和文件名提取项目名
-        # 策略：取中文开头到数字/日期/关键词之前的部分作为项目名
-        for text in [att.email_subject, att.filename]:
-            if not text:
-                continue
-            # 去掉 "Fwd:" / "Re:" 等前缀
-            text = re.sub(r'^(?:Fwd?|Re)\s*[:：]\s*', '', text, flags=re.IGNORECASE)
-
-            # 匹配：中文名称（在数字、日期、"电费"、"月" 之前的部分）
-            m = re.match(
-                r'([\u4e00-\u9fff、·]+?)(?:\d|电费|月|抄表|账单|统计)',
-                text.strip()
-            )
-            if m:
-                name = m.group(1).rstrip('、·')
-                if len(name) >= 2:
-                    return name
-
-        return None
 
     def _generate_visualizations(self):
         """生成可视化图表。"""

@@ -12,7 +12,7 @@ from flask import (
     jsonify, send_from_directory, flash, abort, send_file,
 )
 
-from src.archive.archiver import Archiver
+
 from src.config_loader import config
 from src.data.models import Database
 from src.logger import log
@@ -368,19 +368,11 @@ def _register_routes(app: Flask, db: Database):
                         except Exception as e:
                             log.error("配对保存失败: %s <-> %s: %s", gen_meter, grid_meter, e)
 
-                # 1.5 归档新附件（按 年月/项目/文件 目录结构）
-                _log(f"归档 {len(new_attachments)} 个新附件…")
-                archiver = Archiver(db)
                 for att, fp, date_str in new_attachments:
-                    if not att.is_body:
-                        reading_month = _infer_month(att.filename, att.email_date)
-                        project = _infer_project(db, att.filename, att.email_subject)
-                        archiver.archive_attachment(att.filepath, reading_month, project)
-
                     _mark_processed(db, fp, att.filename, att.email_subject, date_str)
                     new_count += 1
 
-                # 1.6 推理补全
+                # 1.5 推理补全
                 _log("推理补全缺失数据…")
                 db.infer_missing_data()
 
@@ -577,13 +569,6 @@ def _register_routes(app: Flask, db: Database):
 
                     _log(f"  新附件 [{new_email_count + 1}] {att.filename}")
 
-                    # 归档到 年月/项目/文件 目录
-                    if not att.is_body:
-                        reading_month = _infer_month(att.filename, att.email_date)
-                        project = _infer_project(db, att.filename, att.email_subject)
-                        archiver = Archiver(db)
-                        archiver.archive_attachment(att.filepath, reading_month, project)
-
                     _mark_processed(db, fp, att.filename, att.email_subject, date_str)
                     new_email_count += 1
 
@@ -592,7 +577,7 @@ def _register_routes(app: Flask, db: Database):
                 log.error("邮箱连接失败: %s", e)
 
             if new_email_count > 0:
-                _log(f"已下载并归档 {new_email_count} 个新附件")
+                _log(f"已下载 {new_email_count} 个新附件")
             else:
                 _log("没有新邮件附件")
 
