@@ -581,25 +581,30 @@ def _register_routes(app: Flask, db: Database):
             else:
                 _log("没有新邮件附件")
 
-            # ---- 步骤 3：扫描所有归档文件 ----
+            # ---- 步骤 3：扫描所有原始文件（邮件附件 + 归档） ----
+            temp_dir = Path(config.get("attachments", "temp_dir",
+                                       default="output/temp_attachments"))
             archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
             IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
             EXCEL_EXTS = {".xlsx", ".xls", ".csv"}
             ALL_EXTS = IMAGE_EXTS | EXCEL_EXTS | {".pdf", ".html", ".htm", ".txt", ".zip"}
+            SKIP_PREFIXES = ("~$",)  # 跳过 Office 临时文件
 
-            archive_files = []
-            if archive_root.exists():
-                for f in sorted(archive_root.rglob("*")):
-                    if f.is_file() and f.suffix.lower() in ALL_EXTS:
-                        # 支持 年月/项目/文件 和 年月/文件 两种结构
-                        rel = f.relative_to(archive_root)
-                        month_dir = rel.parts[0] if rel.parts else f.parent.name
-                        source_info = {"filename": f.name, "archive_month": month_dir}
-                        archive_files.append((str(f), source_info))
+            source_files = []
+            # 优先扫描邮件附件原始目录
+            for scan_root in [temp_dir, archive_root]:
+                if scan_root.exists():
+                    for f in sorted(scan_root.rglob("*")):
+                        if f.is_file() and f.suffix.lower() in ALL_EXTS and not f.name.startswith(SKIP_PREFIXES):
+                            rel = f.relative_to(scan_root)
+                            # 从目录名推断月份
+                            month_dir = rel.parts[0] if rel.parts else f.parent.name
+                            source_info = {"filename": f.name, "archive_month": month_dir}
+                            source_files.append((str(f), source_info))
 
-            _log(f"归档目录共 {len(archive_files)} 个文件，开始扫描…")
+            _log(f"共 {len(source_files)} 个文件（邮件附件 + 归档），开始扫描…")
 
-            if not archive_files:
+            if not source_files:
                 _log("没有文件可处理，完成")
                 status["result"] = {"readings_added": 0, "prices_added": 0, "new_emails": new_email_count}
                 status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -613,11 +618,11 @@ def _register_routes(app: Flask, db: Database):
 
             if task_type in ("readings", "all"):
                 all_sheets = []
-                _log(f"[抄表] 开始从 {len(archive_files)} 个文件中提取…")
-                for i, (fpath, sinfo) in enumerate(archive_files, 1):
+                _log(f"[抄表] 开始从 {len(source_files)} 个文件中提取…")
+                for i, (fpath, sinfo) in enumerate(source_files, 1):
                     fname = Path(fpath).name
-                    if i <= 3 or i % 10 == 0 or i == len(archive_files):
-                        _log(f"[抄表] 加载文件 [{i}/{len(archive_files)}] {fname}")
+                    if i <= 3 or i % 10 == 0 or i == len(source_files):
+                        _log(f"[抄表] 加载文件 [{i}/{len(source_files)}] {fname}")
                     try:
                         sheets = dispatcher.load_as_dataframes(fpath, sinfo)
                         all_sheets.extend(sheets)
@@ -662,8 +667,8 @@ def _register_routes(app: Flask, db: Database):
             # ---- 步骤 5：提取单价数据（图片 OCR） ----
             if task_type in ("prices", "all"):
                 all_ocr = []
-                _log(f"[单价] 开始从 {len(archive_files)} 个文件中识别图片…")
-                for i, (fpath, sinfo) in enumerate(archive_files, 1):
+                _log(f"[单价] 开始从 {len(source_files)} 个文件中识别图片…")
+                for i, (fpath, sinfo) in enumerate(source_files, 1):
                     fname = Path(fpath).name
                     file_type = dispatcher.detect_type(fpath)
                     if file_type != "image":
@@ -732,12 +737,12 @@ def _register_routes(app: Flask, db: Database):
 
             _log(f"[{task_label}] {mode_label}更新完成！"
                  f"抄表 {readings_added} 条，单价 {price_saved} 条"
-                 f"（扫描 {len(archive_files)} 个文件，OCR {ocr_count} 张，新邮件 {new_email_count} 个）")
+                 f"（扫描 {len(source_files)} 个文件，OCR {ocr_count} 张，新邮件 {new_email_count} 个）")
             status["result"] = {
                 "readings_added": readings_added,
                 "prices_added": price_saved,
                 "new_emails": new_email_count,
-                "files_scanned": len(archive_files),
+                "files_scanned": len(source_files),
                 "ocr_images": ocr_count,
             }
             status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -944,38 +949,66 @@ def _register_routes(app: Flask, db: Database):
             log.error("批量锁定失败: %s", e)
             return jsonify({"ok": False, "error": str(e)})
 
-    @app.route("/api/archive/images-by-month")
-    def archive_images_by_month():
-        """列出指定月份归档目录下的所有图片文件。"""
-        month = request.args.get("month", "")
+    @app.route("/api/files/images")
+    def files_images():
+        """列出所有（或指定关键词匹配的）邮件附件图片。"""
+        keyword = request.args.get("q", "")
+        temp_dir = Path(config.get("attachments", "temp_dir",
+                                   default="output/temp_attachments"))
         archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
         IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
         images = []
-        if month and archive_root.exists():
-            month_dir = archive_root / month
-            if month_dir.exists():
-                for f in sorted(month_dir.rglob("*")):
-                    if f.is_file() and f.suffix.lower() in IMAGE_EXTS:
-                        rel = f.relative_to(archive_root)
-                        images.append({
-                            "filename": f.name,
-                            "path": str(rel),
-                            "url": url_for("archive_image", filepath=str(rel)),
-                        })
-        return jsonify({"images": images, "month": month})
+        seen = set()
+        for scan_root, prefix in [(temp_dir, "temp"), (archive_root, "archive")]:
+            if not scan_root.exists():
+                continue
+            for f in sorted(scan_root.rglob("*")):
+                if not f.is_file() or f.suffix.lower() not in IMAGE_EXTS:
+                    continue
+                if f.name.startswith("~$"):
+                    continue
+                # 关键词过滤：匹配文件名或上级目录名
+                if keyword:
+                    path_str = str(f.relative_to(scan_root))
+                    if keyword.lower() not in path_str.lower():
+                        continue
+                rel = f.relative_to(scan_root)
+                key = f"{prefix}/{rel}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                images.append({
+                    "filename": f.name,
+                    "path": f"{prefix}/{rel}",
+                    "dir": str(rel.parent),
+                    "url": url_for("file_image", source=prefix, filepath=str(rel)),
+                })
+        return jsonify({"images": images, "total": len(images)})
 
     @app.route("/api/readings/ocr-extract", methods=["POST"])
     def readings_ocr_extract():
         """手动选择图片重新 OCR 提取单价，用户编号由前端指定（人工确认）。"""
         data = request.get_json()
-        image_path = data.get("image_path", "")  # 相对于 archive_root
+        image_path = data.get("image_path", "")  # 格式: temp/xxx 或 archive/xxx
         user_id = data.get("user_id", "")
         month = data.get("month", "")
         if not image_path or not user_id or not month:
             return jsonify({"ok": False, "error": "缺少 image_path / user_id / month"})
 
-        archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
-        full_path = archive_root / image_path
+        # 解析 source/filepath 格式
+        parts = image_path.split("/", 1)
+        if len(parts) == 2 and parts[0] in ("temp", "archive"):
+            source, rel_path = parts
+            if source == "temp":
+                root = Path(config.get("attachments", "temp_dir",
+                                       default="output/temp_attachments"))
+            else:
+                root = Path(config.get("storage", "archive_root", default="output/archive"))
+            full_path = root / rel_path
+        else:
+            # 兼容旧格式（纯 archive 相对路径）
+            archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
+            full_path = archive_root / image_path
         if not full_path.exists():
             return jsonify({"ok": False, "error": "图片文件不存在"})
 
@@ -1040,29 +1073,93 @@ def _register_routes(app: Flask, db: Database):
             log.error("更新单价失败: %s", e)
             return jsonify({"ok": False, "error": str(e)})
 
-    # ---- 归档浏览（按年月分类） ----
-    @app.route("/archive")
-    def archive_index():
-        archive_root = Path(config.get("storage", "archive_root",
-                                       default="output/archive"))
-        months = {}
-        if archive_root.exists():
-            for month_dir in sorted(archive_root.iterdir(), reverse=True):
-                if month_dir.is_dir() and not month_dir.name.startswith("."):
+    # ---- 邮件文件查看 ----
+    @app.route("/email-files")
+    def email_files():
+        temp_dir = Path(config.get("attachments", "temp_dir",
+                                   default="output/temp_attachments"))
+        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
+        email_groups = []
+        if temp_dir.exists():
+            # 顶层目录 = 邮件（日期_主题），子目录 = 附件/解压包
+            for entry in sorted(temp_dir.iterdir(), reverse=True):
+                if entry.is_dir() and not entry.name.startswith("."):
                     files = []
-                    for item in sorted(month_dir.rglob("*")):
-                        if item.is_file():
-                            rel = item.relative_to(archive_root)
+                    for item in sorted(entry.rglob("*")):
+                        if item.is_file() and not item.name.startswith("~$"):
+                            rel = item.relative_to(temp_dir)
+                            ext = item.suffix.lower()
                             files.append({
                                 "name": item.name,
                                 "path": str(rel),
                                 "size_kb": round(item.stat().st_size / 1024, 1),
-                                "subfolder": str(item.parent.relative_to(month_dir)) if item.parent != month_dir else "",
+                                "subfolder": str(item.parent.relative_to(entry)) if item.parent != entry else "",
+                                "is_image": ext in IMAGE_EXTS,
+                                "is_excel": ext in {".xlsx", ".xls", ".csv"},
+                                "ext": ext,
                             })
-                    months[month_dir.name] = files
-        return render_template("archive.html", months=months)
+                    email_groups.append({
+                        "name": entry.name,
+                        "files": files,
+                        "file_count": len(files),
+                        "image_count": sum(1 for f in files if f["is_image"]),
+                    })
+            # 顶层散文件
+            loose_files = []
+            for item in sorted(temp_dir.iterdir()):
+                if item.is_file() and not item.name.startswith("~$"):
+                    ext = item.suffix.lower()
+                    loose_files.append({
+                        "name": item.name,
+                        "path": item.name,
+                        "size_kb": round(item.stat().st_size / 1024, 1),
+                        "subfolder": "",
+                        "is_image": ext in IMAGE_EXTS,
+                        "is_excel": ext in {".xlsx", ".xls", ".csv"},
+                        "ext": ext,
+                    })
+            if loose_files:
+                email_groups.append({
+                    "name": "其他文件",
+                    "files": loose_files,
+                    "file_count": len(loose_files),
+                    "image_count": sum(1 for f in loose_files if f["is_image"]),
+                })
+        return render_template("email_files.html", email_groups=email_groups)
 
-    # ---- 归档文件下载 ----
+    @app.route("/email-files/view/<path:filepath>")
+    def email_file_view(filepath):
+        """内联查看邮件附件文件。"""
+        temp_dir = Path(config.get("attachments", "temp_dir",
+                                   default="output/temp_attachments"))
+        full_path = temp_dir / filepath
+        if not full_path.exists() or not full_path.is_file():
+            abort(404)
+        try:
+            full_path.resolve().relative_to(temp_dir.resolve())
+        except ValueError:
+            abort(403)
+        return send_from_directory(str(full_path.parent), full_path.name)
+
+    @app.route("/email-files/download/<path:filepath>")
+    def email_file_download(filepath):
+        temp_dir = Path(config.get("attachments", "temp_dir",
+                                   default="output/temp_attachments"))
+        full_path = temp_dir / filepath
+        if not full_path.exists() or not full_path.is_file():
+            abort(404)
+        try:
+            full_path.resolve().relative_to(temp_dir.resolve())
+        except ValueError:
+            abort(403)
+        return send_from_directory(str(full_path.parent), full_path.name,
+                                  as_attachment=True)
+
+    # ---- 兼容旧归档路由 ----
+    @app.route("/archive")
+    def archive_index():
+        return redirect(url_for("email_files"))
+
     @app.route("/archive/download/<path:filepath>")
     def archive_download(filepath):
         archive_root = Path(config.get("storage", "archive_root",
@@ -1078,38 +1175,60 @@ def _register_routes(app: Flask, db: Database):
         return send_from_directory(str(full_path.parent), full_path.name,
                                   as_attachment=True)
 
-    # ---- 归档图片内联显示（用于缩略图/灯箱） ----
-    @app.route("/archive/image/<path:filepath>")
-    def archive_image(filepath):
-        archive_root = Path(config.get("storage", "archive_root",
-                                       default="output/archive"))
-        full_path = archive_root / filepath
+    # ---- 文件内联显示（支持 temp_attachments 和 archive） ----
+    @app.route("/files/image/<source>/<path:filepath>")
+    def file_image(source, filepath):
+        if source == "temp":
+            root = Path(config.get("attachments", "temp_dir",
+                                   default="output/temp_attachments"))
+        elif source == "archive":
+            root = Path(config.get("storage", "archive_root",
+                                   default="output/archive"))
+        else:
+            abort(400)
+        full_path = root / filepath
         if not full_path.exists() or not full_path.is_file():
             abort(404)
         try:
-            full_path.resolve().relative_to(archive_root.resolve())
+            full_path.resolve().relative_to(root.resolve())
         except ValueError:
             abort(403)
         return send_from_directory(str(full_path.parent), full_path.name)
 
+    # ---- 兼容旧路径：归档图片内联显示 ----
+    @app.route("/archive/image/<path:filepath>")
+    def archive_image(filepath):
+        return file_image("archive", filepath)
+
+    @app.route("/api/files/find-image/<filename>")
+    def find_image(filename):
+        """根据文件名在邮件附件和归档目录中查找图片，返回内联显示 URL。"""
+        temp_dir = Path(config.get("attachments", "temp_dir",
+                                   default="output/temp_attachments"))
+        archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
+        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
+        # 精确 → 模糊，优先 temp
+        for scan_root, prefix in [(temp_dir, "temp"), (archive_root, "archive")]:
+            if not scan_root.exists():
+                continue
+            for f in scan_root.rglob("*"):
+                if f.is_file() and f.name == filename and f.suffix.lower() in IMAGE_EXTS:
+                    rel = f.relative_to(scan_root)
+                    return jsonify({"found": True, "url": url_for("file_image", source=prefix, filepath=str(rel))})
+        stem = Path(filename).stem
+        for scan_root, prefix in [(temp_dir, "temp"), (archive_root, "archive")]:
+            if not scan_root.exists():
+                continue
+            for f in scan_root.rglob("*"):
+                if f.is_file() and stem in f.stem and f.suffix.lower() in IMAGE_EXTS:
+                    rel = f.relative_to(scan_root)
+                    return jsonify({"found": True, "url": url_for("file_image", source=prefix, filepath=str(rel))})
+        return jsonify({"found": False})
+
+    # 兼容旧 API
     @app.route("/api/archive/find-image/<filename>")
     def find_archive_image(filename):
-        """根据文件名在归档目录中查找图片，返回内联显示 URL。"""
-        archive_root = Path(config.get("storage", "archive_root",
-                                       default="output/archive"))
-        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
-        if archive_root.exists():
-            for f in archive_root.rglob("*"):
-                if f.is_file() and f.name == filename and f.suffix.lower() in IMAGE_EXTS:
-                    rel = f.relative_to(archive_root)
-                    return jsonify({"found": True, "url": url_for("archive_image", filepath=str(rel))})
-            # 模糊匹配
-            stem = Path(filename).stem
-            for f in archive_root.rglob("*"):
-                if f.is_file() and stem in f.stem and f.suffix.lower() in IMAGE_EXTS:
-                    rel = f.relative_to(archive_root)
-                    return jsonify({"found": True, "url": url_for("archive_image", filepath=str(rel))})
-        return jsonify({"found": False})
+        return find_image(filename)
 
     @app.route("/api/archive/preview/<filename>")
     def archive_file_preview(filename):

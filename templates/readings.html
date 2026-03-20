@@ -12,6 +12,41 @@
     <h1 style="margin:0;">月度审核工作台</h1>
 </div>
 
+<!-- 数据提取操作区 -->
+<div style="display:flex; gap:1rem; margin-bottom:0.75rem; flex-wrap:wrap;">
+    <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
+                background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
+        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">抄表数据</span>
+        <button type="button" class="btn btn-primary btn-sm update-btn"
+                onclick="startDataUpdate('incremental','readings')">增量提取</button>
+        <button type="button" class="btn btn-danger btn-sm update-btn"
+                onclick="startDataUpdate('full','readings')">全量提取</button>
+    </div>
+    <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
+                background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
+        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">单价提取</span>
+        <button type="button" class="btn btn-primary btn-sm update-btn"
+                onclick="startDataUpdate('incremental','prices')">增量提取</button>
+        <button type="button" class="btn btn-danger btn-sm update-btn"
+                onclick="startDataUpdate('full','prices')">全量提取</button>
+    </div>
+</div>
+
+<!-- 更新进度面板 -->
+<div class="card" id="updatePanel" style="display:none; margin-bottom:1rem;">
+    <div class="card-header">
+        <div style="display:flex; align-items:center; gap:0.5rem;">
+            <div class="spinner" id="updateSpinner"></div>
+            <h2 id="updateProgress" style="margin:0; font-size:0.95rem;"></h2>
+        </div>
+    </div>
+    <div id="updateLogs"
+         style="background:#f8f9fa; border:1px solid #dee2e6; border-radius:6px;
+                padding:0.75rem; max-height:250px; overflow-y:auto;
+                font-family:monospace; font-size:0.8rem; line-height:1.5; color:#333;">
+    </div>
+</div>
+
 <!-- 筛选栏 -->
 <form method="GET" action="{{ url_for('readings') }}" class="filter-bar">
     <div class="filter-group">
@@ -546,7 +581,7 @@ function openImagePicker(btn, userId, month) {
     document.getElementById('imagePickerConfirm').disabled = true;
     document.getElementById('imagePickerSelected').textContent = '';
 
-    fetch('/api/archive/images-by-month?month=' + encodeURIComponent(month))
+    fetch('/api/files/images?q=' + encodeURIComponent(month))
         .then(function(r) { return r.json(); })
         .then(function(data) {
             document.getElementById('imagePickerLoading').style.display = 'none';
@@ -651,7 +686,7 @@ function showPriceImage(sourceFile) {
     loading.style.display = '';
     document.body.style.overflow = 'hidden';
 
-    fetch('/api/archive/find-image/' + encodeURIComponent(sourceFile))
+    fetch('/api/files/find-image/' + encodeURIComponent(sourceFile))
         .then(function(r) { return r.json(); })
         .then(function(data) {
             loading.style.display = 'none';
@@ -685,5 +720,105 @@ document.addEventListener('keydown', function(e) {
         closeImagePicker();
     }
 });
+
+/* === 数据提取更新 === */
+var taskLabels = { readings: '抄表数据', prices: '单价提取', all: '全部' };
+
+function startDataUpdate(mode, taskType) {
+    var label = taskLabels[taskType] || taskType;
+    if (mode === 'full') {
+        var warns = {
+            readings: '将清空所有抄表数据（monthly_readings），然后重新提取。',
+            prices:   '将清空所有单价记录（price_records），然后重新提取。',
+        };
+        if (!confirm(label + '全量提取\n\n' + (warns[taskType] || '') + '\n\n电表档案不受影响。确定继续？')) return;
+    }
+    var urlMap = {
+        'incremental_readings': '/api/bills/readings/incremental',
+        'full_readings':        '/api/bills/readings/full',
+        'incremental_prices':   '/api/bills/prices/incremental',
+        'full_prices':          '/api/bills/prices/full',
+    };
+    var url = urlMap[mode + '_' + taskType];
+    if (!url) return;
+
+    document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = true; });
+    var panel = document.getElementById('updatePanel');
+    var progress = document.getElementById('updateProgress');
+    var logsDiv = document.getElementById('updateLogs');
+    var spinner = document.getElementById('updateSpinner');
+    panel.style.display = '';
+    spinner.style.display = '';
+    progress.textContent = '正在启动' + label + (mode === 'full' ? '全量' : '增量') + '提取…';
+    logsDiv.innerHTML = '';
+
+    fetch(url, { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                progress.textContent = '错误: ' + data.error;
+                spinner.style.display = 'none';
+                document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+                return;
+            }
+            startUpdatePolling();
+        })
+        .catch(function(e) {
+            progress.textContent = '请求失败: ' + e;
+            spinner.style.display = 'none';
+            document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+        });
+}
+
+var updatePollTimer = null;
+function startUpdatePolling() {
+    if (updatePollTimer) return;
+    updatePollTimer = setInterval(pollUpdateStatus, 1000);
+}
+
+function pollUpdateStatus() {
+    fetch('/api/bill-refresh-status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var progress = document.getElementById('updateProgress');
+            var logsDiv = document.getElementById('updateLogs');
+            var spinner = document.getElementById('updateSpinner');
+            if (data.logs && data.logs.length) {
+                logsDiv.innerHTML = data.logs.map(function(l) { return '<div>' + escapeHtml(l) + '</div>'; }).join('');
+                logsDiv.scrollTop = logsDiv.scrollHeight;
+            }
+            if (data.running) {
+                progress.textContent = data.progress || '处理中…';
+            } else {
+                spinner.style.display = 'none';
+                progress.textContent = data.progress || '完成';
+                clearInterval(updatePollTimer);
+                updatePollTimer = null;
+                document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+                setTimeout(function() { location.reload(); }, 2000);
+            }
+        })
+        .catch(function() {});
+}
+
+// 页面加载时检查是否有正在运行的更新任务
+(function() {
+    fetch('/api/bill-refresh-status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.running) {
+                document.getElementById('updatePanel').style.display = '';
+                document.getElementById('updateProgress').textContent = data.progress || '处理中…';
+                document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = true; });
+                if (data.logs && data.logs.length) {
+                    document.getElementById('updateLogs').innerHTML = data.logs.map(function(l) {
+                        return '<div>' + escapeHtml(l) + '</div>';
+                    }).join('');
+                }
+                startUpdatePolling();
+            }
+        })
+        .catch(function() {});
+})();
 </script>
 {% endblock %}
