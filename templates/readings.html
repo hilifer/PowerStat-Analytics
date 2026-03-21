@@ -130,6 +130,7 @@
                             <th rowspan="2" class="num">倍率</th>
                             <th colspan="5" class="num" style="text-align:center; background:#f0fdf4;">正向有功</th>
                             <th colspan="5" class="num" style="text-align:center; background:#eff6ff;">反向有功</th>
+                            <th rowspan="2">来源</th>
                             <th rowspan="2">状态</th>
                         </tr>
                         <tr>
@@ -185,6 +186,12 @@
                             <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_valley"
                                 value="{{ '%.2f'|format(r.rev_valley) if r.rev_valley is not none else '' }}"
                                 {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td style="font-size:0.7rem; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                                title="{{ r.source_file or '' }}">
+                                {% if r.source_file %}
+                                <a href="javascript:void(0)" class="source-link" onclick="showSourcePreview('{{ r.source_file }}')">{{ r.source_file|truncate(18) }}</a>
+                                {% else %}-{% endif %}
+                            </td>
                             <td>
                                 {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
                                 {% elif incomplete %}<span class="status-badge badge-incomplete">&#9888; 数据不全</span>
@@ -194,7 +201,7 @@
                         {% else %}
                         <tr class="row-incomplete row-missing">
                             <td><span class="tag tag-gen">发电表</span></td>
-                            <td colspan="12" style="text-align:center; color:var(--text-secondary);">无数据</td>
+                            <td colspan="13" style="text-align:center; color:var(--text-secondary);">无数据</td>
                             <td><span class="status-badge badge-incomplete">&#9888; 缺失</span></td>
                         </tr>
                         {% endif %}
@@ -238,6 +245,12 @@
                             <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_valley"
                                 value="{{ '%.2f'|format(r.rev_valley) if r.rev_valley is not none else '' }}"
                                 {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td style="font-size:0.7rem; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                                title="{{ r.source_file or '' }}">
+                                {% if r.source_file %}
+                                <a href="javascript:void(0)" class="source-link" onclick="showSourcePreview('{{ r.source_file }}')">{{ r.source_file|truncate(18) }}</a>
+                                {% else %}-{% endif %}
+                            </td>
                             <td>
                                 {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
                                 {% elif incomplete %}<span class="status-badge badge-incomplete">&#9888; 数据不全</span>
@@ -247,7 +260,7 @@
                         {% else %}
                         <tr class="row-incomplete row-missing">
                             <td><span class="tag tag-grid">上网表</span></td>
-                            <td colspan="12" style="text-align:center; color:var(--text-secondary);">无数据</td>
+                            <td colspan="13" style="text-align:center; color:var(--text-secondary);">无数据</td>
                             <td><span class="status-badge badge-incomplete">&#9888; 缺失</span></td>
                         </tr>
                         {% endif %}

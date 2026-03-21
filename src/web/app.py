@@ -444,6 +444,7 @@ def _register_routes(app: Flask, db: Database):
     # ---- 单个电表详情 ----
     @app.route("/meters/<int:meter_id>")
     def meter_detail(meter_id):
+        from collections import OrderedDict
         with db.connection() as conn:
             meter = conn.execute("SELECT * FROM meters WHERE id = ?", (meter_id,)).fetchone()
             if not meter:
@@ -476,6 +477,38 @@ def _register_routes(app: Flask, db: Database):
                 if row:
                     paired_meter = dict(row)
 
+            # 查找配对电表的抄表数据并合并
+            paired_readings = []
+            merged_readings = OrderedDict()
+            if paired_meter:
+                paired_readings = conn.execute(
+                    """SELECT r.*, p.sharp_peak_price, p.peak_price, p.flat_price, p.valley_price
+                       FROM monthly_readings r
+                       LEFT JOIN price_records p ON p.user_id = ? AND p.reading_month = r.reading_month
+                       WHERE r.meter_id = ?
+                       ORDER BY r.reading_month""",
+                    (paired_meter.get("user_id", ""), paired_meter["id"])
+                ).fetchall()
+                paired_readings = [dict(r) for r in paired_readings]
+
+                # 确定哪个是发电表、哪个是上网表
+                if meter["meter_type"] == "发电表":
+                    gen_readings, grid_readings = readings, paired_readings
+                else:
+                    gen_readings, grid_readings = paired_readings, readings
+
+                # 按月份合并
+                all_months = set()
+                gen_by_month = {r["reading_month"]: r for r in gen_readings}
+                grid_by_month = {r["reading_month"]: r for r in grid_readings}
+                all_months.update(gen_by_month.keys())
+                all_months.update(grid_by_month.keys())
+                for month in sorted(all_months):
+                    merged_readings[month] = {
+                        "gen": gen_by_month.get(month),
+                        "grid": grid_by_month.get(month),
+                    }
+
             # 查找该用户的单价记录
             price_records = []
             if meter.get("user_id"):
@@ -486,7 +519,8 @@ def _register_routes(app: Flask, db: Database):
                 price_records = [dict(r) for r in rows]
 
         return render_template("meter_detail.html", meter=meter, readings=readings,
-                               paired_meter=paired_meter, price_records=price_records)
+                               paired_meter=paired_meter, paired_readings=paired_readings,
+                               merged_readings=merged_readings, price_records=price_records)
 
     # ---- 账单查询 ----
     @app.route("/bills")
@@ -516,7 +550,18 @@ def _register_routes(app: Flask, db: Database):
 
     @app.route("/bill-calc")
     def bill_calc():
-        """电费单计算页面：按项目+月份查看发电统计表。"""
+        """电费单计算页面：按项目+月份查看发电统计表。
+
+        计算逻辑（参照发电统计表）：
+        - 正向数据（发电量）：发电表的正向有功数据
+          电表用量 = 本月表数 - 上月表数
+          发电量 = 电表用量 × 倍率
+        - 反向数据（上网电量）：上网表的反向有功数据
+          电表用量 = 本月表数 - 上月表数
+          上网电量 = 电表用量 × 倍率
+        - 自发用电量 = 发电量 - 上网电量
+        - 金额 = 自发用电量 × 优惠后电价
+        """
         from collections import OrderedDict
 
         sel_project = request.args.get("project", "")
@@ -525,16 +570,40 @@ def _register_routes(app: Flask, db: Database):
         projects = db.get_projects()
         months = db.get_months()
 
-        bill_groups = []  # [{user_id, project_name, month, gen, grid, prices}]
+        bill_groups = []  # [{user_id, project_name, month, gen, grid, prev_gen, prev_grid, prices}]
 
         if sel_project and sel_month:
-            # 查询该项目+月份下所有用户的数据
+            # 计算上月
+            import re
+            prev_month = ""
+            m = re.match(r'(\d{4})-(\d{2})', sel_month)
+            if m:
+                y, mo = int(m.group(1)), int(m.group(2))
+                if mo == 1:
+                    prev_month = f"{y-1}-12"
+                else:
+                    prev_month = f"{y}-{str(mo-1).zfill(2)}"
+
+            # 查询当月数据
             raw = db.get_readings_grouped(
                 project_name=sel_project,
                 reading_month=sel_month,
             )
 
-            # 分组: user_id -> {gen, grid}
+            # 查询上月数据（用于计算电表用量）
+            prev_raw = []
+            if prev_month:
+                prev_raw = db.get_readings_grouped(
+                    project_name=sel_project,
+                    reading_month=prev_month,
+                )
+
+            # 上月数据按 meter_id 索引
+            prev_by_meter = {}
+            for r in prev_raw:
+                prev_by_meter[r["meter_id"]] = r
+
+            # 分组: user_id -> {gen, grid, prev_gen, prev_grid}
             user_map = OrderedDict()
             for r in raw:
                 uid = r["user_id"] or "unknown"
@@ -543,13 +612,18 @@ def _register_routes(app: Flask, db: Database):
                         "user_id": uid,
                         "project_name": r["project_name"],
                         "month": sel_month,
+                        "prev_month": prev_month,
                         "gen": None,
                         "grid": None,
+                        "prev_gen": None,
+                        "prev_grid": None,
                     }
                 if r["meter_type"] == "发电表":
                     user_map[uid]["gen"] = r
+                    user_map[uid]["prev_gen"] = prev_by_meter.get(r["meter_id"])
                 elif r["meter_type"] == "上网表":
                     user_map[uid]["grid"] = r
+                    user_map[uid]["prev_grid"] = prev_by_meter.get(r["meter_id"])
 
             bill_groups = list(user_map.values())
 
@@ -728,6 +802,22 @@ def _register_routes(app: Flask, db: Database):
                             flat=rec.get("flat"),
                             valley=rec.get("valley"),
                             total_kwh=rec.get("total_kwh"),
+                            rev_sharp_peak=rec.get("rev_sharp_peak"),
+                            rev_peak=rec.get("rev_peak"),
+                            rev_flat=rec.get("rev_flat"),
+                            rev_valley=rec.get("rev_valley"),
+                            rev_total=rec.get("rev_total"),
+                            cur_sharp_peak=rec.get("cur_sharp_peak"),
+                            cur_peak=rec.get("cur_peak"),
+                            cur_flat=rec.get("cur_flat"),
+                            cur_valley=rec.get("cur_valley"),
+                            cur_total=rec.get("cur_total"),
+                            prev_sharp_peak=rec.get("prev_sharp_peak"),
+                            prev_peak=rec.get("prev_peak"),
+                            prev_flat=rec.get("prev_flat"),
+                            prev_valley=rec.get("prev_valley"),
+                            prev_total=rec.get("prev_total"),
+                            stat_date=rec.get("stat_date"),
                             source_file=rec.get("source_file"),
                             source_sheet=rec.get("source_sheet"),
                         )
