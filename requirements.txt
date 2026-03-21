@@ -8,9 +8,9 @@ xlrd>=2.0.1
 # PDF 解析
 pdfplumber>=0.10.3
 
-# OCR (任选其一)
-# paddleocr>=2.7.0
-# paddlepaddle>=2.5.0
+# OCR
+paddleocr>=3.0.0
+paddlepaddle>=3.0.0
 pytesseract>=0.3.10
 
 # 图像处理

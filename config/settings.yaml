@@ -37,7 +37,7 @@ attachments:
 # --- OCR 设置 ---
 ocr:
   # OCR 引擎: "tesseract" 或 "paddleocr"
-  engine: "tesseract"
+  engine: "paddleocr"
   # Tesseract 语言包
   tesseract_lang: "chi_sim+eng"
   # OCR 置信度阈值 (0-1)
