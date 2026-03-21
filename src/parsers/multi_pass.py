@@ -1111,8 +1111,6 @@ class MultiPassExtractor:
 
         # === 读数列映射：同时提取正向和反向 ===
         fwd_cols, rev_cols = self._map_reading_columns_dual(headers)
-        if not fwd_cols and not rev_cols:
-            return
 
         # 特殊列
         date_col = next((c for c, h in headers.items()
@@ -1121,6 +1119,27 @@ class MultiPassExtractor:
                               if self._matches_any(h, self._fwd_total_aliases)), None)
         rev_total_col = next((c for c, h in headers.items()
                               if self._matches_any(h, self._rev_total_aliases)), None)
+
+        # === 完整性校验：必须同时具备 日期 + 正向(总/尖/峰/平/谷) + 反向(总/尖/峰/平/谷) ===
+        # 缺少任何一项则放弃提取（数据不全无法抄表）
+        required_periods = {"sharp_peak", "peak", "flat", "valley"}
+        has_date = date_col is not None or self._infer_month(filepath.name, sheet_name, source_info) != "unknown"
+        has_fwd = fwd_total_col is not None and required_periods.issubset(fwd_cols.keys())
+        has_rev = rev_total_col is not None and required_periods.issubset(rev_cols.keys())
+        if not (has_date and has_fwd and has_rev):
+            missing = []
+            if not has_date:
+                missing.append("日期")
+            if not fwd_total_col:
+                missing.append("正向总")
+            if not required_periods.issubset(fwd_cols.keys()):
+                missing.append(f"正向分时({required_periods - fwd_cols.keys()})")
+            if not rev_total_col:
+                missing.append("反向总")
+            if not required_periods.issubset(rev_cols.keys()):
+                missing.append(f"反向分时({required_periods - rev_cols.keys()})")
+            log.debug(f"  [读数] 跳过 {filepath.name}/{sheet_name}: 缺少 {', '.join(missing)}")
+            return
 
         current_month = self._infer_month(filepath.name, sheet_name, source_info)
         data_start = header_idx + 1
