@@ -30,7 +30,7 @@ import pandas as pd
 
 from src.config_loader import config
 from src.logger import log
-from src.parsers.validators import clean_id, is_valid_meter_number
+from src.parsers.validators import clean_id, is_valid_meter_number, is_valid_asset_number
 
 
 # ========== 工具函数 ==========
@@ -1148,17 +1148,26 @@ class MultiPassExtractor:
             if id_source == "meter":
                 meter_number = self._find_meter_in_row(df, row_idx, id_cols)
             elif id_source == "user_id":
-                # 用户编号列的值可能就是电表号（用户确认这是合法的）
+                # 用户编号列的值可能就是电表号
                 for ic in id_cols:
                     val = clean_id(_cell_str(df.iloc[row_idx, ic]))
                     if val in self.meters:
                         meter_number = val
                         break
-                    # 表码数据：用户编号列当电表号用，按需注册
-                    if not meter_number and is_valid_meter_number(val):
-                        self._register_meter(val, filepath.name, sheet_name)
-                        meter_number = val
-                        break
+                # 用户编号未匹配到电表时，用资产号列匹配
+                if not meter_number and asset_cols:
+                    for ac in asset_cols:
+                        val = clean_id(_cell_str(df.iloc[row_idx, ac]))
+                        if val in asset_to_meter:
+                            meter_number = asset_to_meter[val]
+                            break
+                        # 资产号本身就是电表唯一标识，直接注册
+                        if val and is_valid_asset_number(val) and len(val) >= 10:
+                            self._register_meter(val, filepath.name, sheet_name)
+                            self.meters[val]["asset_number"] = val
+                            asset_to_meter[val] = val
+                            meter_number = val
+                            break
             elif id_source == "asset":
                 # 资产号反查电表号
                 for ic in id_cols:

@@ -35,39 +35,32 @@ LLM_FIXTURES = [
     #      正向有功总(kWh)|正向有功尖(kWh)|正向有功峰(kWh)|正向有功平(kWh)|正向有功谷(kWh)|
     #      正向无功总(kVarh)|
     #      反向有功总(kWh)|反向有功尖(kWh)|反向有功峰(kWh)|反向有功平(kWh)|反向有功谷(kWh)|...
+    #
+    # 注意：行1（公线专变客户）和行2（地方电厂户）共享同一个表计资产编号
+    # 03001SG00011312000002494，程序按资产号合并为一条记录。
+    # 行3（光伏发电客户）对应资产 03591SF00000002402908536。
     # ================================================================
     {
         "file": "耀嵘12月表码数据.xlsx",
         "file_path": "output/archive/unknown/耀嵘/耀嵘12月表码数据.xlsx",
-        "meter_number": "0319009900152123",
+        "meter_number": "03001SG00011312000002494",
         "reading_month": "2026-01",
         "fwd_total": 11403.54, "fwd_sharp_peak": 1149.03, "fwd_peak": 2149.65,
         "fwd_flat": 4437.61, "fwd_valley": 3667.24,
         "rev_total": 31.95, "rev_sharp_peak": 8.31, "rev_peak": 7.98,
         "rev_flat": 14.79, "rev_valley": 0.86,
-        "description": "耀嵘表码 公线专变客户 0319009900152123 2026-01",
+        "description": "耀嵘表码 资产03001SG00011312000002494 2026-01",
     },
     {
         "file": "耀嵘12月表码数据.xlsx",
         "file_path": "output/archive/unknown/耀嵘/耀嵘12月表码数据.xlsx",
-        "meter_number": "0319700356999007",
-        "reading_month": "2026-01",
-        "fwd_total": 11403.54, "fwd_sharp_peak": 1149.03, "fwd_peak": 2149.65,
-        "fwd_flat": 4437.61, "fwd_valley": 3667.24,
-        "rev_total": 31.95, "rev_sharp_peak": 8.31, "rev_peak": 7.98,
-        "rev_flat": 14.79, "rev_valley": 0.86,
-        "description": "耀嵘表码 地方电厂户 0319700356999007 2026-01",
-    },
-    {
-        "file": "耀嵘12月表码数据.xlsx",
-        "file_path": "output/archive/unknown/耀嵘/耀嵘12月表码数据.xlsx",
-        "meter_number": "0319700337706620",
+        "meter_number": "03591SF00000002402908536",
         "reading_month": "2026-01",
         "fwd_total": 2421.86, "fwd_sharp_peak": 653.03, "fwd_peak": 624.5,
         "fwd_flat": 1053.65, "fwd_valley": 90.67,
         "rev_total": 1.04, "rev_sharp_peak": 0.0, "rev_peak": 0.04,
         "rev_flat": 0.44, "rev_valley": 0.55,
-        "description": "耀嵘表码 光伏发电客户 0319700337706620 2026-01",
+        "description": "耀嵘表码 资产03591SF00000002402908536 2026-01",
     },
 
     # ================================================================
@@ -75,50 +68,51 @@ LLM_FIXTURES = [
     # 列: 电表资产号|用户编号|统计日期|正向有功总(kWh)|尖(kWh)|峰(kWh)|平(kWh)|谷(kWh)|
     #      反向有功总(kWh)|尖(kWh)|峰(kWh)|平(kWh)|谷(kWh)
     # 含2个月数据 (2026-02 和 2026-01)
+    # 电表资产号直接作为电表唯一标识
     # ================================================================
     {
         "file": "耀嵘.xls",
         "file_path": "output/archive/unknown/_未分类/耀嵘.xls",
-        "meter_number": "0946000082501856",
+        "meter_number": "09001SG00000061804340887",
         "reading_month": "2026-02",
         "fwd_total": 10828.33, "fwd_sharp_peak": 940.39, "fwd_peak": 3061.03,
         "fwd_flat": 4092.24, "fwd_valley": 2734.65,
         "rev_total": 32.05, "rev_sharp_peak": 7.21, "rev_peak": 6.28,
         "rev_flat": 18.51, "rev_valley": 0.03,
-        "description": "耀嵘.xls 0946000082501856 2026-02",
+        "description": "耀嵘.xls 资产09001SG00000061804340887 2026-02",
     },
     {
         "file": "耀嵘.xls",
         "file_path": "output/archive/unknown/_未分类/耀嵘.xls",
-        "meter_number": "0946070038961957",
+        "meter_number": "09001SF00000042207349302",
         "reading_month": "2026-02",
         "fwd_total": 2628.87, "fwd_sharp_peak": 717.44, "fwd_peak": 682.36,
         "fwd_flat": 1137.93, "fwd_valley": 91.12,
         "rev_total": 1.01, "rev_sharp_peak": 0.0, "rev_peak": 0.07,
         "rev_flat": 0.42, "rev_valley": 0.51,
-        "description": "耀嵘.xls 0946070038961957 2026-02",
+        "description": "耀嵘.xls 资产09001SF00000042207349302 2026-02",
     },
     {
         "file": "耀嵘.xls",
         "file_path": "output/archive/unknown/_未分类/耀嵘.xls",
-        "meter_number": "0946000082501856",
+        "meter_number": "09001SG00000061804340887",
         "reading_month": "2026-01",
         "fwd_total": 10671.06, "fwd_sharp_peak": 924.71, "fwd_peak": 3034.93,
         "fwd_flat": 4034.88, "fwd_valley": 2676.52,
         "rev_total": 27.92, "rev_sharp_peak": 6.4, "rev_peak": 5.7,
         "rev_flat": 15.77, "rev_valley": 0.03,
-        "description": "耀嵘.xls 0946000082501856 2026-01",
+        "description": "耀嵘.xls 资产09001SG00000061804340887 2026-01",
     },
     {
         "file": "耀嵘.xls",
         "file_path": "output/archive/unknown/_未分类/耀嵘.xls",
-        "meter_number": "0946070038961957",
+        "meter_number": "09001SF00000042207349302",
         "reading_month": "2026-01",
         "fwd_total": 2419.41, "fwd_sharp_peak": 657.21, "fwd_peak": 626.48,
         "fwd_flat": 1046.07, "fwd_valley": 89.63,
         "rev_total": 0.9, "rev_sharp_peak": 0.0, "rev_peak": 0.06,
         "rev_flat": 0.38, "rev_valley": 0.46,
-        "description": "耀嵘.xls 0946070038961957 2026-01",
+        "description": "耀嵘.xls 资产09001SF00000042207349302 2026-01",
     },
 
     # ================================================================
@@ -128,98 +122,99 @@ LLM_FIXTURES = [
     #      反向有功总(kWh)|尖(kWh)|峰(kWh)|平(kWh)|谷(kWh)
     # 26条记录，统计日期=2026-02-01
     # 选取部分代表性记录作为测试样本
+    # 电表资产号直接作为电表唯一标识
     # ================================================================
     # 公变客户
     {
         "file": "1月用户表码（全部） (洲千).xls",
         "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
-        "meter_number": "0948030028524986",
+        "meter_number": "09001SF00000042207356622",
         "reading_month": "2026-02",
         "fwd_total": 1076.68, "fwd_sharp_peak": 241.35, "fwd_peak": 308.29,
         "fwd_flat": 476.10, "fwd_valley": 50.93,
         "rev_total": 156.39, "rev_sharp_peak": 25.54, "rev_peak": 25.08,
         "rev_flat": 95.17, "rev_valley": 10.58,
-        "description": "华尔特表码 公变客户 0948030028524986",
+        "description": "华尔特表码 公变客户 资产09001SF00000042207356622",
     },
     {
         "file": "1月用户表码（全部） (洲千).xls",
         "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
-        "meter_number": "0948030037341288",
+        "meter_number": "09001SF00000042508942178",
         "reading_month": "2026-02",
         "fwd_total": 408.23, "fwd_sharp_peak": 135.90, "fwd_peak": 144.04,
         "fwd_flat": 117.98, "fwd_valley": 10.30,
         "rev_total": 66.69, "rev_sharp_peak": 9.16, "rev_peak": 9.57,
         "rev_flat": 46.44, "rev_valley": 1.50,
-        "description": "华尔特表码 公变客户(上网) 0948030037341288",
+        "description": "华尔特表码 公变客户(上网) 资产09001SF00000042508942178",
     },
     {
         "file": "1月用户表码（全部） (洲千).xls",
         "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
-        "meter_number": "0948030027271605",
+        "meter_number": "09001SF00000042508942193",
         "reading_month": "2026-02",
         "fwd_total": 266.66, "fwd_sharp_peak": 55.41, "fwd_peak": 74.91,
         "fwd_flat": 121.56, "fwd_valley": 14.78,
         "rev_total": 146.24, "rev_sharp_peak": 36.62, "rev_peak": 33.62,
         "rev_flat": 74.64, "rev_valley": 1.35,
-        "description": "华尔特表码 公变客户(上网) 0948030027271605",
+        "description": "华尔特表码 公变客户(上网) 资产09001SF00000042508942193",
     },
     # 光伏发电客户
     {
         "file": "1月用户表码（全部） (洲千).xls",
         "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
-        "meter_number": "0948030044326050",
+        "meter_number": "09001SF00000042508942176",
         "reading_month": "2026-02",
         "fwd_total": 435.15, "fwd_sharp_peak": 118.77, "fwd_peak": 113.40,
         "fwd_flat": 198.02, "fwd_valley": 4.95,
         "rev_total": 0.20, "rev_sharp_peak": 0.0, "rev_peak": 0.05,
         "rev_flat": 0.06, "rev_valley": 0.08,
-        "description": "华尔特表码 光伏发电 0948030044326050",
+        "description": "华尔特表码 光伏发电 资产09001SF00000042508942176",
     },
     {
         "file": "1月用户表码（全部） (洲千).xls",
         "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
-        "meter_number": "0948030044194534",
+        "meter_number": "09001SF00000042509164565",
         "reading_month": "2026-02",
         "fwd_total": 7074.07, "fwd_sharp_peak": 1846.27, "fwd_peak": 1849.74,
         "fwd_flat": 3291.94, "fwd_valley": 86.11,
         "rev_total": 6.16, "rev_sharp_peak": 0.0, "rev_peak": 1.11,
         "rev_flat": 2.0, "rev_valley": 3.04,
-        "description": "华尔特表码 光伏发电 0948030044194534",
+        "description": "华尔特表码 光伏发电 资产09001SF00000042509164565",
     },
     {
         "file": "1月用户表码（全部） (洲千).xls",
         "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
-        "meter_number": "0948030044235097",
+        "meter_number": "09001SF00000042509164566",
         "reading_month": "2026-02",
         "fwd_total": 5468.16, "fwd_sharp_peak": 1430.97, "fwd_peak": 1403.80,
         "fwd_flat": 2571.47, "fwd_valley": 61.91,
         "rev_total": 6.91, "rev_sharp_peak": 0.0, "rev_peak": 2.21,
         "rev_flat": 1.88, "rev_valley": 2.81,
-        "description": "华尔特表码 光伏发电 0948030044235097",
+        "description": "华尔特表码 光伏发电 资产09001SF00000042509164566",
     },
     # 地方电厂户
     {
         "file": "1月用户表码（全部） (洲千).xls",
         "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
-        "meter_number": "0948030041991233",
+        "meter_number": "09001SF00000042408595672",
         "reading_month": "2026-02",
         "fwd_total": 906.69, "fwd_sharp_peak": 230.01, "fwd_peak": 234.41,
         "fwd_flat": 410.87, "fwd_valley": 31.40,
         "rev_total": 0.33, "rev_sharp_peak": 0.0, "rev_peak": 0.04,
         "rev_flat": 0.13, "rev_valley": 0.16,
-        "description": "华尔特表码 地方电厂户 0948030041991233",
+        "description": "华尔特表码 地方电厂户 资产09001SF00000042408595672",
     },
     # Sheet1 中的记录
     {
         "file": "1月用户表码（全部） (洲千).xls",
         "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
-        "meter_number": "0948030030377367",
+        "meter_number": "09001SF00000042508942224",
         "reading_month": "2026-02",
         "fwd_total": 673.75, "fwd_sharp_peak": 78.10, "fwd_peak": 115.78,
         "fwd_flat": 242.06, "fwd_valley": 237.79,
         "rev_total": 76.29, "rev_sharp_peak": 18.72, "rev_peak": 11.07,
         "rev_flat": 46.47, "rev_valley": 0.01,
-        "description": "华尔特表码 Sheet1 公变客户 0948030030377367",
+        "description": "华尔特表码 Sheet1 公变客户 资产09001SF00000042508942224",
     },
 ]
 
