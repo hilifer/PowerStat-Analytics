@@ -79,11 +79,19 @@ class OCREngine:
 
         if self.engine_type == "paddleocr":
             try:
+                # 跳过模型托管平台连通性检查（耗时且在离线环境会阻塞）
+                os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
                 from paddleocr import PaddleOCR
-                self._engine = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+                # PaddleOCR 3.4.0+: use_angle_cls → use_textline_orientation, show_log 已移除
+                self._engine = PaddleOCR(use_textline_orientation=True, lang="ch")
                 log.info("PaddleOCR 引擎初始化成功")
             except ImportError:
                 log.warning("PaddleOCR 未安装，回退到 Tesseract")
+                self.engine_type = "tesseract"
+                self._init_engine()
+                return
+            except Exception as e:
+                log.warning("PaddleOCR 初始化失败: %s，回退到 Tesseract", e)
                 self.engine_type = "tesseract"
                 self._init_engine()
                 return
@@ -202,17 +210,24 @@ class OCREngine:
     def _run_ocr(self, filepath: str) -> str:
         """执行 OCR 识别，返回全文文本。"""
         if self.engine_type == "paddleocr":
-            ocr_result = self._engine.ocr(filepath, cls=True)
+            ocr_result = self._engine.predict(str(filepath))
             lines = []
             if ocr_result:
-                for line_result in ocr_result:
-                    if line_result:
-                        for item in line_result:
-                            if len(item) >= 2:
-                                text = item[1][0] if isinstance(item[1], (list, tuple)) else str(item[1])
-                                conf = item[1][1] if isinstance(item[1], (list, tuple)) and len(item[1]) > 1 else 1.0
-                                if conf >= self.confidence_threshold:
-                                    lines.append(text)
+                for res in ocr_result:
+                    # PaddleOCR 3.x 返回结果对象，包含 rec_texts 和 rec_scores
+                    if hasattr(res, 'rec_texts') and hasattr(res, 'rec_scores'):
+                        for text, score in zip(res.rec_texts, res.rec_scores):
+                            if score >= self.confidence_threshold:
+                                lines.append(text)
+                    else:
+                        # 兼容旧版 2.x 返回格式 [[box, (text, conf)], ...]
+                        if isinstance(res, list):
+                            for item in res:
+                                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                                    text = item[1][0] if isinstance(item[1], (list, tuple)) else str(item[1])
+                                    conf = item[1][1] if isinstance(item[1], (list, tuple)) and len(item[1]) > 1 else 1.0
+                                    if conf >= self.confidence_threshold:
+                                        lines.append(text)
             return "\n".join(lines)
 
         elif self.engine_type == "tesseract":
