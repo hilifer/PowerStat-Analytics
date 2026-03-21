@@ -902,8 +902,19 @@ class MultiPassExtractor:
                                     count += 1
                                     break
 
-            # B. 标签配对
+            # B. 标签配对（跳过表头行——表头中的"倍率"是列标题，
+            #    不是独立标签，由 section A 或转置表提取器处理）
+            #    一个 sheet 可能有多个表头行（如转置表每个 block 一个），
+            #    用关键词匹配 score>=2 判断。
+            header_kw = {"类别", "上月表数", "本月表数", "电表用理", "电表用量",
+                         "用电量", "发电量", "上网电量", "用户编号", "用户类型",
+                         "统计日期", "倍率", "尖", "峰", "平", "谷"}
             for r in range(len(df)):
+                row_cells = [_cell_str(df.iloc[r, c]) for c in range(len(df.columns))]
+                row_hdr_score = sum(1 for cell in row_cells
+                                    if cell and any(kw in cell for kw in header_kw))
+                if row_hdr_score >= 3:
+                    continue  # 跳过表头行
                 for c in range(len(df.columns)):
                     cell = _cell_str(df.iloc[r, c])
                     if not cell:
