@@ -110,25 +110,25 @@ class OCREngine:
                 self._unavailable = True
 
     def _preprocess_image(self, filepath: str):
-        """图片预处理：灰度化 + 对比度增强 + 自适应二值化，提升 OCR 准确率。"""
+        """图片预处理：保留 RGB（提升中文识别率）+ 对比度增强 + 锐化 + 放大。"""
         from PIL import Image, ImageEnhance, ImageFilter
 
         img = Image.open(filepath)
 
-        # 转灰度
-        if img.mode != "L":
-            img = img.convert("L")
+        # 保留 RGB 模式（灰度化会严重损伤中文识别率）
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
 
-        # 对比度增强 (1.5x)
+        # 对比度增强 (1.3x — 过高会丢细节)
         enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(1.5)
+        img = enhancer.enhance(1.3)
 
         # 锐化
         img = img.filter(ImageFilter.SHARPEN)
 
-        # 放大小图片（宽度 < 1000px 时放大2倍）
+        # 放大小图片（宽度 < 2000px 时放大2倍，提升细节识别）
         w, h = img.size
-        if w < 1000:
+        if w < 2000:
             img = img.resize((w * 2, h * 2), Image.LANCZOS)
 
         return img
@@ -218,8 +218,9 @@ class OCREngine:
         elif self.engine_type == "tesseract":
             # 使用预处理后的图片
             img = self._preprocess_image(filepath)
-            # 使用 PSM 6（假设为均匀的文本块）对表格类图片效果更好
-            custom_config = r'--oem 3 --psm 6'
+            # PSM 3（全自动页面分割）对混合排版的电费单效果最佳
+            # PSM 6 假设均匀文本块，会损伤中文识别
+            custom_config = r'--oem 3 --psm 3'
             text = self._engine.image_to_string(img, lang=self.tesseract_lang,
                                                  config=custom_config)
             return text

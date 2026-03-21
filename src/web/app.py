@@ -512,6 +512,77 @@ def _register_routes(app: Flask, db: Database):
                                sel_meter=meter, sel_from=month_from, sel_to=month_to,
                                refresh_status=refresh_status)
 
+    # ---- 电费单计算 ----
+
+    @app.route("/bill-calc")
+    def bill_calc():
+        """电费单计算页面：按项目+月份查看发电统计表。"""
+        from collections import OrderedDict
+
+        sel_project = request.args.get("project", "")
+        sel_month = request.args.get("month", "")
+
+        projects = db.get_projects()
+        months = db.get_months()
+
+        bill_groups = []  # [{user_id, project_name, month, gen, grid, prices}]
+
+        if sel_project and sel_month:
+            # 查询该项目+月份下所有用户的数据
+            raw = db.get_readings_grouped(
+                project_name=sel_project,
+                reading_month=sel_month,
+            )
+
+            # 分组: user_id -> {gen, grid}
+            user_map = OrderedDict()
+            for r in raw:
+                uid = r["user_id"] or "unknown"
+                if uid not in user_map:
+                    user_map[uid] = {
+                        "user_id": uid,
+                        "project_name": r["project_name"],
+                        "month": sel_month,
+                        "gen": None,
+                        "grid": None,
+                    }
+                if r["meter_type"] == "发电表":
+                    user_map[uid]["gen"] = r
+                elif r["meter_type"] == "上网表":
+                    user_map[uid]["grid"] = r
+
+            bill_groups = list(user_map.values())
+
+        return render_template("bill_calc.html",
+                               bill_groups=bill_groups,
+                               projects=projects,
+                               months=months,
+                               sel_project=sel_project,
+                               sel_month=sel_month)
+
+    @app.route("/api/bill-calc/save-prices", methods=["POST"])
+    def bill_calc_save_prices():
+        """保存电费单页面的单价数据。"""
+        data = request.get_json()
+        if not data:
+            return jsonify({"ok": False, "error": "无数据"})
+        items = data.get("items", [])
+        for item in items:
+            user_id = item.get("user_id")
+            month = item.get("month")
+            prices = item.get("prices", {})
+            if user_id and month:
+                db.upsert_price(
+                    user_id=user_id,
+                    reading_month=month,
+                    sharp_peak_price=prices.get("sharp_peak_price"),
+                    peak_price=prices.get("peak_price"),
+                    flat_price=prices.get("flat_price"),
+                    valley_price=prices.get("valley_price"),
+                    average_price=prices.get("average_price"),
+                )
+        return jsonify({"ok": True})
+
     # ---- 账单数据更新（共用核心逻辑） ----
 
     def _do_bill_update(clear_first: bool, task_type: str = "all", log_fn=None):

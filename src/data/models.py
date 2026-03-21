@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS meters (
     user_id         TEXT,                            -- 用户编号
     meter_type      TEXT NOT NULL DEFAULT '未知',     -- 上网表 / 发电表
     multiplier      REAL DEFAULT 1.0,                -- 倍率
-    discount        REAL DEFAULT 1.0,                -- 折扣系数
+    discount        REAL DEFAULT 1.0,                -- 折扣系数（如0.95表示95折）
     is_locked       INTEGER DEFAULT 0,               -- 锁定标志 (1=锁定, 0=未锁定)
     paired_meter_id INTEGER,                         -- 配对电表ID（发电表↔上网表）
     project_name    TEXT,                            -- 所属项目
