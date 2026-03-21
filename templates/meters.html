@@ -51,7 +51,7 @@
                 {{ group[0].project_name or '' }}
             </span>
         </h2>
-        <span style="font-size:0.8rem; color:var(--text-secondary);">
+        <span style="font-size:0.8rem; color:var(--text-secondary); display:flex; align-items:center; gap:0.5rem;">
             {% set gen_count = group|selectattr('meter_type', 'equalto', '发电表')|list|length %}
             {% set grid_count = group|selectattr('meter_type', 'equalto', '上网表')|list|length %}
             {% if gen_count > 0 and grid_count > 0 %}
@@ -63,6 +63,7 @@
             {% elif grid_count > 0 %}
             <span class="tag tag-grid" style="font-size:0.7rem;">上网表 {{ grid_count }}</span>
             {% endif %}
+            <a class="btn btn-outline btn-sm" style="font-size:0.7rem; padding:2px 8px; margin-left:0.25rem;" onclick="showSources('{{ uid }}')">数据来源</a>
         </span>
     </div>
     <div class="table-wrap">
@@ -179,7 +180,148 @@
 </div>
 {% endif %}
 
+<!-- 数据来源弹窗 -->
+<div id="source-modal" class="source-modal-overlay" onclick="if(event.target===this)closeSourceModal()">
+    <div class="source-modal">
+        <div class="source-modal-header">
+            <span id="source-modal-title" class="source-modal-title">数据来源</span>
+            <button class="source-modal-close" onclick="closeSourceModal()">&times;</button>
+        </div>
+        <div id="source-modal-body" class="source-modal-body">
+            <div class="source-modal-loading">加载中…</div>
+        </div>
+    </div>
+</div>
+
+<style>
+.source-modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: rgba(0,0,0,0.6);
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+}
+.source-modal {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.3);
+    max-width: 90vw;
+    max-height: 80vh;
+    width: 720px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.source-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #eee;
+    flex-shrink: 0;
+}
+.source-modal-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: #333;
+}
+.source-modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    color: #999;
+    cursor: pointer;
+    padding: 0 0.3rem;
+    line-height: 1;
+}
+.source-modal-close:hover { color: #333; }
+.source-modal-body {
+    overflow: auto;
+    padding: 1.5rem;
+    flex: 1;
+    min-height: 120px;
+}
+.source-modal-loading {
+    text-align: center;
+    padding: 2rem;
+    color: var(--text-secondary);
+}
+.source-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.source-table th {
+    background: #f5f7fa;
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 2px solid #e0e0e0;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+}
+.source-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid #f0f0f0;
+    word-break: break-all;
+}
+.source-table tr:hover td {
+    background: #f8f9ff;
+}
+</style>
+
 <script>
+function showSources(userId) {
+    var modal = document.getElementById('source-modal');
+    var body = document.getElementById('source-modal-body');
+    var title = document.getElementById('source-modal-title');
+    title.textContent = '数据来源 - 用户 ' + userId;
+    body.innerHTML = '<div class="source-modal-loading">加载中…</div>';
+    modal.style.display = 'flex';
+
+    fetch('/api/meters/sources?user_id=' + encodeURIComponent(userId))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.sources || data.sources.length === 0) {
+                body.innerHTML = '<p style="text-align:center;color:var(--text-secondary);">暂无数据来源记录</p>';
+                return;
+            }
+            var html = '<table class="source-table"><thead><tr>'
+                + '<th>电表号</th><th>类型</th><th>月份</th><th>来源文件</th><th>工作表</th>'
+                + '</tr></thead><tbody>';
+            data.sources.forEach(function(s) {
+                var typeTag = s.meter_type === '发电表'
+                    ? '<span class="tag tag-gen">' + s.meter_type + '</span>'
+                    : (s.meter_type === '上网表'
+                        ? '<span class="tag tag-grid">' + s.meter_type + '</span>'
+                        : (s.meter_type || '-'));
+                html += '<tr>'
+                    + '<td>' + (s.meter_number || '-') + '</td>'
+                    + '<td>' + typeTag + '</td>'
+                    + '<td>' + (s.reading_month || '-') + '</td>'
+                    + '<td>' + (s.source_file || '-') + '</td>'
+                    + '<td>' + (s.source_sheet || '-') + '</td>'
+                    + '</tr>';
+            });
+            html += '</tbody></table>';
+            body.innerHTML = html;
+        })
+        .catch(function(e) {
+            body.innerHTML = '<p style="text-align:center;color:var(--danger);">加载失败: ' + e + '</p>';
+        });
+}
+
+function closeSourceModal() {
+    document.getElementById('source-modal').style.display = 'none';
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeSourceModal();
+});
+
 function deleteMeter(meterNumber) {
     if (!confirm('确定要删除电表 ' + meterNumber + ' 吗？\n\n该操作将同时删除该电表的所有抄表记录，且不可恢复！')) {
         return;

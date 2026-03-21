@@ -1826,6 +1826,25 @@ def _register_routes(app: Flask, db: Database):
             return jsonify({"error": "电表不存在"}), 404
         return jsonify(meter)
 
+    # ---- 电表数据来源 API ----
+    @app.route("/api/meters/sources")
+    def meter_sources_api():
+        """查询某个用户编号下所有电表的数据来源文件。"""
+        user_id = request.args.get("user_id", "")
+        if not user_id:
+            return jsonify({"error": "缺少 user_id 参数"}), 400
+        with db.connection() as conn:
+            rows = conn.execute("""
+                SELECT DISTINCT m.meter_number, m.meter_type,
+                       r.reading_month, r.source_file, r.source_sheet
+                FROM meters m
+                JOIN monthly_readings r ON r.meter_id = m.id
+                WHERE m.user_id = ?
+                ORDER BY m.meter_number, r.reading_month
+            """, (user_id,)).fetchall()
+            sources = [dict(r) for r in rows]
+        return jsonify({"user_id": user_id, "sources": sources})
+
     # ---- CSV 文件下载 ----
     @app.route("/download-csv/<filename>")
     def download_csv(filename):
