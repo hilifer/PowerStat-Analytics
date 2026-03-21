@@ -1729,39 +1729,35 @@ class MultiPassExtractor:
                       filepath.name, sheet_name, ", ".join(missing))
             return
 
-        # === 原数据照抄：每个电表都存完整的11字段（正向+反向） ===
-        # 块内涉及的所有电表都写入同样的正向+反向数据
-        targets = []
-        if gen_meter and gen_meter in self.meters:
-            targets.append(gen_meter)
-        if grid_meter and grid_meter in self.meters and grid_meter != gen_meter:
-            targets.append(grid_meter)
-
-        for target in targets:
-            if has_fwd:
-                parts = [v for v in fwd_r.values() if v is not None]
-                self._upsert_reading(target, month, fwd_r,
-                                     fwd_total or (sum(parts) if parts else None),
-                                     filepath.name, sheet_name,
-                                     cur_readings=fwd_cur or None,
-                                     prev_readings=fwd_prev or None,
-                                     cur_total=fwd_cur_total,
-                                     prev_total=fwd_prev_total)
-            if has_rev:
-                parts = [v for v in rev_r.values() if v is not None]
-                self._upsert_rev_reading(target, month, rev_r,
-                                         rev_total or (sum(parts) if parts else None),
-                                         filepath.name, sheet_name)
-            # 设置折扣
-            if block_discount and not self.meters[target].get("discount"):
-                self.meters[target]["discount"] = block_discount
-
-        # 倍率和资产编号按电表类型分配
-        if gen_meter and gen_meter in self.meters:
+        # === 正向数据 = 发电表的抄表数据，反向数据 = 上网表的抄表数据 ===
+        # 两个不同电表，各存各的数据
+        if has_fwd and gen_meter and gen_meter in self.meters:
+            parts = [v for v in fwd_r.values() if v is not None]
+            self._upsert_reading(gen_meter, month, fwd_r,
+                                 fwd_total or (sum(parts) if parts else None),
+                                 filepath.name, sheet_name,
+                                 cur_readings=fwd_cur or None,
+                                 prev_readings=fwd_prev or None,
+                                 cur_total=fwd_cur_total,
+                                 prev_total=fwd_prev_total)
+            if block_discount and not self.meters[gen_meter].get("discount"):
+                self.meters[gen_meter]["discount"] = block_discount
             if fwd_mult_val and fwd_mult_val >= 1 and not self.meters[gen_meter].get("multiplier"):
                 self.meters[gen_meter]["multiplier"] = fwd_mult_val
             if block_gen_asset and not self.meters[gen_meter].get("asset_number"):
                 self.meters[gen_meter]["asset_number"] = block_gen_asset
+
+        if has_rev and grid_meter and grid_meter in self.meters:
+            parts = [v for v in rev_r.values() if v is not None]
+            self._upsert_reading(grid_meter, month, rev_r,
+                                 rev_total or (sum(parts) if parts else None),
+                                 filepath.name, sheet_name,
+                                 cur_readings=rev_cur or None,
+                                 prev_readings=rev_prev or None,
+                                 cur_total=rev_cur_total,
+                                 prev_total=rev_prev_total)
+            if block_discount and not self.meters[grid_meter].get("discount"):
+                self.meters[grid_meter]["discount"] = block_discount
 
         if grid_meter and grid_meter in self.meters:
             # 反向倍率 → 上网表
