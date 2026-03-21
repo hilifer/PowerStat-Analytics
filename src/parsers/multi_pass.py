@@ -1154,6 +1154,11 @@ class MultiPassExtractor:
                     if val in self.meters:
                         meter_number = val
                         break
+                    # 表码数据：用户编号列当电表号用，按需注册
+                    if not meter_number and is_valid_meter_number(val):
+                        self._register_meter(val, filepath.name, sheet_name)
+                        meter_number = val
+                        break
             elif id_source == "asset":
                 # 资产号反查电表号
                 for ic in id_cols:
@@ -1221,8 +1226,8 @@ class MultiPassExtractor:
                         # 双表号模式：直接写入发电表号列对应的电表
                         fwd_target = gen_meter or meter_number
                     elif effective_type == "上网表":
-                        # 上网表不抄正向数据，路由给配对的发电表
-                        fwd_target = self._find_paired_meter(meter_number, "发电表")
+                        # 上网表优先路由给配对的发电表，无配对则写入自身
+                        fwd_target = self._find_paired_meter(meter_number, "发电表") or meter_number
                     else:
                         # 发电表或未知类型：正向数据写入自身
                         fwd_target = meter_number

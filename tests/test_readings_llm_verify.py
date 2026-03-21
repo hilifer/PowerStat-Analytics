@@ -1,16 +1,12 @@
-"""用大模型独立提取抄表数据，与程序提取结果做对比校验。
+"""用大模型独立提取表码数据，与程序提取结果做对比校验。
 
 测试方法：
-1. 大模型（Claude）独立阅读 Excel 原始数据，提取每个电表当月的正向/反向 总尖峰平谷
+1. 大模型（Claude）独立阅读含完整表码格式的 Excel/XLS 文件
+   （必须同时包含：日期、正向 总/尖/峰/平/谷、反向 总/尖/峰/平/谷）
 2. 程序端用 MultiPassExtractor 提取同样的数据
-3. 对比两者结果，一致则通过
+3. 逐字段对比两者结果，全部一致则通过
 
 大模型提取结果作为 fixtures 固化在本文件中（由 Claude 阅读原始 Excel 后生成）。
-每个 fixture 记录了：
-  - 来源文件、sheet名
-  - 电表号
-  - 正向：电表用理（总/尖/峰/平/谷）
-  - 反向：电表用理（总/尖/峰/平/谷）
 """
 
 import sys
@@ -23,182 +19,207 @@ from src.pipeline import SmartDispatcher
 from src.parsers.multi_pass import MultiPassExtractor
 
 # 允许的数值误差
-TOLERANCE = 0.5
+TOLERANCE = 0.01
 
 # ============================================================
 # 大模型提取的 fixtures（由 Claude 阅读原始 Excel 后生成）
 #
-# 数据来源说明：
-#   - "电表用理"列 = 本月表数 - 上月表数（未乘倍率的原始差值）
-#   - 这是程序应该提取并存入 monthly_readings 的值
+# 数据来源：表码数据表（每行一个电表，包含日期+正反向有功读数）
+# 这些值是累计表码读数（本月表数），不是差值（电表用理）
 # ============================================================
 
 LLM_FIXTURES = [
-    # 注：特旺光伏项目为纯转置表且无电表号，程序当前不提取该格式，不纳入对比
-
-    # ---- 首熙 202601 ----
-    # Sheet: 首熙20261月
-    # 标准表：发电表 0950050038124235，上网表 0950050038441846
-    # 正向电表用理(col E): 55.14, 52.12, 88.43, 1.72, 197.41
-    # 反向电表用理(col K): 5.11, 4.91, 10.91, 0.05, 20.97
+    # ================================================================
+    # 文件1: 耀嵘12月表码数据.xlsx (Sheet1)
+    # 列: 用户名称|用户编号|表计资产编号|用户类别|数据时间|
+    #      正向有功总(kWh)|正向有功尖(kWh)|正向有功峰(kWh)|正向有功平(kWh)|正向有功谷(kWh)|
+    #      正向无功总(kVarh)|
+    #      反向有功总(kWh)|反向有功尖(kWh)|反向有功峰(kWh)|反向有功平(kWh)|反向有功谷(kWh)|...
+    # ================================================================
     {
-        "file": "首熙202601.xlsx",
-        "meter_number": "0950050038124235",
+        "file": "耀嵘12月表码数据.xlsx",
+        "file_path": "output/archive/unknown/耀嵘/耀嵘12月表码数据.xlsx",
+        "meter_number": "0319009900152123",
         "reading_month": "2026-01",
-        "fwd_sharp_peak": 55.14,
-        "fwd_peak": 52.12,
-        "fwd_flat": 88.43,
-        "fwd_valley": 1.72,
-        "fwd_total": 197.41,
-        "rev_sharp_peak": 5.11,
-        "rev_peak": 4.91,
-        "rev_flat": 10.91,
-        "rev_valley": 0.05,
-        "rev_total": 20.97,
-        "description": "首熙 发电表 0950050038124235",
+        "fwd_total": 11403.54, "fwd_sharp_peak": 1149.03, "fwd_peak": 2149.65,
+        "fwd_flat": 4437.61, "fwd_valley": 3667.24,
+        "rev_total": 31.95, "rev_sharp_peak": 8.31, "rev_peak": 7.98,
+        "rev_flat": 14.79, "rev_valley": 0.86,
+        "description": "耀嵘表码 公线专变客户 0319009900152123 2026-01",
+    },
+    {
+        "file": "耀嵘12月表码数据.xlsx",
+        "file_path": "output/archive/unknown/耀嵘/耀嵘12月表码数据.xlsx",
+        "meter_number": "0319700356999007",
+        "reading_month": "2026-01",
+        "fwd_total": 11403.54, "fwd_sharp_peak": 1149.03, "fwd_peak": 2149.65,
+        "fwd_flat": 4437.61, "fwd_valley": 3667.24,
+        "rev_total": 31.95, "rev_sharp_peak": 8.31, "rev_peak": 7.98,
+        "rev_flat": 14.79, "rev_valley": 0.86,
+        "description": "耀嵘表码 地方电厂户 0319700356999007 2026-01",
+    },
+    {
+        "file": "耀嵘12月表码数据.xlsx",
+        "file_path": "output/archive/unknown/耀嵘/耀嵘12月表码数据.xlsx",
+        "meter_number": "0319700337706620",
+        "reading_month": "2026-01",
+        "fwd_total": 2421.86, "fwd_sharp_peak": 653.03, "fwd_peak": 624.5,
+        "fwd_flat": 1053.65, "fwd_valley": 90.67,
+        "rev_total": 1.04, "rev_sharp_peak": 0.0, "rev_peak": 0.04,
+        "rev_flat": 0.44, "rev_valley": 0.55,
+        "description": "耀嵘表码 光伏发电客户 0319700337706620 2026-01",
     },
 
-    # ---- 完美印刷 202601 ----
-    # Sheet: 完美印刷202601
-    # 发电表 0950050038124222
-    # 正向电表用理(col E): 46.27, 42.58, 69.48, 1.15, 159.47 (注意: 42.5799999... ≈ 42.58)
-    # 反向电表用理(col K): 76.18, 73.56, 126.67, 1.58, 278 (注意: 76.1800000... ≈ 76.18)
+    # ================================================================
+    # 文件2: 耀嵘.xls (用户表码1)
+    # 列: 电表资产号|用户编号|统计日期|正向有功总(kWh)|尖(kWh)|峰(kWh)|平(kWh)|谷(kWh)|
+    #      反向有功总(kWh)|尖(kWh)|峰(kWh)|平(kWh)|谷(kWh)
+    # 含2个月数据 (2026-02 和 2026-01)
+    # ================================================================
     {
-        "file": "完美印刷202601.xlsx",
-        "meter_number": "0950050038124222",
+        "file": "耀嵘.xls",
+        "file_path": "output/archive/unknown/_未分类/耀嵘.xls",
+        "meter_number": "0946000082501856",
+        "reading_month": "2026-02",
+        "fwd_total": 10828.33, "fwd_sharp_peak": 940.39, "fwd_peak": 3061.03,
+        "fwd_flat": 4092.24, "fwd_valley": 2734.65,
+        "rev_total": 32.05, "rev_sharp_peak": 7.21, "rev_peak": 6.28,
+        "rev_flat": 18.51, "rev_valley": 0.03,
+        "description": "耀嵘.xls 0946000082501856 2026-02",
+    },
+    {
+        "file": "耀嵘.xls",
+        "file_path": "output/archive/unknown/_未分类/耀嵘.xls",
+        "meter_number": "0946070038961957",
+        "reading_month": "2026-02",
+        "fwd_total": 2628.87, "fwd_sharp_peak": 717.44, "fwd_peak": 682.36,
+        "fwd_flat": 1137.93, "fwd_valley": 91.12,
+        "rev_total": 1.01, "rev_sharp_peak": 0.0, "rev_peak": 0.07,
+        "rev_flat": 0.42, "rev_valley": 0.51,
+        "description": "耀嵘.xls 0946070038961957 2026-02",
+    },
+    {
+        "file": "耀嵘.xls",
+        "file_path": "output/archive/unknown/_未分类/耀嵘.xls",
+        "meter_number": "0946000082501856",
         "reading_month": "2026-01",
-        "fwd_sharp_peak": 46.27,
-        "fwd_peak": 42.58,
-        "fwd_flat": 69.48,
-        "fwd_valley": 1.15,
-        "fwd_total": 159.47,
-        "rev_sharp_peak": 76.18,
-        "rev_peak": 73.56,
-        "rev_flat": 126.67,
-        "rev_valley": 1.58,
-        "rev_total": 278.0,  # 注意：反向总 = 76.18+73.56+126.67+1.58 = 277.99
-        "description": "完美印刷 发电表 0950050038124222",
+        "fwd_total": 10671.06, "fwd_sharp_peak": 924.71, "fwd_peak": 3034.93,
+        "fwd_flat": 4034.88, "fwd_valley": 2676.52,
+        "rev_total": 27.92, "rev_sharp_peak": 6.4, "rev_peak": 5.7,
+        "rev_flat": 15.77, "rev_valley": 0.03,
+        "description": "耀嵘.xls 0946000082501856 2026-01",
+    },
+    {
+        "file": "耀嵘.xls",
+        "file_path": "output/archive/unknown/_未分类/耀嵘.xls",
+        "meter_number": "0946070038961957",
+        "reading_month": "2026-01",
+        "fwd_total": 2419.41, "fwd_sharp_peak": 657.21, "fwd_peak": 626.48,
+        "fwd_flat": 1046.07, "fwd_valley": 89.63,
+        "rev_total": 0.9, "rev_sharp_peak": 0.0, "rev_peak": 0.06,
+        "rev_flat": 0.38, "rev_valley": 0.46,
+        "description": "耀嵘.xls 0946070038961957 2026-01",
     },
 
-    # ---- 鑫海鑫 202601 ----
-    # Sheet: 鑫海盈印刷包装20261月
-    # 电表1: 发电表 0950050038124248
-    # 正向电表用理: 48.43, 44.47, 75.93, 1.43, 170.26
-    # 反向电表用理: 1.68, 1.72, 23.84, 0.02, 27.26
+    # ================================================================
+    # 文件3: 1月用户表码（全部） (洲千).xls (用户表码1)
+    # 列: 用户编号|用户名称|用户类型|用电地址|电表资产号|终端资产编号|终端地址|测量点号|
+    #      统计日期|正向有功总(kWh)|尖(kWh)|峰(kWh)|平(kWh)|谷(kWh)|
+    #      反向有功总(kWh)|尖(kWh)|峰(kWh)|平(kWh)|谷(kWh)
+    # 26条记录，统计日期=2026-02-01
+    # 选取部分代表性记录作为测试样本
+    # ================================================================
+    # 公变客户
     {
-        "file": "鑫海鑫202601.xlsx",
-        "meter_number": "0950050038124248",
-        "reading_month": "2026-01",
-        "fwd_sharp_peak": 48.43,
-        "fwd_peak": 44.47,
-        "fwd_flat": 75.93,
-        "fwd_valley": 1.43,
-        "fwd_total": 170.26,
-        "rev_sharp_peak": 1.68,
-        "rev_peak": 1.72,
-        "rev_flat": 23.84,
-        "rev_valley": 0.02,
-        "rev_total": 27.26,
-        "description": "鑫海鑫 电表1 发电表 0950050038124248",
+        "file": "1月用户表码（全部） (洲千).xls",
+        "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
+        "meter_number": "0948030028524986",
+        "reading_month": "2026-02",
+        "fwd_total": 1076.68, "fwd_sharp_peak": 241.35, "fwd_peak": 308.29,
+        "fwd_flat": 476.10, "fwd_valley": 50.93,
+        "rev_total": 156.39, "rev_sharp_peak": 25.54, "rev_peak": 25.08,
+        "rev_flat": 95.17, "rev_valley": 10.58,
+        "description": "华尔特表码 公变客户 0948030028524986",
     },
-    # 电表2: 发电表 0950050038007239
-    # 正向电表用理: 41.8, 38.81, 66.47, 2.21, 148.3 (注意: 66.4699999... ≈ 66.47)
-    # 反向电表用理: 8.08, 7.07, 37.1, 0.41, 52.65 (注意: 0.409999... ≈ 0.41)
     {
-        "file": "鑫海鑫202601.xlsx",
-        "meter_number": "0950050038007239",
-        "reading_month": "2026-01",
-        "fwd_sharp_peak": 41.8,
-        "fwd_peak": 38.81,
-        "fwd_flat": 66.47,
-        "fwd_valley": 2.21,
-        "fwd_total": 148.3,  # 注意: 41.8+38.81+66.47+2.21 = 149.29 ≠ 148.3，这是Excel原始数据
-        "rev_sharp_peak": 8.08,
-        "rev_peak": 7.07,
-        "rev_flat": 37.1,
-        "rev_valley": 0.41,
-        "rev_total": 52.65,  # 注意: 8.08+7.07+37.1+0.41 = 52.66 ≈ 52.65
-        "description": "鑫海鑫 电表2 发电表 0950050038007239",
+        "file": "1月用户表码（全部） (洲千).xls",
+        "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
+        "meter_number": "0948030037341288",
+        "reading_month": "2026-02",
+        "fwd_total": 408.23, "fwd_sharp_peak": 135.90, "fwd_peak": 144.04,
+        "fwd_flat": 117.98, "fwd_valley": 10.30,
+        "rev_total": 66.69, "rev_sharp_peak": 9.16, "rev_peak": 9.57,
+        "rev_flat": 46.44, "rev_valley": 1.50,
+        "description": "华尔特表码 公变客户(上网) 0948030037341288",
     },
-
-    # ---- 华尔特 202601 第1个块 ----
-    # Sheet: 202601 (转置表，9个块)
-    # 块1: 发电表 0948030044326050, 用户号 0948030027271605
-    # 正向电表用理: 49.85, 47.01, 78.58, 1.35, 176.78 (注意: 49.85+47.01+78.58+1.35=176.79)
-    # 反向电表用理: 15.5, 14.61, 30.18, 0.27, 60.57 (注意: 15.5+14.61+30.18+0.27=60.56)
     {
-        "file": "华尔特项目电费统计表202601 - 9个表.xlsx",
+        "file": "1月用户表码（全部） (洲千).xls",
+        "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
+        "meter_number": "0948030027271605",
+        "reading_month": "2026-02",
+        "fwd_total": 266.66, "fwd_sharp_peak": 55.41, "fwd_peak": 74.91,
+        "fwd_flat": 121.56, "fwd_valley": 14.78,
+        "rev_total": 146.24, "rev_sharp_peak": 36.62, "rev_peak": 33.62,
+        "rev_flat": 74.64, "rev_valley": 1.35,
+        "description": "华尔特表码 公变客户(上网) 0948030027271605",
+    },
+    # 光伏发电客户
+    {
+        "file": "1月用户表码（全部） (洲千).xls",
+        "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
         "meter_number": "0948030044326050",
-        "reading_month": "2026-01",
-        "fwd_sharp_peak": 49.85,
-        "fwd_peak": 47.01,
-        "fwd_flat": 78.58,
-        "fwd_valley": 1.35,
-        "fwd_total": 176.78,
-        "rev_sharp_peak": 15.5,
-        "rev_peak": 14.61,
-        "rev_flat": 30.18,
-        "rev_valley": 0.27,
-        "rev_total": 60.57,
-        "description": "华尔特 块1 发电表 0948030044326050",
+        "reading_month": "2026-02",
+        "fwd_total": 435.15, "fwd_sharp_peak": 118.77, "fwd_peak": 113.40,
+        "fwd_flat": 198.02, "fwd_valley": 4.95,
+        "rev_total": 0.20, "rev_sharp_peak": 0.0, "rev_peak": 0.05,
+        "rev_flat": 0.06, "rev_valley": 0.08,
+        "description": "华尔特表码 光伏发电 0948030044326050",
     },
-    # 块2: 发电表 0948030044194534, 用户号 0948030037341288
-    # 正向电表用理: 763.49, 770.27, 1308.19, 22.43, 2864.38
-    # 反向电表用理: 3.65, 3.76, 16.21, 0.08, 23.7
     {
-        "file": "华尔特项目电费统计表202601 - 9个表.xlsx",
+        "file": "1月用户表码（全部） (洲千).xls",
+        "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
         "meter_number": "0948030044194534",
-        "reading_month": "2026-01",
-        "fwd_sharp_peak": 763.49,
-        "fwd_peak": 770.27,
-        "fwd_flat": 1308.19,
-        "fwd_valley": 22.43,
-        "fwd_total": 2864.38,
-        "rev_sharp_peak": 3.65,
-        "rev_peak": 3.76,
-        "rev_flat": 16.21,
-        "rev_valley": 0.08,
-        "rev_total": 23.7,
-        "description": "华尔特 块2 发电表 0948030044194534",
+        "reading_month": "2026-02",
+        "fwd_total": 7074.07, "fwd_sharp_peak": 1846.27, "fwd_peak": 1849.74,
+        "fwd_flat": 3291.94, "fwd_valley": 86.11,
+        "rev_total": 6.16, "rev_sharp_peak": 0.0, "rev_peak": 1.11,
+        "rev_flat": 2.0, "rev_valley": 3.04,
+        "description": "华尔特表码 光伏发电 0948030044194534",
     },
-
-    # ---- 新丰电器 202601 ----
-    # Sheet: 202512 (标题是2026年1月)
-    # 块1: 发电表 0946110039693280
-    # 只有正有功总行：正向电表用理=183.94, 反向电表用理=0.06
     {
-        "file": "新丰电器光伏项目202601.xlsx",
-        "meter_number": "0946110039693280",
-        "reading_month": "2026-01",
-        "fwd_sharp_peak": None,
-        "fwd_peak": None,
-        "fwd_flat": None,
-        "fwd_valley": None,
-        "fwd_total": 183.94,
-        "rev_sharp_peak": None,
-        "rev_peak": None,
-        "rev_flat": None,
-        "rev_valley": None,
-        "rev_total": 0.06,
-        "description": "新丰电器 块1 发电表 0946110039693280（只有总值）",
+        "file": "1月用户表码（全部） (洲千).xls",
+        "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
+        "meter_number": "0948030044235097",
+        "reading_month": "2026-02",
+        "fwd_total": 5468.16, "fwd_sharp_peak": 1430.97, "fwd_peak": 1403.80,
+        "fwd_flat": 2571.47, "fwd_valley": 61.91,
+        "rev_total": 6.91, "rev_sharp_peak": 0.0, "rev_peak": 2.21,
+        "rev_flat": 1.88, "rev_valley": 2.81,
+        "description": "华尔特表码 光伏发电 0948030044235097",
     },
-    # 块2: 发电表 0946110039760249
-    # 只有正有功总行：正向电表用理=191.44, 反向电表用理=4.26
+    # 地方电厂户
     {
-        "file": "新丰电器光伏项目202601.xlsx",
-        "meter_number": "0946110039760249",
-        "reading_month": "2026-01",
-        "fwd_sharp_peak": None,
-        "fwd_peak": None,
-        "fwd_flat": None,
-        "fwd_valley": None,
-        "fwd_total": 191.44,
-        "rev_sharp_peak": None,
-        "rev_peak": None,
-        "rev_flat": None,
-        "rev_valley": None,
-        "rev_total": 4.26,
-        "description": "新丰电器 块2 发电表 0946110039760249（只有总值）",
+        "file": "1月用户表码（全部） (洲千).xls",
+        "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
+        "meter_number": "0948030041991233",
+        "reading_month": "2026-02",
+        "fwd_total": 906.69, "fwd_sharp_peak": 230.01, "fwd_peak": 234.41,
+        "fwd_flat": 410.87, "fwd_valley": 31.40,
+        "rev_total": 0.33, "rev_sharp_peak": 0.0, "rev_peak": 0.04,
+        "rev_flat": 0.13, "rev_valley": 0.16,
+        "description": "华尔特表码 地方电厂户 0948030041991233",
+    },
+    # Sheet1 中的记录
+    {
+        "file": "1月用户表码（全部） (洲千).xls",
+        "file_path": "output/archive/unknown/_未分类/1月用户表码（全部） (洲千).xls",
+        "meter_number": "0948030030377367",
+        "reading_month": "2026-02",
+        "fwd_total": 673.75, "fwd_sharp_peak": 78.10, "fwd_peak": 115.78,
+        "fwd_flat": 242.06, "fwd_valley": 237.79,
+        "rev_total": 76.29, "rev_sharp_peak": 18.72, "rev_peak": 11.07,
+        "rev_flat": 46.47, "rev_valley": 0.01,
+        "description": "华尔特表码 Sheet1 公变客户 0948030030377367",
     },
 ]
 
@@ -226,7 +247,6 @@ def compare_values(llm_val, prog_val, field: str) -> tuple[bool, str]:
     if llm_val is None and prog_val is None:
         return True, ""
     if llm_val is None and prog_val is not None:
-        # LLM 认为没有，程序提取到了 → 可能程序对、也可能误提取
         return False, f"  {field}: LLM=None, 程序={prog_val}"
     if llm_val is not None and prog_val is None:
         return False, f"  {field}: LLM={llm_val}, 程序=None（缺失）"
@@ -234,7 +254,7 @@ def compare_values(llm_val, prog_val, field: str) -> tuple[bool, str]:
         lv, pv = float(llm_val), float(prog_val)
         if abs(lv - pv) <= TOLERANCE:
             return True, ""
-        return False, f"  {field}: LLM={lv}, 程序={pv}, 差={abs(lv - pv):.2f}"
+        return False, f"  {field}: LLM={lv}, 程序={pv}, 差={abs(lv - pv):.4f}"
     except (ValueError, TypeError):
         return False, f"  {field}: LLM={llm_val}, 程序={prog_val}（类型不匹配）"
 
@@ -242,63 +262,40 @@ def compare_values(llm_val, prog_val, field: str) -> tuple[bool, str]:
 def find_program_record(prog_records: list[dict], fixture: dict) -> dict | None:
     """在程序结果中找到匹配的记录。"""
     month = fixture["reading_month"]
-    meter = fixture.get("meter_number")
-
-    # 精确匹配 meter_number + month
-    if meter:
-        for r in prog_records:
-            if r["meter_number"] == meter and r["reading_month"] == month:
-                return r
-
-    # 如果 fixture 没有 meter_number（如特旺转置表），按 month + fwd_total 模糊匹配
-    fwd_total = fixture.get("fwd_total")
-    if fwd_total is not None:
-        for r in prog_records:
-            if r["reading_month"] != month:
-                continue
-            prog_total = r.get("total_kwh")
-            if prog_total is not None and abs(float(prog_total) - float(fwd_total)) <= TOLERANCE:
-                return r
-
+    meter = fixture["meter_number"]
+    for r in prog_records:
+        if r["meter_number"] == meter and r["reading_month"] == month:
+            return r
     return None
 
 
 def run_tests():
     """运行全部测试。"""
     # 按文件分组加载
-    files_to_test = set(f["file"] for f in LLM_FIXTURES)
-    archive_root = ROOT / "output" / "archive" / "2026-01"
-
-    # 找到文件路径
-    file_paths = {}
-    for project_dir in archive_root.iterdir():
-        if not project_dir.is_dir():
-            continue
-        for f in project_dir.glob("*.xlsx"):
-            if f.name in files_to_test:
-                file_paths[f.name] = str(f)
-
-    missing_files = files_to_test - set(file_paths.keys())
-    if missing_files:
-        print(f"[WARN] 缺少测试文件: {missing_files}")
+    files_to_test = {}
+    for f in LLM_FIXTURES:
+        fp = f["file_path"]
+        if fp not in files_to_test:
+            files_to_test[fp] = f["file"]
 
     # 逐文件提取程序结果
     dispatcher = SmartDispatcher()
-    prog_results = {}  # filename -> list[dict]
+    prog_results = {}  # file_path -> list[dict]
 
-    for fname, fpath in file_paths.items():
-        sheets = dispatcher.load_as_dataframes(fpath)
+    for fpath, fname in files_to_test.items():
+        full_path = ROOT / fpath
+        if not full_path.exists():
+            print(f"[WARN] 文件不存在: {fpath}")
+            continue
+        sheets = dispatcher.load_as_dataframes(str(full_path))
         if not sheets:
             continue
         extractor = MultiPassExtractor()
         extractor.load_dataframes(sheets)
         records = extractor.extract_all()
-        # 只保留有 reading 数据的
-        prog_results[fname] = [
+        prog_results[fpath] = [
             r for r in records
-            if r.get("reading_month") != "unknown" and (
-                r.get("total_kwh") is not None or r.get("rev_total") is not None
-            )
+            if r.get("reading_month") != "unknown"
         ]
 
     # 逐条对比
@@ -307,33 +304,32 @@ def run_tests():
     failed = 0
     failed_details = []
 
-    print(f"\n{'='*70}")
-    print("抄表数据校验：大模型提取 vs 程序提取")
-    print(f"{'='*70}\n")
+    print(f"\n{'='*80}")
+    print("表码数据校验：大模型提取 vs 程序提取")
+    print(f"{'='*80}\n")
 
     for fixture in LLM_FIXTURES:
         total += 1
-        fname = fixture["file"]
+        fpath = fixture["file_path"]
         desc = fixture.get("description", "")
 
-        if fname not in prog_results:
+        if fpath not in prog_results:
             failed += 1
             print(f"[FAIL] {desc}")
-            print(f"  文件 {fname} 程序未提取到结果\n")
+            print(f"  文件 {fpath} 程序未提取到结果\n")
             failed_details.append(f"{desc}: 文件未提取")
             continue
 
-        match = find_program_record(prog_results[fname], fixture)
+        match = find_program_record(prog_results[fpath], fixture)
         if not match:
             failed += 1
-            meter = fixture.get("meter_number") or "(无电表号)"
+            meter = fixture["meter_number"]
             print(f"[FAIL] {desc}")
             print(f"  未找到匹配记录: {meter} / {fixture['reading_month']}")
-            # 打印程序提取的全部记录供调试
             print(f"  程序提取到的记录:")
-            for r in prog_results[fname]:
+            for r in prog_results[fpath]:
                 print(f"    {r['meter_number']} {r['reading_month']}: "
-                      f"总={r.get('total_kwh')}, 反总={r.get('rev_total')}")
+                      f"正总={r.get('total_kwh')}, 反总={r.get('rev_total')}")
             print()
             failed_details.append(f"{desc}: 未找到匹配记录")
             continue
@@ -355,12 +351,17 @@ def run_tests():
             failed_details.append(f"{desc}: {len(mismatches)} 个字段不匹配")
         else:
             passed += 1
+            # 打印双方数据以供人工确认
             print(f"[PASS] {desc}")
+            print(f"  LLM: 正={fixture['fwd_total']}/{fixture['fwd_sharp_peak']}/{fixture['fwd_peak']}/{fixture['fwd_flat']}/{fixture['fwd_valley']}"
+                  f" 反={fixture['rev_total']}/{fixture['rev_sharp_peak']}/{fixture['rev_peak']}/{fixture['rev_flat']}/{fixture['rev_valley']}")
+            print(f"  程序: 正={match.get('total_kwh')}/{match.get('sharp_peak')}/{match.get('peak')}/{match.get('flat')}/{match.get('valley')}"
+                  f" 反={match.get('rev_total')}/{match.get('rev_sharp_peak')}/{match.get('rev_peak')}/{match.get('rev_flat')}/{match.get('rev_valley')}")
 
     # 汇总
-    print(f"\n{'='*70}")
+    print(f"\n{'='*80}")
     print(f"汇总: {total} 条测试, {passed} 通过, {failed} 失败")
-    print(f"{'='*70}")
+    print(f"{'='*80}")
 
     if failed_details:
         print("\n失败详情:")
