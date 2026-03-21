@@ -843,15 +843,19 @@ class Database:
 
     def get_meters(self, project_name: str = None, user_id: str = None) -> list[dict]:
         """查询电表列表。"""
-        query = "SELECT * FROM meters WHERE 1=1"
+        query = """SELECT m.*,
+                          (SELECT r.source_file FROM monthly_readings r
+                           WHERE r.meter_id = m.id AND r.source_file IS NOT NULL
+                           ORDER BY r.reading_month DESC LIMIT 1) AS latest_source_file
+                   FROM meters m WHERE 1=1"""
         params = []
         if project_name:
-            query += " AND project_name = ?"
+            query += " AND m.project_name = ?"
             params.append(project_name)
         if user_id:
-            query += " AND user_id = ?"
+            query += " AND m.user_id = ?"
             params.append(user_id)
-        query += " ORDER BY project_name, meter_number"
+        query += " ORDER BY m.project_name, m.meter_number"
 
         with self.connection() as conn:
             rows = conn.execute(query, params).fetchall()

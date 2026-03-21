@@ -75,6 +75,7 @@
                     <th class="num">倍率</th>
                     <th class="num">折扣</th>
                     <th>配对电表</th>
+                    <th>数据来源</th>
                     <th>操作</th>
                 </tr>
             </thead>
@@ -112,6 +113,13 @@
                         <span style="color:var(--text-secondary);">-</span>
                         {% endif %}
                     </td>
+                    <td style="font-size:0.8rem;">
+                        {% if m.latest_source_file %}
+                        <a class="source-link" data-filename="{{ m.latest_source_file }}" title="{{ m.latest_source_file }}">{{ m.latest_source_file[:20] }}{% if m.latest_source_file|length > 20 %}…{% endif %}</a>
+                        {% else %}
+                        <span style="color:var(--text-secondary);">-</span>
+                        {% endif %}
+                    </td>
                     <td style="white-space:nowrap;">
                         <a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="btn btn-outline btn-sm">详情</a>
                         <button class="btn btn-danger btn-sm" onclick="deleteMeter('{{ m.meter_number }}')">删除</button>
@@ -138,6 +146,7 @@
                     <th>类型</th>
                     <th class="num">倍率</th>
                     <th>项目</th>
+                    <th>数据来源</th>
                     <th>操作</th>
                 </tr>
             </thead>
@@ -160,6 +169,13 @@
                     </td>
                     <td class="num">{{ m.multiplier }}</td>
                     <td>{{ m.project_name or '-' }}</td>
+                    <td style="font-size:0.8rem;">
+                        {% if m.latest_source_file %}
+                        <a class="source-link" data-filename="{{ m.latest_source_file }}" title="{{ m.latest_source_file }}">{{ m.latest_source_file[:20] }}{% if m.latest_source_file|length > 20 %}…{% endif %}</a>
+                        {% else %}
+                        <span style="color:var(--text-secondary);">-</span>
+                        {% endif %}
+                    </td>
                     <td style="white-space:nowrap;">
                         <a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="btn btn-outline btn-sm">详情</a>
                         <button class="btn btn-danger btn-sm" onclick="deleteMeter('{{ m.meter_number }}')">删除</button>
@@ -179,6 +195,126 @@
 </div>
 {% endif %}
 
+<!-- 文件预览弹窗 -->
+<div id="file-modal" class="file-modal-overlay" onclick="if(event.target===this)closeModal()">
+    <div class="file-modal">
+        <div class="file-modal-header">
+            <span id="modal-title" class="file-modal-title"></span>
+            <div style="display:flex;gap:0.5rem;align-items:center;">
+                <a id="modal-download" href="#" class="btn btn-primary btn-sm" download>下载文件</a>
+                <button class="file-modal-close" onclick="closeModal()">&times;</button>
+            </div>
+        </div>
+        <div id="modal-body" class="file-modal-body">
+            <div class="file-modal-loading">加载中…</div>
+        </div>
+    </div>
+</div>
+
+<style>
+.source-link {
+    color: var(--primary);
+    text-decoration: none;
+    cursor: pointer;
+    border-bottom: 1px dashed var(--primary);
+}
+.source-link:hover {
+    text-decoration: none;
+    border-bottom-style: solid;
+}
+.file-modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: rgba(0,0,0,0.6);
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+}
+.file-modal {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.3);
+    max-width: 95vw;
+    max-height: 90vh;
+    width: 900px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.file-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #eee;
+    flex-shrink: 0;
+}
+.file-modal-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: #333;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 60%;
+}
+.file-modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    color: #999;
+    cursor: pointer;
+    padding: 0 0.3rem;
+    line-height: 1;
+}
+.file-modal-close:hover { color: #333; }
+.file-modal-body {
+    overflow: auto;
+    padding: 1.5rem;
+    flex: 1;
+    min-height: 200px;
+}
+.file-modal-body img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+}
+.file-modal-body iframe {
+    width: 100%;
+    height: 70vh;
+    border: none;
+    border-radius: 6px;
+}
+.file-modal-loading {
+    text-align: center;
+    padding: 3rem;
+    color: var(--text-secondary);
+}
+.file-modal-body .preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+}
+.file-modal-body .preview-table th {
+    background: #f5f7fa;
+    padding: 6px 10px;
+    text-align: left;
+    border-bottom: 2px solid #e0e0e0;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+}
+.file-modal-body .preview-table td {
+    padding: 5px 10px;
+    border-bottom: 1px solid #f0f0f0;
+}
+.file-modal-body .preview-table tr:hover td {
+    background: #f8f9ff;
+}
+</style>
+
 <script>
 function deleteMeter(meterNumber) {
     if (!confirm('确定要删除电表 ' + meterNumber + ' 吗？\n\n该操作将同时删除该电表的所有抄表记录，且不可恢复！')) {
@@ -195,5 +331,58 @@ function deleteMeter(meterNumber) {
         })
         .catch(e => alert('请求失败: ' + e));
 }
+
+function openSourcePreview(filename) {
+    var modal = document.getElementById('file-modal');
+    var body = document.getElementById('modal-body');
+    var title = document.getElementById('modal-title');
+    var dlBtn = document.getElementById('modal-download');
+
+    title.textContent = filename;
+    body.innerHTML = '<div class="file-modal-loading">加载中…</div>';
+    dlBtn.style.display = 'none';
+    modal.style.display = 'flex';
+
+    fetch('/api/archive/preview/' + encodeURIComponent(filename))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (!d.found) {
+                body.innerHTML = '<div class="file-modal-loading" style="color:#e74c3c;">文件未找到: ' + filename + '</div>';
+                return;
+            }
+            dlBtn.href = d.download_url;
+            dlBtn.style.display = 'inline-flex';
+
+            if (d.type === 'image') {
+                body.innerHTML = '<img src="' + d.url + '" alt="' + d.filename + '">';
+            } else if (d.type === 'excel') {
+                body.innerHTML = d.html;
+            } else if (d.type === 'pdf') {
+                body.innerHTML = '<iframe src="' + d.url + '"></iframe>';
+            } else if (d.type === 'error') {
+                body.innerHTML = '<div class="file-modal-loading" style="color:#e74c3c;">' + d.message + '</div>';
+            } else {
+                body.innerHTML = '<div class="file-modal-loading">此文件类型不支持预览，请下载查看</div>';
+            }
+        })
+        .catch(function(e) {
+            body.innerHTML = '<div class="file-modal-loading" style="color:#e74c3c;">加载失败: ' + e + '</div>';
+        });
+}
+
+function closeModal() {
+    document.getElementById('file-modal').style.display = 'none';
+    document.getElementById('modal-body').innerHTML = '';
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeModal();
+});
+
+document.querySelectorAll('.source-link[data-filename]').forEach(function(el) {
+    el.addEventListener('click', function() {
+        openSourcePreview(this.dataset.filename);
+    });
+});
 </script>
 {% endblock %}
