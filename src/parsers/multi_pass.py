@@ -1053,27 +1053,11 @@ class MultiPassExtractor:
     # 月度读数
     # ================================================================
 
-    # 统计表关键字：文件名或sheet名包含这些关键字的不提取抄表数据
-    # 统计表是汇总数据，不是原始抄表数据
-    _STAT_SHEET_KEYWORDS = ("统计表", "统计", "汇总", "汇总表")
-
-    def _is_statistics_sheet(self, filepath, sheet_name):
-        """判断是否为统计表（汇总表），不应作为抄表数据来源。"""
-        fname = filepath.name if hasattr(filepath, 'name') else str(filepath)
-        for kw in self._STAT_SHEET_KEYWORDS:
-            if kw in fname or kw in sheet_name:
-                return True
-        return False
-
     def _pass6_readings(self):
         """扫描所有文件，提取每个电表每月的尖峰平谷读数。"""
         log.info("[第5轮] 提取月度读数...")
 
         for df, filepath, sheet_name, source_info in self._sheets:
-            # 跳过统计表/汇总表：这些是汇总数据，不是原始抄表数据
-            if self._is_statistics_sheet(filepath, sheet_name):
-                log.debug("跳过统计表，不提取抄表数据: %s/%s", filepath.name, sheet_name)
-                continue
             # 标准表格
             self._readings_from_table(df, filepath, sheet_name, source_info)
             # 转置表
@@ -1732,9 +1716,33 @@ class MultiPassExtractor:
             if rev_total is not None:
                 rev_total = round(rev_total / rev_mult_val, 2)
 
-        # 写入读数
-        has_fwd = any(v is not None for v in fwd_r.values()) or fwd_total is not None
-        has_rev = any(v is not None for v in rev_r.values()) or rev_total is not None
+        # === 完整性校验：与标准表格一致，必须同时具备 11 个字段 ===
+        # 日期(1) + 正向(总/尖/峰/平/谷=5) + 反向(总/尖/峰/平/谷=5) = 11
+        required_periods = {"sharp_peak", "peak", "flat", "valley"}
+        has_fwd_complete = (fwd_total is not None
+                           and required_periods.issubset(k for k, v in fwd_r.items() if v is not None))
+        has_rev_complete = (rev_total is not None
+                           and required_periods.issubset(k for k, v in rev_r.items() if v is not None))
+        has_date = month != "unknown"
+
+        if not (has_date and has_fwd_complete and has_rev_complete):
+            missing = []
+            if not has_date:
+                missing.append("日期")
+            if not fwd_total:
+                missing.append("正向总")
+            if not required_periods.issubset(k for k, v in fwd_r.items() if v is not None):
+                missing.append(f"正向分时({required_periods - {k for k, v in fwd_r.items() if v is not None}})")
+            if not rev_total:
+                missing.append("反向总")
+            if not required_periods.issubset(k for k, v in rev_r.items() if v is not None):
+                missing.append(f"反向分时({required_periods - {k for k, v in rev_r.items() if v is not None}})")
+            log.debug("  [转置表读数] 跳过 %s/%s: 缺少 %s（11字段不全）",
+                      filepath.name, sheet_name, ", ".join(missing))
+            return
+
+        has_fwd = has_fwd_complete
+        has_rev = has_rev_complete
 
         if gen_meter and gen_meter in self.meters and has_fwd:
             parts = [v for v in fwd_r.values() if v is not None]
