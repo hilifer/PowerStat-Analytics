@@ -844,12 +844,12 @@ class Database:
                     average_price, source_file)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(user_id, reading_month) DO UPDATE SET
-                       sharp_peak_price = COALESCE(excluded.sharp_peak_price, price_records.sharp_peak_price),
-                       peak_price = COALESCE(excluded.peak_price, price_records.peak_price),
-                       flat_price = COALESCE(excluded.flat_price, price_records.flat_price),
-                       valley_price = COALESCE(excluded.valley_price, price_records.valley_price),
-                       average_price = COALESCE(excluded.average_price, price_records.average_price),
-                       source_file = COALESCE(excluded.source_file, price_records.source_file)
+                       sharp_peak_price = COALESCE(price_records.sharp_peak_price, excluded.sharp_peak_price),
+                       peak_price = COALESCE(price_records.peak_price, excluded.peak_price),
+                       flat_price = COALESCE(price_records.flat_price, excluded.flat_price),
+                       valley_price = COALESCE(price_records.valley_price, excluded.valley_price),
+                       average_price = COALESCE(price_records.average_price, excluded.average_price),
+                       source_file = COALESCE(price_records.source_file, excluded.source_file)
                 """,
                 (user_id, reading_month, sharp_peak_price, peak_price, flat_price, valley_price,
                  average_price, source_file),
