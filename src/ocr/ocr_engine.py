@@ -156,7 +156,7 @@ class OCREngine:
         try:
             raw_text = self._run_ocr(str(filepath))
             result.raw_text = raw_text
-            log.debug("OCR 原始文本 [%s]:\n%s", filepath.name, raw_text[:500])
+            log.info("OCR 原始文本 [%s]:\n%s", filepath.name, raw_text)
 
             # 提取用户编号（OCR文本 + 文件名双重匹配）
             result.user_id = self._extract_user_id(raw_text)
