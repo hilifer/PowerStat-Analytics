@@ -941,18 +941,8 @@ def _register_routes(app: Flask, db: Database):
             reading_month=sel_month or None,
         )
 
-        # 校验抄表数据一致性
-        from collections import OrderedDict
-        from src.parsers.validators import validate_reading
-
-        # meter_id -> warnings list
-        validation_map = {}
-        for r in raw:
-            warns = validate_reading(r)
-            if warns:
-                validation_map[r["meter_id"]] = warns
-
         # 构建 按用户→按月→发电表/上网表 的分组结构
+        from collections import OrderedDict
         user_groups = OrderedDict()  # user_id -> {project_name, months: {month -> {gen, grid}}}
         for r in raw:
             uid = r["user_id"] or "unknown"
@@ -962,8 +952,6 @@ def _register_routes(app: Flask, db: Database):
             month = r["reading_month"]
             if month not in md:
                 md[month] = {"month": month, "gen": None, "grid": None}
-            # 附加校验信息
-            r["_validation_warnings"] = validation_map.get(r["meter_id"], [])
             if r["meter_type"] == "发电表":
                 md[month]["gen"] = r
             elif r["meter_type"] == "上网表":
@@ -1172,38 +1160,6 @@ def _register_routes(app: Flask, db: Database):
         except Exception as e:
             log.error("更新单价失败: %s", e)
             return jsonify({"ok": False, "error": str(e)})
-
-    # ---- 抄表数据校验 ----
-    @app.route("/api/readings/validate")
-    def readings_validate():
-        """校验抄表数据一致性（总 vs 尖+峰+平+谷）。
-
-        返回每条记录的校验结果，前端用于高亮异常行。
-        """
-        from src.parsers.validators import validate_reading
-
-        project = request.args.get("project") or None
-        user_id = request.args.get("user_id") or None
-        month = request.args.get("month") or None
-
-        raw = db.get_readings_grouped(
-            project_name=project, user_id=user_id, reading_month=month)
-
-        issues = []
-        for r in raw:
-            warns = validate_reading(r)
-            if warns:
-                issues.append({
-                    "meter_number": r["meter_number"],
-                    "meter_id": r["meter_id"],
-                    "meter_type": r["meter_type"],
-                    "reading_month": r["reading_month"],
-                    "user_id": r.get("user_id"),
-                    "project_name": r.get("project_name"),
-                    "warnings": warns,
-                })
-
-        return jsonify({"total_checked": len(raw), "issues": issues, "issue_count": len(issues)})
 
     # ---- 邮件文件查看 ----
     @app.route("/email-files")
