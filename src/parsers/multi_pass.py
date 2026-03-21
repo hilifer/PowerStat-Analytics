@@ -1131,6 +1131,15 @@ class MultiPassExtractor:
         rev_total_col = next((c for c, h in headers.items()
                               if self._matches_any(h, self._rev_total_aliases)), None)
 
+        # === 排除含倍率/金额/电价的表（统计表/计算表，不是原始抄表数据） ===
+        _exclude_keywords = ("倍率", "CT倍率", "变比", "金额", "电价", "单价",
+                             "上网电价", "上网金额", "发电量", "上网电量")
+        for c, hdr in headers.items():
+            if any(kw in hdr for kw in _exclude_keywords):
+                log.debug("  [读数] 跳过 %s/%s: 含 '%s' 列，非原始抄表数据",
+                          filepath.name, sheet_name, hdr)
+                return
+
         # === 完整性校验：必须同时具备 日期 + 正向(总/尖/峰/平/谷) + 反向(总/尖/峰/平/谷) ===
         # 缺少任何一项则放弃提取（数据不全无法抄表）
         required_periods = {"sharp_peak", "peak", "flat", "valley"}
@@ -1442,6 +1451,17 @@ class MultiPassExtractor:
                         rev_section_start = col_idx
                 elif any(kw in cell for kw in ("正向数据", "发电数据", "正向")):
                     fwd_section_start = col_idx
+
+        # === 排除含倍率/金额/电价的块（统计表/计算表，不是原始抄表数据） ===
+        _exclude_keywords = ("倍率", "CT倍率", "变比", "金额", "电价", "单价",
+                             "上网电价", "上网金额")
+        for row_idx in header_search_range:
+            for col_idx in range(len(df.columns)):
+                cell = _cell_str(df.iloc[row_idx, col_idx])
+                if cell and any(kw in cell for kw in _exclude_keywords):
+                    log.debug("  [转置表读数] 跳过 %s/%s: 含 '%s'，非原始抄表数据",
+                              filepath.name, sheet_name, cell)
+                    return
 
         # 高优先级：原始差值（未乘倍率，抄表数据），按区段分正向/反向
         raw_kw_high = ("电表用理", "电表用量")
