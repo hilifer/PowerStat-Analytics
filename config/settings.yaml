@@ -36,8 +36,8 @@ attachments:
 
 # --- OCR 设置 ---
 ocr:
-  # OCR 引擎: "tesseract" 或 "paddleocr"
-  engine: "paddleocr"
+  # OCR 引擎: "rapidocr"（推荐，ONNX 推理，模型随 pip 包分发）、"paddleocr" 或 "tesseract"
+  engine: "rapidocr"
   # Tesseract 语言包
   tesseract_lang: "chi_sim+eng"
   # OCR 置信度阈值 (0-1)

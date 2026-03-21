@@ -1,10 +1,11 @@
 """图片 OCR 引擎：从图片中提取单价和用户编号。
 
-支持 PaddleOCR 和 Tesseract 两种引擎，通过配置切换。
+支持 RapidOCR、PaddleOCR 和 Tesseract 三种引擎，按优先级自动切换。
 单价通过用户编号与抄表数据关联。
 
 优化点：
-- 图片预处理（灰度化、对比度增强、二值化）提升 OCR 准确率
+- RapidOCR（ONNX 推理）作为首选引擎，模型随 pip 包分发，无需单独下载
+- 图片预处理（对比度增强、锐化、放大）提升 OCR 准确率
 - 多级正则匹配策略（表格行级 → 标签级 → 通用模式）
 - 从文件名推断月份和用户编号作为补充
 """
@@ -64,7 +65,7 @@ class OCREngine:
 
     def __init__(self):
         ocr_cfg = config.get("ocr") or {}
-        self.engine_type = ocr_cfg.get("engine", "paddleocr")
+        self.engine_type = ocr_cfg.get("engine", "rapidocr")
         self.confidence_threshold = ocr_cfg.get("confidence_threshold", 0.6)
         self.tesseract_lang = ocr_cfg.get("tesseract_lang", "chi_sim+eng")
         self.extraction_rules = config.get("ocr_extraction_rules") or {}
@@ -73,9 +74,25 @@ class OCREngine:
         self._warned = False
 
     def _init_engine(self):
-        """延迟初始化 OCR 引擎。"""
+        """延迟初始化 OCR 引擎，按优先级尝试: RapidOCR → PaddleOCR → Tesseract。"""
         if self._engine is not None or self._unavailable:
             return
+
+        if self.engine_type == "rapidocr":
+            try:
+                from rapidocr_onnxruntime import RapidOCR
+                self._engine = RapidOCR()
+                log.info("RapidOCR 引擎初始化成功（ONNX 推理）")
+            except ImportError:
+                log.warning("RapidOCR 未安装，尝试 PaddleOCR")
+                self.engine_type = "paddleocr"
+                self._init_engine()
+                return
+            except Exception as e:
+                log.warning("RapidOCR 初始化失败: %s，尝试 PaddleOCR", e)
+                self.engine_type = "paddleocr"
+                self._init_engine()
+                return
 
         if self.engine_type == "paddleocr":
             try:
@@ -147,7 +164,7 @@ class OCREngine:
 
         if self._unavailable:
             if not self._warned:
-                log.warning("无可用 OCR 引擎（PaddleOCR/Tesseract 均未安装），跳过所有图片处理")
+                log.warning("无可用 OCR 引擎（RapidOCR/PaddleOCR/Tesseract 均未安装），跳过所有图片处理")
                 self._warned = True
             result = OCRResult()
             result.source_file = Path(filepath).name
@@ -209,7 +226,18 @@ class OCREngine:
 
     def _run_ocr(self, filepath: str) -> str:
         """执行 OCR 识别，返回全文文本。"""
-        if self.engine_type == "paddleocr":
+        if self.engine_type == "rapidocr":
+            # RapidOCR 返回 (result, elapse)，result 为 [[box, text, score], ...] 或 None
+            result, _ = self._engine(str(filepath))
+            lines = []
+            if result:
+                for item in result:
+                    text, score = item[1], item[2]
+                    if score >= self.confidence_threshold:
+                        lines.append(text)
+            return "\n".join(lines)
+
+        elif self.engine_type == "paddleocr":
             ocr_result = self._engine.predict(str(filepath))
             lines = []
             if ocr_result:
