@@ -83,13 +83,8 @@ class OCREngine:
                 from rapidocr_onnxruntime import RapidOCR
                 self._engine = RapidOCR()
                 log.info("RapidOCR 引擎初始化成功（ONNX 推理）")
-            except ImportError:
-                log.warning("RapidOCR 未安装，尝试 PaddleOCR")
-                self.engine_type = "paddleocr"
-                self._init_engine()
-                return
             except Exception as e:
-                log.warning("RapidOCR 初始化失败: %s，尝试 PaddleOCR", e)
+                log.warning("RapidOCR 初始化失败 (%s: %s)，尝试 PaddleOCR", type(e).__name__, e)
                 self.engine_type = "paddleocr"
                 self._init_engine()
                 return
@@ -102,13 +97,8 @@ class OCREngine:
                 # PaddleOCR 3.4.0+: use_angle_cls → use_textline_orientation, show_log 已移除
                 self._engine = PaddleOCR(use_textline_orientation=True, lang="ch")
                 log.info("PaddleOCR 引擎初始化成功")
-            except ImportError:
-                log.warning("PaddleOCR 未安装，回退到 Tesseract")
-                self.engine_type = "tesseract"
-                self._init_engine()
-                return
             except Exception as e:
-                log.warning("PaddleOCR 初始化失败: %s，回退到 Tesseract", e)
+                log.warning("PaddleOCR 初始化失败 (%s: %s)，回退到 Tesseract", type(e).__name__, e)
                 self.engine_type = "tesseract"
                 self._init_engine()
                 return
