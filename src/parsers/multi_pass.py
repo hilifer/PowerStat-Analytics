@@ -1219,29 +1219,23 @@ class MultiPassExtractor:
                         self._upsert_reading(fwd_target, row_month, fwd_readings,
                                              fwd_total, filepath.name, sheet_name)
 
-            # 反向读数
+            # 反向读数 — 存储在同一电表的 rev_* 字段
             if rev_cols:
                 rev_readings = {k: _to_float(row.iloc[c]) for k, c in rev_cols.items()}
-                rev_total = _to_float(row.iloc[rev_total_col]) if rev_total_col is not None else None
+                rev_total_val = _to_float(row.iloc[rev_total_col]) if rev_total_col is not None else None
                 parts = [v for v in rev_readings.values() if v is not None]
-                if rev_total is None and parts:
-                    rev_total = sum(parts)
-                if any(v is not None for v in rev_readings.values()) or rev_total is not None:
+                if rev_total_val is None and parts:
+                    rev_total_val = sum(parts)
+                if any(v is not None for v in rev_readings.values()) or rev_total_val is not None:
+                    # 反向数据写入正向数据同一电表的 rev_* 字段
                     if has_dual_meter_cols:
-                        # 双表号模式：直接写入上网表号列对应的电表
-                        rev_target = grid_meter or self._find_paired_meter(meter_number, "上网表") or meter_number
-                    elif effective_type == "发电表":
-                        # 发电表不抄反向数据，路由给配对的上网表
-                        rev_target = self._find_paired_meter(meter_number, "上网表")
+                        rev_target = gen_meter or meter_number
                     elif effective_type == "上网表":
-                        # 上网表：反向数据写入自身
-                        rev_target = meter_number
+                        rev_target = self._find_paired_meter(meter_number, "发电表") or meter_number
                     else:
-                        # 未知类型：尝试配对，兜底写入自身
-                        rev_target = self._find_paired_meter(meter_number, "上网表") or meter_number
-                    if rev_target:
-                        self._upsert_reading(rev_target, row_month, rev_readings,
-                                             rev_total, filepath.name, sheet_name)
+                        rev_target = meter_number
+                    self._upsert_rev_reading(rev_target, row_month, rev_readings,
+                                             rev_total_val, filepath.name, sheet_name)
 
     def _readings_from_transposed(self, df, filepath, sheet_name, source_info):
         """从转置表（行=尖峰平谷）提取读数。
@@ -1690,15 +1684,16 @@ class MultiPassExtractor:
             if block_gen_asset and not self.meters[gen_meter].get("asset_number"):
                 self.meters[gen_meter]["asset_number"] = block_gen_asset
 
-        if grid_meter and grid_meter in self.meters and has_rev:
-            parts = [v for v in rev_r.values() if v is not None]
-            self._upsert_reading(grid_meter, month, rev_r,
-                                 rev_total or (sum(parts) if parts else None),
-                                 filepath.name, sheet_name,
-                                 cur_readings=rev_cur or None,
-                                 prev_readings=rev_prev or None,
-                                 cur_total=rev_cur_total,
-                                 prev_total=rev_prev_total)
+        # 反向读数存储在同一电表(gen_meter)的 rev_* 字段
+        if has_rev:
+            rev_target = gen_meter or grid_meter
+            if rev_target and rev_target in self.meters:
+                parts = [v for v in rev_r.values() if v is not None]
+                self._upsert_rev_reading(rev_target, month, rev_r,
+                                         rev_total or (sum(parts) if parts else None),
+                                         filepath.name, sheet_name)
+
+        if grid_meter and grid_meter in self.meters:
             # 反向倍率 → 上网表
             if rev_mult_val and rev_mult_val >= 1 and not self.meters[grid_meter].get("multiplier"):
                 self.meters[grid_meter]["multiplier"] = rev_mult_val
@@ -1754,6 +1749,23 @@ class MultiPassExtractor:
             if rec.get("prev_total") is None and prev_total is not None:
                 rec["prev_total"] = prev_total
 
+    def _upsert_rev_reading(self, meter_number, month, rev_readings, rev_total,
+                            source_file, source_sheet):
+        """写入反向读数到同一电表的 rev_* 字段。"""
+        key = (meter_number, month)
+        if key not in self.readings:
+            self.readings[key] = {
+                "source_file": source_file,
+                "source_sheet": source_sheet,
+            }
+        rec = self.readings[key]
+        for f in ("sharp_peak", "peak", "flat", "valley"):
+            k = f"rev_{f}"
+            if rec.get(k) is None and rev_readings.get(f) is not None:
+                rec[k] = rev_readings[f]
+        if rec.get("rev_total") is None and rev_total is not None:
+            rec["rev_total"] = rev_total
+
     def _build_records(self) -> list[dict]:
         # 构建配对索引：meter_number -> paired_meter_number
         pair_map = {}
@@ -1803,6 +1815,11 @@ class MultiPassExtractor:
                 "flat": reading.get("flat"),
                 "valley": reading.get("valley"),
                 "total_kwh": reading.get("total_kwh"),
+                "rev_sharp_peak": reading.get("rev_sharp_peak"),
+                "rev_peak": reading.get("rev_peak"),
+                "rev_flat": reading.get("rev_flat"),
+                "rev_valley": reading.get("rev_valley"),
+                "rev_total": reading.get("rev_total"),
                 "cur_sharp_peak": reading.get("cur_sharp_peak"),
                 "cur_peak": reading.get("cur_peak"),
                 "cur_flat": reading.get("cur_flat"),
@@ -1813,6 +1830,7 @@ class MultiPassExtractor:
                 "prev_flat": reading.get("prev_flat"),
                 "prev_valley": reading.get("prev_valley"),
                 "prev_total": reading.get("prev_total"),
+                "stat_date": reading.get("stat_date"),
                 "source_file": reading.get("source_file"),
                 "source_sheet": reading.get("source_sheet"),
             })

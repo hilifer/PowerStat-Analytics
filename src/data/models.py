@@ -44,21 +44,31 @@ CREATE TABLE IF NOT EXISTS monthly_readings (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     meter_id        INTEGER NOT NULL REFERENCES meters(id),
     reading_month   TEXT NOT NULL,               -- 格式: YYYY-MM
-    sharp_peak      REAL,  -- 尖峰（电表用理 = 本月表数 - 上月表数）
-    peak            REAL,  -- 峰
-    flat            REAL,  -- 平
-    valley          REAL,  -- 谷
-    total_kwh       REAL,  -- 总电量
+    -- 正向有功（用电量 = 本月表数 - 上月表数）
+    sharp_peak      REAL,  -- 正向尖
+    peak            REAL,  -- 正向峰
+    flat            REAL,  -- 正向平
+    valley          REAL,  -- 正向谷
+    total_kwh       REAL,  -- 正向有功总
+    -- 反向有功
+    rev_sharp_peak  REAL,  -- 反向尖
+    rev_peak        REAL,  -- 反向峰
+    rev_flat        REAL,  -- 反向平
+    rev_valley      REAL,  -- 反向谷
+    rev_total       REAL,  -- 反向有功总
+    -- 本月表数
     cur_sharp_peak  REAL,  -- 本月表数：尖峰
     cur_peak        REAL,  -- 本月表数：峰
     cur_flat        REAL,  -- 本月表数：平
     cur_valley      REAL,  -- 本月表数：谷
     cur_total       REAL,  -- 本月表数：总
+    -- 上月表数
     prev_sharp_peak REAL,  -- 上月表数：尖峰
     prev_peak       REAL,  -- 上月表数：峰
     prev_flat       REAL,  -- 上月表数：平
     prev_valley     REAL,  -- 上月表数：谷
     prev_total      REAL,  -- 上月表数：总
+    stat_date       TEXT,                            -- 统计日期（从表码文件提取）
     is_locked       INTEGER DEFAULT 0,               -- 锁定标志 (1=锁定, 0=未锁定)
     source_file     TEXT,
     source_sheet    TEXT,
@@ -108,6 +118,11 @@ SELECT
     r.flat,
     r.valley,
     r.total_kwh,
+    r.rev_sharp_peak,
+    r.rev_peak,
+    r.rev_flat,
+    r.rev_valley,
+    r.rev_total,
     r.cur_sharp_peak,
     r.cur_peak,
     r.cur_flat,
@@ -196,11 +211,15 @@ class Database:
 
         # 添加 monthly_readings 的本月/上月表数列（如果缺失）
         reading_columns = {row[1] for row in conn.execute("PRAGMA table_info(monthly_readings)").fetchall()}
-        for col in ("cur_sharp_peak", "cur_peak", "cur_flat", "cur_valley", "cur_total",
+        for col in ("rev_sharp_peak", "rev_peak", "rev_flat", "rev_valley", "rev_total",
+                     "cur_sharp_peak", "cur_peak", "cur_flat", "cur_valley", "cur_total",
                      "prev_sharp_peak", "prev_peak", "prev_flat", "prev_valley", "prev_total"):
             if col not in reading_columns:
                 log.info("迁移: 添加 monthly_readings.%s 列", col)
                 conn.execute(f"ALTER TABLE monthly_readings ADD COLUMN {col} REAL")
+        if "stat_date" not in reading_columns:
+            log.info("迁移: 添加 monthly_readings.stat_date 列")
+            conn.execute("ALTER TABLE monthly_readings ADD COLUMN stat_date TEXT")
 
         # 添加 monthly_readings.is_locked 列（如果缺失）
         if "is_locked" not in reading_columns:
@@ -231,6 +250,11 @@ class Database:
                 r.flat,
                 r.valley,
                 r.total_kwh,
+                r.rev_sharp_peak,
+                r.rev_peak,
+                r.rev_flat,
+                r.rev_valley,
+                r.rev_total,
                 r.cur_sharp_peak,
                 r.cur_peak,
                 r.cur_flat,
@@ -646,17 +670,28 @@ class Database:
     def upsert_reading(self, meter_id: int, reading_month: str,
                        sharp_peak: float = None, peak: float = None,
                        flat: float = None, valley: float = None,
-                       total_kwh: float = None, source_file: str = None,
+                       total_kwh: float = None,
+                       rev_sharp_peak: float = None, rev_peak: float = None,
+                       rev_flat: float = None, rev_valley: float = None,
+                       rev_total: float = None,
+                       source_file: str = None,
                        source_sheet: str = None, email_date: datetime = None,
                        cur_sharp_peak: float = None, cur_peak: float = None,
                        cur_flat: float = None, cur_valley: float = None,
                        cur_total: float = None,
                        prev_sharp_peak: float = None, prev_peak: float = None,
                        prev_flat: float = None, prev_valley: float = None,
-                       prev_total: float = None):
+                       prev_total: float = None,
+                       stat_date: str = None):
         """插入或更新月度抄表数据。已锁定的记录不会被自动更新。"""
         if total_kwh is None:
-            total_kwh = sum(v for v in [sharp_peak, peak, flat, valley] if v is not None)
+            fwd_parts = [v for v in [sharp_peak, peak, flat, valley] if v is not None]
+            if fwd_parts:
+                total_kwh = sum(fwd_parts)
+        if rev_total is None:
+            rev_parts = [v for v in [rev_sharp_peak, rev_peak, rev_flat, rev_valley] if v is not None]
+            if rev_parts:
+                rev_total = sum(rev_parts)
 
         with self.connection() as conn:
             # 检查是否已锁定
@@ -671,16 +706,22 @@ class Database:
             conn.execute(
                 """INSERT INTO monthly_readings
                    (meter_id, reading_month, sharp_peak, peak, flat, valley, total_kwh,
+                    rev_sharp_peak, rev_peak, rev_flat, rev_valley, rev_total,
                     cur_sharp_peak, cur_peak, cur_flat, cur_valley, cur_total,
                     prev_sharp_peak, prev_peak, prev_flat, prev_valley, prev_total,
-                    source_file, source_sheet, email_date)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    stat_date, source_file, source_sheet, email_date)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(meter_id, reading_month) DO UPDATE SET
                        sharp_peak = COALESCE(excluded.sharp_peak, monthly_readings.sharp_peak),
                        peak = COALESCE(excluded.peak, monthly_readings.peak),
                        flat = COALESCE(excluded.flat, monthly_readings.flat),
                        valley = COALESCE(excluded.valley, monthly_readings.valley),
                        total_kwh = COALESCE(excluded.total_kwh, monthly_readings.total_kwh),
+                       rev_sharp_peak = COALESCE(excluded.rev_sharp_peak, monthly_readings.rev_sharp_peak),
+                       rev_peak = COALESCE(excluded.rev_peak, monthly_readings.rev_peak),
+                       rev_flat = COALESCE(excluded.rev_flat, monthly_readings.rev_flat),
+                       rev_valley = COALESCE(excluded.rev_valley, monthly_readings.rev_valley),
+                       rev_total = COALESCE(excluded.rev_total, monthly_readings.rev_total),
                        cur_sharp_peak = COALESCE(excluded.cur_sharp_peak, monthly_readings.cur_sharp_peak),
                        cur_peak = COALESCE(excluded.cur_peak, monthly_readings.cur_peak),
                        cur_flat = COALESCE(excluded.cur_flat, monthly_readings.cur_flat),
@@ -691,13 +732,15 @@ class Database:
                        prev_flat = COALESCE(excluded.prev_flat, monthly_readings.prev_flat),
                        prev_valley = COALESCE(excluded.prev_valley, monthly_readings.prev_valley),
                        prev_total = COALESCE(excluded.prev_total, monthly_readings.prev_total),
+                       stat_date = COALESCE(excluded.stat_date, monthly_readings.stat_date),
                        source_file = COALESCE(excluded.source_file, monthly_readings.source_file),
                        source_sheet = COALESCE(excluded.source_sheet, monthly_readings.source_sheet)
                 """,
                 (meter_id, reading_month, sharp_peak, peak, flat, valley, total_kwh,
+                 rev_sharp_peak, rev_peak, rev_flat, rev_valley, rev_total,
                  cur_sharp_peak, cur_peak, cur_flat, cur_valley, cur_total,
                  prev_sharp_peak, prev_peak, prev_flat, prev_valley, prev_total,
-                 source_file, source_sheet,
+                 stat_date, source_file, source_sheet,
                  email_date.isoformat() if email_date else None),
             )
             log.debug("抄表数据 upsert: meter_id=%d, month=%s", meter_id, reading_month)
@@ -705,8 +748,10 @@ class Database:
     def update_reading(self, meter_id: int, reading_month: str, **fields):
         """手动更新抄表数据（用于前端编辑，不受锁定限制）。"""
         allowed = {"sharp_peak", "peak", "flat", "valley", "total_kwh",
+                   "rev_sharp_peak", "rev_peak", "rev_flat", "rev_valley", "rev_total",
                    "cur_sharp_peak", "cur_peak", "cur_flat", "cur_valley", "cur_total",
-                   "prev_sharp_peak", "prev_peak", "prev_flat", "prev_valley", "prev_total"}
+                   "prev_sharp_peak", "prev_peak", "prev_flat", "prev_valley", "prev_total",
+                   "stat_date"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return
@@ -735,8 +780,10 @@ class Database:
                    m.paired_meter_id, m.is_locked AS meter_locked,
                    r.reading_month,
                    r.sharp_peak, r.peak, r.flat, r.valley, r.total_kwh,
+                   r.rev_sharp_peak, r.rev_peak, r.rev_flat, r.rev_valley, r.rev_total,
                    r.cur_sharp_peak, r.cur_peak, r.cur_flat, r.cur_valley, r.cur_total,
                    r.prev_sharp_peak, r.prev_peak, r.prev_flat, r.prev_valley, r.prev_total,
+                   r.stat_date,
                    r.is_locked AS reading_locked,
                    r.source_file, r.source_sheet,
                    p.sharp_peak_price, p.peak_price, p.flat_price, p.valley_price,

@@ -102,6 +102,9 @@
         <div class="month-header">
             <div style="display:flex; align-items:center; gap:0.5rem;">
                 <h3 style="margin:0; font-size:1rem;">{{ month_data.month }}</h3>
+                {% if first_r and first_r.stat_date %}
+                <span style="font-size:0.8rem; color:var(--text-secondary);">统计日期: {{ first_r.stat_date }}</span>
+                {% endif %}
             </div>
             <div style="display:flex; gap:0.5rem; align-items:center;">
                 <button class="btn btn-sm {% if any_locked %}btn-danger{% else %}btn-outline{% endif %}"
@@ -122,14 +125,24 @@
                 <table class="reading-table">
                     <thead>
                         <tr>
-                            <th style="min-width:70px;">类型</th>
-                            <th>电表号</th>
-                            <th class="num">倍率</th>
-                            <th class="num">尖峰</th>
-                            <th class="num">峰</th>
-                            <th class="num">平</th>
-                            <th class="num">谷</th>
-                            <th>状态</th>
+                            <th rowspan="2" style="min-width:70px;">类型</th>
+                            <th rowspan="2">电表号</th>
+                            <th rowspan="2" class="num">倍率</th>
+                            <th colspan="5" class="num" style="text-align:center; background:#f0fdf4;">正向有功</th>
+                            <th colspan="5" class="num" style="text-align:center; background:#eff6ff;">反向有功</th>
+                            <th rowspan="2">状态</th>
+                        </tr>
+                        <tr>
+                            <th class="num" style="background:#f0fdf4;">总(kWh)</th>
+                            <th class="num" style="background:#f0fdf4;">尖</th>
+                            <th class="num" style="background:#f0fdf4;">峰</th>
+                            <th class="num" style="background:#f0fdf4;">平</th>
+                            <th class="num" style="background:#f0fdf4;">谷</th>
+                            <th class="num" style="background:#eff6ff;">总(kWh)</th>
+                            <th class="num" style="background:#eff6ff;">尖</th>
+                            <th class="num" style="background:#eff6ff;">峰</th>
+                            <th class="num" style="background:#eff6ff;">平</th>
+                            <th class="num" style="background:#eff6ff;">谷</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -142,17 +155,35 @@
                             <td><span class="tag tag-gen">发电表</span></td>
                             <td class="meter-num">{{ r.meter_number }}</td>
                             <td class="num">{{ r.multiplier }}</td>
-                            <td class="num"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input total-input" name="total_kwh"
+                                value="{{ '%.2f'|format(r.total_kwh) if r.total_kwh is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
                                 value="{{ '%.2f'|format(r.sharp_peak) if r.sharp_peak is not none else '' }}"
                                 {% if r.reading_locked %}disabled{% endif %}></td>
-                            <td class="num"><input type="number" step="0.01" class="cell-input" name="peak"
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="peak"
                                 value="{{ '%.2f'|format(r.peak) if r.peak is not none else '' }}"
                                 {% if r.reading_locked %}disabled{% endif %}></td>
-                            <td class="num"><input type="number" step="0.01" class="cell-input" name="flat"
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="flat"
                                 value="{{ '%.2f'|format(r.flat) if r.flat is not none else '' }}"
                                 {% if r.reading_locked %}disabled{% endif %}></td>
-                            <td class="num"><input type="number" step="0.01" class="cell-input" name="valley"
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="valley"
                                 value="{{ '%.2f'|format(r.valley) if r.valley is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input total-input" name="rev_total"
+                                value="{{ '%.2f'|format(r.rev_total) if r.rev_total is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_sharp_peak"
+                                value="{{ '%.2f'|format(r.rev_sharp_peak) if r.rev_sharp_peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_peak"
+                                value="{{ '%.2f'|format(r.rev_peak) if r.rev_peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_flat"
+                                value="{{ '%.2f'|format(r.rev_flat) if r.rev_flat is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_valley"
+                                value="{{ '%.2f'|format(r.rev_valley) if r.rev_valley is not none else '' }}"
                                 {% if r.reading_locked %}disabled{% endif %}></td>
                             <td>
                                 {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
@@ -163,7 +194,7 @@
                         {% else %}
                         <tr class="row-incomplete row-missing">
                             <td><span class="tag tag-gen">发电表</span></td>
-                            <td colspan="6" style="text-align:center; color:var(--text-secondary);">无数据</td>
+                            <td colspan="12" style="text-align:center; color:var(--text-secondary);">无数据</td>
                             <td><span class="status-badge badge-incomplete">&#9888; 缺失</span></td>
                         </tr>
                         {% endif %}
@@ -177,17 +208,35 @@
                             <td><span class="tag tag-grid">上网表</span></td>
                             <td class="meter-num">{{ r.meter_number }}</td>
                             <td class="num">{{ r.multiplier }}</td>
-                            <td class="num"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input total-input" name="total_kwh"
+                                value="{{ '%.2f'|format(r.total_kwh) if r.total_kwh is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
                                 value="{{ '%.2f'|format(r.sharp_peak) if r.sharp_peak is not none else '' }}"
                                 {% if r.reading_locked %}disabled{% endif %}></td>
-                            <td class="num"><input type="number" step="0.01" class="cell-input" name="peak"
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="peak"
                                 value="{{ '%.2f'|format(r.peak) if r.peak is not none else '' }}"
                                 {% if r.reading_locked %}disabled{% endif %}></td>
-                            <td class="num"><input type="number" step="0.01" class="cell-input" name="flat"
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="flat"
                                 value="{{ '%.2f'|format(r.flat) if r.flat is not none else '' }}"
                                 {% if r.reading_locked %}disabled{% endif %}></td>
-                            <td class="num"><input type="number" step="0.01" class="cell-input" name="valley"
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="valley"
                                 value="{{ '%.2f'|format(r.valley) if r.valley is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input total-input" name="rev_total"
+                                value="{{ '%.2f'|format(r.rev_total) if r.rev_total is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_sharp_peak"
+                                value="{{ '%.2f'|format(r.rev_sharp_peak) if r.rev_sharp_peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_peak"
+                                value="{{ '%.2f'|format(r.rev_peak) if r.rev_peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_flat"
+                                value="{{ '%.2f'|format(r.rev_flat) if r.rev_flat is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_valley"
+                                value="{{ '%.2f'|format(r.rev_valley) if r.rev_valley is not none else '' }}"
                                 {% if r.reading_locked %}disabled{% endif %}></td>
                             <td>
                                 {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
@@ -198,7 +247,7 @@
                         {% else %}
                         <tr class="row-incomplete row-missing">
                             <td><span class="tag tag-grid">上网表</span></td>
-                            <td colspan="6" style="text-align:center; color:var(--text-secondary);">无数据</td>
+                            <td colspan="12" style="text-align:center; color:var(--text-secondary);">无数据</td>
                             <td><span class="status-badge badge-incomplete">&#9888; 缺失</span></td>
                         </tr>
                         {% endif %}
@@ -400,13 +449,16 @@
 
 /* 输入框 */
 .cell-input {
-    width:90px; padding:0.2rem 0.4rem; border:1px solid var(--border);
+    width:80px; padding:0.2rem 0.3rem; border:1px solid var(--border);
     border-radius:4px; font-size:0.83rem; text-align:right; background:#fff;
     font-variant-numeric:tabular-nums;
 }
 .cell-input:focus { outline:none; border-color:var(--primary); box-shadow:0 0 0 2px rgba(37,99,235,0.15); }
 .cell-input:disabled { background:#f1f5f9; color:var(--text-secondary); cursor:not-allowed; }
 .cell-input.total-input { font-weight:600; }
+.fwd-cell { background:#f0fdf4; }
+.rev-cell { background:#eff6ff; }
+.reading-table { font-size:0.8rem; }
 
 /* 行状态 */
 .row-incomplete { background:#fffbeb !important; }
