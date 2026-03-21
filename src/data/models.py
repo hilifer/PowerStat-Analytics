@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS price_records (
     flat_price          REAL,
     valley_price        REAL,
     average_price       REAL,
+    is_locked           INTEGER DEFAULT 0,               -- 锁定标志 (1=锁定, 0=未锁定)
     source_file         TEXT,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, reading_month)
@@ -241,6 +242,11 @@ class Database:
         if "average_price" not in price_columns:
             log.info("迁移: 添加 price_records.average_price 列")
             conn.execute("ALTER TABLE price_records ADD COLUMN average_price REAL")
+
+        # 添加 price_records.is_locked 列（如果缺失）
+        if "is_locked" not in price_columns:
+            log.info("迁移: 添加 price_records.is_locked 列")
+            conn.execute("ALTER TABLE price_records ADD COLUMN is_locked INTEGER DEFAULT 0")
 
         # 重建视图（确保包含新字段）
         conn.execute("DROP VIEW IF EXISTS v_monthly_bill")
@@ -736,29 +742,29 @@ class Database:
                     stat_date, source_file, source_sheet, email_date)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(meter_id, reading_month) DO UPDATE SET
-                       sharp_peak = COALESCE(monthly_readings.sharp_peak, excluded.sharp_peak),
-                       peak = COALESCE(monthly_readings.peak, excluded.peak),
-                       flat = COALESCE(monthly_readings.flat, excluded.flat),
-                       valley = COALESCE(monthly_readings.valley, excluded.valley),
-                       total_kwh = COALESCE(monthly_readings.total_kwh, excluded.total_kwh),
-                       rev_sharp_peak = COALESCE(monthly_readings.rev_sharp_peak, excluded.rev_sharp_peak),
-                       rev_peak = COALESCE(monthly_readings.rev_peak, excluded.rev_peak),
-                       rev_flat = COALESCE(monthly_readings.rev_flat, excluded.rev_flat),
-                       rev_valley = COALESCE(monthly_readings.rev_valley, excluded.rev_valley),
-                       rev_total = COALESCE(monthly_readings.rev_total, excluded.rev_total),
-                       cur_sharp_peak = COALESCE(monthly_readings.cur_sharp_peak, excluded.cur_sharp_peak),
-                       cur_peak = COALESCE(monthly_readings.cur_peak, excluded.cur_peak),
-                       cur_flat = COALESCE(monthly_readings.cur_flat, excluded.cur_flat),
-                       cur_valley = COALESCE(monthly_readings.cur_valley, excluded.cur_valley),
-                       cur_total = COALESCE(monthly_readings.cur_total, excluded.cur_total),
-                       prev_sharp_peak = COALESCE(monthly_readings.prev_sharp_peak, excluded.prev_sharp_peak),
-                       prev_peak = COALESCE(monthly_readings.prev_peak, excluded.prev_peak),
-                       prev_flat = COALESCE(monthly_readings.prev_flat, excluded.prev_flat),
-                       prev_valley = COALESCE(monthly_readings.prev_valley, excluded.prev_valley),
-                       prev_total = COALESCE(monthly_readings.prev_total, excluded.prev_total),
-                       stat_date = COALESCE(monthly_readings.stat_date, excluded.stat_date),
-                       source_file = COALESCE(monthly_readings.source_file, excluded.source_file),
-                       source_sheet = COALESCE(monthly_readings.source_sheet, excluded.source_sheet)
+                       sharp_peak = COALESCE(excluded.sharp_peak, monthly_readings.sharp_peak),
+                       peak = COALESCE(excluded.peak, monthly_readings.peak),
+                       flat = COALESCE(excluded.flat, monthly_readings.flat),
+                       valley = COALESCE(excluded.valley, monthly_readings.valley),
+                       total_kwh = COALESCE(excluded.total_kwh, monthly_readings.total_kwh),
+                       rev_sharp_peak = COALESCE(excluded.rev_sharp_peak, monthly_readings.rev_sharp_peak),
+                       rev_peak = COALESCE(excluded.rev_peak, monthly_readings.rev_peak),
+                       rev_flat = COALESCE(excluded.rev_flat, monthly_readings.rev_flat),
+                       rev_valley = COALESCE(excluded.rev_valley, monthly_readings.rev_valley),
+                       rev_total = COALESCE(excluded.rev_total, monthly_readings.rev_total),
+                       cur_sharp_peak = COALESCE(excluded.cur_sharp_peak, monthly_readings.cur_sharp_peak),
+                       cur_peak = COALESCE(excluded.cur_peak, monthly_readings.cur_peak),
+                       cur_flat = COALESCE(excluded.cur_flat, monthly_readings.cur_flat),
+                       cur_valley = COALESCE(excluded.cur_valley, monthly_readings.cur_valley),
+                       cur_total = COALESCE(excluded.cur_total, monthly_readings.cur_total),
+                       prev_sharp_peak = COALESCE(excluded.prev_sharp_peak, monthly_readings.prev_sharp_peak),
+                       prev_peak = COALESCE(excluded.prev_peak, monthly_readings.prev_peak),
+                       prev_flat = COALESCE(excluded.prev_flat, monthly_readings.prev_flat),
+                       prev_valley = COALESCE(excluded.prev_valley, monthly_readings.prev_valley),
+                       prev_total = COALESCE(excluded.prev_total, monthly_readings.prev_total),
+                       stat_date = COALESCE(excluded.stat_date, monthly_readings.stat_date),
+                       source_file = COALESCE(excluded.source_file, monthly_readings.source_file),
+                       source_sheet = COALESCE(excluded.source_sheet, monthly_readings.source_sheet)
                 """,
                 (meter_id, reading_month, sharp_peak, peak, flat, valley, total_kwh,
                  rev_sharp_peak, rev_peak, rev_flat, rev_valley, rev_total,
@@ -836,20 +842,29 @@ class Database:
                      sharp_peak_price: float = None, peak_price: float = None,
                      flat_price: float = None, valley_price: float = None,
                      average_price: float = None, source_file: str = None):
-        """插入或更新单价记录。"""
+        """插入或更新单价记录。已锁定的记录不会被自动更新。"""
         with self.connection() as conn:
+            # 检查是否已锁定
+            existing = conn.execute(
+                "SELECT is_locked FROM price_records WHERE user_id = ? AND reading_month = ?",
+                (user_id, reading_month),
+            ).fetchone()
+            if existing and existing["is_locked"]:
+                log.debug("单价数据已锁定，跳过: user_id=%s, month=%s", user_id, reading_month)
+                return
+
             conn.execute(
                 """INSERT INTO price_records
                    (user_id, reading_month, sharp_peak_price, peak_price, flat_price, valley_price,
                     average_price, source_file)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(user_id, reading_month) DO UPDATE SET
-                       sharp_peak_price = COALESCE(price_records.sharp_peak_price, excluded.sharp_peak_price),
-                       peak_price = COALESCE(price_records.peak_price, excluded.peak_price),
-                       flat_price = COALESCE(price_records.flat_price, excluded.flat_price),
-                       valley_price = COALESCE(price_records.valley_price, excluded.valley_price),
-                       average_price = COALESCE(price_records.average_price, excluded.average_price),
-                       source_file = COALESCE(price_records.source_file, excluded.source_file)
+                       sharp_peak_price = COALESCE(excluded.sharp_peak_price, price_records.sharp_peak_price),
+                       peak_price = COALESCE(excluded.peak_price, price_records.peak_price),
+                       flat_price = COALESCE(excluded.flat_price, price_records.flat_price),
+                       valley_price = COALESCE(excluded.valley_price, price_records.valley_price),
+                       average_price = COALESCE(excluded.average_price, price_records.average_price),
+                       source_file = COALESCE(excluded.source_file, price_records.source_file)
                 """,
                 (user_id, reading_month, sharp_peak_price, peak_price, flat_price, valley_price,
                  average_price, source_file),
