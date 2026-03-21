@@ -814,21 +814,32 @@ class MultiPassExtractor:
                     log.debug("  倍率列区分: 正向%s 反向%s (边界=%d)",
                               fwd_mult_cols, rev_mult_cols, boundary)
 
-                if all_meter_cols and (mult_cols or disc_cols):
+                if (mult_cols or disc_cols):
                     has_dual_mult = bool(fwd_mult_cols and rev_mult_cols)
 
                     for r in range(header_idx + 1, len(df)):
                         # 找行内所有电表号
                         row_meters = []
-                        for mc in all_meter_cols:
-                            val = clean_id(_cell_str(df.iloc[r, mc]))
-                            if val in self.meters:
-                                row_meters.append((mc, val))
-                            elif _is_meter_like(val):
-                                for mn in self.meters:
-                                    if val in mn or mn in val:
-                                        row_meters.append((mc, mn if len(mn) > len(val) else val))
-                                        break
+                        if all_meter_cols:
+                            for mc in all_meter_cols:
+                                val = clean_id(_cell_str(df.iloc[r, mc]))
+                                if val in self.meters:
+                                    row_meters.append((mc, val))
+                                elif _is_meter_like(val):
+                                    for mn in self.meters:
+                                        if val in mn or mn in val:
+                                            row_meters.append((mc, mn if len(mn) > len(val) else val))
+                                            break
+
+                        # 回退：扫描行内所有单元格寻找已知电表号
+                        # 处理无电表列（华尔特格式）或电表列值不规范（如"发电XXXX"）的情况
+                        if not row_meters:
+                            for c in range(len(df.columns)):
+                                if c in mult_cols or c in disc_cols:
+                                    continue  # 跳过倍率/折扣列
+                                val = clean_id(_cell_str(df.iloc[r, c]))
+                                if val in self.meters:
+                                    row_meters.append((c, val))
 
                         if not row_meters:
                             continue
