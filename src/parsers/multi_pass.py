@@ -1864,6 +1864,19 @@ class MultiPassExtractor:
                     "source_sheet": info.get("source_sheet"),
                 })
 
+        # 校验抄表数据一致性（总 vs 尖+峰+平+谷）
+        from src.parsers.validators import validate_reading_batch
+        issues = validate_reading_batch(records)
+        if issues:
+            log.warning("[校验] 发现 %d 条抄表数据不一致:", len(issues))
+            for issue in issues[:10]:
+                for w in issue["warnings"]:
+                    log.warning("  %s %s %s: %s",
+                                issue["meter_number"], issue["reading_month"],
+                                issue.get("meter_type", ""), w["msg"])
+            if len(issues) > 10:
+                log.warning("  ... 还有 %d 条问题", len(issues) - 10)
+
         log.info("最终结果: %d 个电表, %d 条记录", len(self.meters), len(records))
         return records
 

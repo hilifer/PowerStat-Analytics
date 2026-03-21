@@ -150,45 +150,48 @@
                         {% if month_data.gen %}
                         {% set r = month_data.gen %}
                         {% set incomplete = r.sharp_peak is none and r.peak is none and r.flat is none and r.valley is none %}
-                        <tr class="{% if incomplete %}row-incomplete{% endif %}{% if r.reading_locked %} row-locked{% endif %}"
+                        {% set has_warnings = r._validation_warnings|length > 0 %}
+                        <tr class="{% if has_warnings %}row-warn{% endif %}{% if incomplete %} row-incomplete{% endif %}{% if r.reading_locked %} row-locked{% endif %}"
                             data-meter-id="{{ r.meter_id }}" data-month="{{ month_data.month }}">
                             <td><span class="tag tag-gen">发电表</span></td>
                             <td class="meter-num">{{ r.meter_number }}</td>
                             <td class="num">{{ r.multiplier }}</td>
                             <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input total-input" name="total_kwh"
                                 value="{{ '%.2f'|format(r.total_kwh) if r.total_kwh is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
                                 value="{{ '%.2f'|format(r.sharp_peak) if r.sharp_peak is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="peak"
                                 value="{{ '%.2f'|format(r.peak) if r.peak is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="flat"
                                 value="{{ '%.2f'|format(r.flat) if r.flat is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="valley"
                                 value="{{ '%.2f'|format(r.valley) if r.valley is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num rev-cell"><input type="number" step="0.01" class="cell-input total-input" name="rev_total"
                                 value="{{ '%.2f'|format(r.rev_total) if r.rev_total is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_sharp_peak"
                                 value="{{ '%.2f'|format(r.rev_sharp_peak) if r.rev_sharp_peak is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_peak"
                                 value="{{ '%.2f'|format(r.rev_peak) if r.rev_peak is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_flat"
                                 value="{{ '%.2f'|format(r.rev_flat) if r.rev_flat is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_valley"
                                 value="{{ '%.2f'|format(r.rev_valley) if r.rev_valley is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
-                            <td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
+                            <td class="status-col">
                                 {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
+                                {% elif has_warnings %}<span class="status-badge badge-warn" title="{% for w in r._validation_warnings %}{{ w.msg }}&#10;{% endfor %}">&#9888; 校验异常</span>
                                 {% elif incomplete %}<span class="status-badge badge-incomplete">&#9888; 数据不全</span>
                                 {% else %}<span class="status-badge badge-ok">&#10003;</span>{% endif %}
+                                <div class="validation-msg"></div>
                             </td>
                         </tr>
                         {% else %}
@@ -203,45 +206,48 @@
                         {% if month_data.grid %}
                         {% set r = month_data.grid %}
                         {% set incomplete = r.sharp_peak is none and r.peak is none and r.flat is none and r.valley is none %}
-                        <tr class="{% if incomplete %}row-incomplete{% endif %}{% if r.reading_locked %} row-locked{% endif %}"
+                        {% set has_warnings = r._validation_warnings|length > 0 %}
+                        <tr class="{% if has_warnings %}row-warn{% endif %}{% if incomplete %} row-incomplete{% endif %}{% if r.reading_locked %} row-locked{% endif %}"
                             data-meter-id="{{ r.meter_id }}" data-month="{{ month_data.month }}">
                             <td><span class="tag tag-grid">上网表</span></td>
                             <td class="meter-num">{{ r.meter_number }}</td>
                             <td class="num">{{ r.multiplier }}</td>
                             <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input total-input" name="total_kwh"
                                 value="{{ '%.2f'|format(r.total_kwh) if r.total_kwh is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
                                 value="{{ '%.2f'|format(r.sharp_peak) if r.sharp_peak is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="peak"
                                 value="{{ '%.2f'|format(r.peak) if r.peak is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="flat"
                                 value="{{ '%.2f'|format(r.flat) if r.flat is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="valley"
                                 value="{{ '%.2f'|format(r.valley) if r.valley is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num rev-cell"><input type="number" step="0.01" class="cell-input total-input" name="rev_total"
                                 value="{{ '%.2f'|format(r.rev_total) if r.rev_total is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_sharp_peak"
                                 value="{{ '%.2f'|format(r.rev_sharp_peak) if r.rev_sharp_peak is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_peak"
                                 value="{{ '%.2f'|format(r.rev_peak) if r.rev_peak is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_flat"
                                 value="{{ '%.2f'|format(r.rev_flat) if r.rev_flat is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
                             <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_valley"
                                 value="{{ '%.2f'|format(r.rev_valley) if r.rev_valley is not none else '' }}"
-                                {% if r.reading_locked %}disabled{% endif %}></td>
-                            <td>
+                                {% if r.reading_locked %}disabled{% endif %} oninput="validateRow(this)"></td>
+                            <td class="status-col">
                                 {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
+                                {% elif has_warnings %}<span class="status-badge badge-warn" title="{% for w in r._validation_warnings %}{{ w.msg }}&#10;{% endfor %}">&#9888; 校验异常</span>
                                 {% elif incomplete %}<span class="status-badge badge-incomplete">&#9888; 数据不全</span>
                                 {% else %}<span class="status-badge badge-ok">&#10003;</span>{% endif %}
+                                <div class="validation-msg"></div>
                             </td>
                         </tr>
                         {% else %}
@@ -475,7 +481,17 @@
 }
 .badge-locked { background:#dbeafe; color:#1e40af; }
 .badge-incomplete { background:#fef3c7; color:#92400e; }
+.badge-warn { background:#fee2e2; color:#991b1b; }
 .badge-ok { background:#dcfce7; color:#166534; }
+
+/* 校验异常行 */
+.row-warn { background:#fef2f2 !important; }
+.row-warn td:first-child { box-shadow:inset 4px 0 0 #ef4444; }
+.validation-msg {
+    font-size:0.7rem; color:#991b1b; margin-top:0.15rem;
+    max-width:120px; line-height:1.2;
+}
+.cell-input.input-warn { border-color:#ef4444; background:#fef2f2; }
 
 /* 表格 */
 .reading-table th, .reading-table td { padding:0.4rem 0.5rem; }
@@ -1122,6 +1138,91 @@ function pollUpdateStatus() {
         })
         .catch(function() {});
 }
+
+/* === 实时校验：总 vs 尖+峰+平+谷 === */
+function validateRow(input) {
+    var row = input.closest('tr[data-meter-id]');
+    if (!row) return;
+
+    var getVal = function(name) {
+        var inp = row.querySelector('input[name="' + name + '"]');
+        if (!inp || inp.value.trim() === '') return null;
+        return parseFloat(inp.value);
+    };
+
+    var msgs = [];
+    var warnInputs = [];
+
+    // 正向校验
+    var fwdTotal = getVal('total_kwh');
+    var fwdParts = [getVal('sharp_peak'), getVal('peak'), getVal('flat'), getVal('valley')];
+    var fwdNonNull = fwdParts.filter(function(v) { return v !== null; });
+    if (fwdTotal !== null && fwdNonNull.length >= 2) {
+        var fwdSum = fwdNonNull.reduce(function(a, b) { return a + b; }, 0);
+        var fwdDiff = Math.abs(fwdTotal - fwdSum);
+        if (fwdDiff > 0.05) {
+            msgs.push('正向总(' + fwdTotal.toFixed(2) + ')≠分量和(' + fwdSum.toFixed(2) + ')');
+            warnInputs.push('total_kwh', 'sharp_peak', 'peak', 'flat', 'valley');
+        }
+    }
+
+    // 反向校验
+    var revTotal = getVal('rev_total');
+    var revParts = [getVal('rev_sharp_peak'), getVal('rev_peak'), getVal('rev_flat'), getVal('rev_valley')];
+    var revNonNull = revParts.filter(function(v) { return v !== null; });
+    if (revTotal !== null && revNonNull.length >= 2) {
+        var revSum = revNonNull.reduce(function(a, b) { return a + b; }, 0);
+        var revDiff = Math.abs(revTotal - revSum);
+        if (revDiff > 0.05) {
+            msgs.push('反向总(' + revTotal.toFixed(2) + ')≠分量和(' + revSum.toFixed(2) + ')');
+            warnInputs.push('rev_total', 'rev_sharp_peak', 'rev_peak', 'rev_flat', 'rev_valley');
+        }
+    }
+
+    // 负数检查
+    row.querySelectorAll('input.cell-input').forEach(function(inp) {
+        var v = inp.value.trim();
+        if (v !== '' && parseFloat(v) < 0) {
+            msgs.push(inp.name + '为负数');
+            warnInputs.push(inp.name);
+        }
+    });
+
+    // 更新UI
+    row.querySelectorAll('input.cell-input').forEach(function(inp) {
+        inp.classList.toggle('input-warn', warnInputs.indexOf(inp.name) >= 0);
+    });
+    var msgDiv = row.querySelector('.validation-msg');
+    if (msgDiv) msgDiv.textContent = msgs.join('; ');
+    row.classList.toggle('row-warn', msgs.length > 0);
+
+    // 更新状态标识
+    var statusCol = row.querySelector('.status-col');
+    if (statusCol && !row.querySelector('.badge-locked')) {
+        var badge = statusCol.querySelector('.status-badge');
+        if (badge) {
+            if (msgs.length > 0) {
+                badge.className = 'status-badge badge-warn';
+                badge.innerHTML = '&#9888; 校验异常';
+                badge.title = msgs.join('\n');
+            } else {
+                badge.className = 'status-badge badge-ok';
+                badge.innerHTML = '&#10003;';
+                badge.title = '';
+            }
+        }
+    }
+}
+
+// 页面加载时对所有行执行一次校验
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('tr[data-meter-id] input.cell-input').forEach(function(inp) {
+        // 只触发每行的第一个 input 即可
+        if (inp === inp.closest('tr').querySelector('input.cell-input')) {
+            validateRow(inp);
+        }
+    });
+});
 
 // 页面加载时检查是否有正在运行的更新任务
 (function() {
