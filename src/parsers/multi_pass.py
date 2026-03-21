@@ -1053,11 +1053,27 @@ class MultiPassExtractor:
     # 月度读数
     # ================================================================
 
+    # 统计表关键字：文件名或sheet名包含这些关键字的不提取抄表数据
+    # 统计表是汇总数据，不是原始抄表数据
+    _STAT_SHEET_KEYWORDS = ("统计表", "统计", "汇总", "汇总表")
+
+    def _is_statistics_sheet(self, filepath, sheet_name):
+        """判断是否为统计表（汇总表），不应作为抄表数据来源。"""
+        fname = filepath.name if hasattr(filepath, 'name') else str(filepath)
+        for kw in self._STAT_SHEET_KEYWORDS:
+            if kw in fname or kw in sheet_name:
+                return True
+        return False
+
     def _pass6_readings(self):
         """扫描所有文件，提取每个电表每月的尖峰平谷读数。"""
         log.info("[第5轮] 提取月度读数...")
 
         for df, filepath, sheet_name, source_info in self._sheets:
+            # 跳过统计表/汇总表：这些是汇总数据，不是原始抄表数据
+            if self._is_statistics_sheet(filepath, sheet_name):
+                log.debug("跳过统计表，不提取抄表数据: %s/%s", filepath.name, sheet_name)
+                continue
             # 标准表格
             self._readings_from_table(df, filepath, sheet_name, source_info)
             # 转置表
