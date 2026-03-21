@@ -180,6 +180,19 @@
 </div>
 {% endif %}
 
+<!-- 文件内容查看弹窗 -->
+<div id="file-view-modal" class="source-modal-overlay" onclick="if(event.target===this)closeFileViewModal()" style="z-index:10000;">
+    <div class="source-modal" style="width:90vw; max-width:1000px;">
+        <div class="source-modal-header">
+            <span id="file-view-title" class="source-modal-title">文件内容</span>
+            <button class="source-modal-close" onclick="closeFileViewModal()">&times;</button>
+        </div>
+        <div id="file-view-body" class="source-modal-body" style="max-height:70vh; overflow:auto;">
+            <div class="source-modal-loading">加载中…</div>
+        </div>
+    </div>
+</div>
+
 <!-- 数据来源弹窗 -->
 <div id="source-modal" class="source-modal-overlay" onclick="if(event.target===this)closeSourceModal()">
     <div class="source-modal">
@@ -298,11 +311,14 @@ function showSources(userId) {
                     : (s.meter_type === '上网表'
                         ? '<span class="tag tag-grid">' + s.meter_type + '</span>'
                         : (s.meter_type || '-'));
+                var fileCell = s.source_file
+                    ? '<a href="javascript:void(0)" onclick="viewSourceFile(\'' + s.source_file.replace(/'/g, "\\'") + '\', \'' + (s.source_sheet || '').replace(/'/g, "\\'") + '\')" style="color:var(--primary);text-decoration:underline;cursor:pointer;">' + s.source_file + '</a>'
+                    : '-';
                 html += '<tr>'
                     + '<td>' + (s.meter_number || '-') + '</td>'
                     + '<td>' + typeTag + '</td>'
                     + '<td>' + (s.reading_month || '-') + '</td>'
-                    + '<td>' + (s.source_file || '-') + '</td>'
+                    + '<td>' + fileCell + '</td>'
                     + '<td>' + (s.source_sheet || '-') + '</td>'
                     + '</tr>';
             });
@@ -319,8 +335,85 @@ function closeSourceModal() {
 }
 
 document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') closeSourceModal();
+    if (e.key === 'Escape') {
+        var fvm = document.getElementById('file-view-modal');
+        if (fvm && fvm.style.display === 'flex') {
+            closeFileViewModal();
+        } else {
+            closeSourceModal();
+        }
+    }
 });
+
+function viewSourceFile(filename, sheet) {
+    var modal = document.getElementById('file-view-modal');
+    var body = document.getElementById('file-view-body');
+    var title = document.getElementById('file-view-title');
+    title.textContent = filename;
+    body.innerHTML = '<div class="source-modal-loading">加载中…</div>';
+    modal.style.display = 'flex';
+
+    var url = '/api/source-file/view?filename=' + encodeURIComponent(filename);
+    if (sheet) url += '&sheet=' + encodeURIComponent(sheet);
+
+    fetch(url)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                body.innerHTML = '<p style="text-align:center;color:var(--danger);">' + data.error + '</p>';
+                return;
+            }
+            if (data.type === 'excel') {
+                var html = '';
+                if (data.all_sheet_names.length > 1) {
+                    html += '<div style="display:flex;gap:4px;margin-bottom:.75rem;flex-wrap:wrap;">';
+                    data.all_sheet_names.forEach(function(sn) {
+                        var isActive = data.sheets.some(function(s) { return s.sheet_name === sn; });
+                        html += '<span style="padding:4px 12px;border:1px solid ' + (isActive ? 'var(--primary)' : '#ddd') + ';border-radius:4px;font-size:.8rem;cursor:pointer;background:' + (isActive ? 'var(--primary);color:#fff' : '#f8f9fa') + ';" '
+                              + 'onclick="viewSourceFile(\'' + filename.replace(/'/g, "\\'") + '\', \'' + sn.replace(/'/g, "\\'") + '\')">'
+                              + sn + '</span>';
+                    });
+                    html += '</div>';
+                }
+                data.sheets.forEach(function(s) {
+                    html += '<div style="overflow-x:auto;"><table class="source-table"><tbody>';
+                    s.rows.forEach(function(row, ri) {
+                        html += '<tr>';
+                        row.forEach(function(cell) {
+                            var tag = ri === 0 ? 'th' : 'td';
+                            html += '<' + tag + '>' + (cell || '') + '</' + tag + '>';
+                        });
+                        html += '</tr>';
+                    });
+                    html += '</tbody></table></div>';
+                    if (s.truncated) {
+                        html += '<p style="text-align:center;color:#999;font-size:.8rem;margin-top:.5rem;">仅显示前 200 行</p>';
+                    }
+                });
+                body.innerHTML = html;
+            } else if (data.type === 'image') {
+                body.innerHTML = '<div style="text-align:center;"><img src="data:' + data.mime + ';base64,' + data.data + '" style="max-width:100%;max-height:65vh;"></div>';
+            } else if (data.type === 'csv') {
+                var html = '<div style="overflow-x:auto;"><table class="source-table"><thead><tr>';
+                data.headers.forEach(function(h) { html += '<th>' + h + '</th>'; });
+                html += '</tr></thead><tbody>';
+                data.rows.forEach(function(row) {
+                    html += '<tr>';
+                    row.forEach(function(cell) { html += '<td>' + (cell || '') + '</td>'; });
+                    html += '</tr>';
+                });
+                html += '</tbody></table></div>';
+                body.innerHTML = html;
+            }
+        })
+        .catch(function(e) {
+            body.innerHTML = '<p style="text-align:center;color:var(--danger);">加载失败: ' + e + '</p>';
+        });
+}
+
+function closeFileViewModal() {
+    document.getElementById('file-view-modal').style.display = 'none';
+}
 
 function deleteMeter(meterNumber) {
     if (!confirm('确定要删除电表 ' + meterNumber + ' 吗？\n\n该操作将同时删除该电表的所有抄表记录，且不可恢复！')) {

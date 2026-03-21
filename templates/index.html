@@ -38,6 +38,23 @@
         {% if refresh_status.result and not refresh_status.result.get('error') %}
             &nbsp;| 新增 <strong>{{ refresh_status.result.new }}</strong> 个附件，
             跳过 <strong>{{ refresh_status.result.skipped }}</strong> 个已处理
+            {% if refresh_status.result.get('processed_files') %}
+            <div style="margin-top:0.5rem;">
+                <details>
+                    <summary style="cursor:pointer; color:var(--primary); font-size:0.85rem;">
+                        &#128196; 数据来源文件（{{ refresh_status.result.processed_files|length }} 个）
+                    </summary>
+                    <ul style="margin:0.25rem 0 0; padding-left:1.5rem; font-size:0.8rem; color:#555;">
+                        {% for f in refresh_status.result.processed_files %}
+                        <li style="margin:2px 0;">
+                            <a href="javascript:void(0)" onclick="viewSourceFile('{{ f }}')"
+                               style="color:var(--primary); text-decoration:underline; cursor:pointer;">{{ f }}</a>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </details>
+            </div>
+            {% endif %}
         {% endif %}
     </div>
 </div>
@@ -142,6 +159,116 @@ function confirmFullReset() {
         });
     });
 })();
+</script>
+
+<!-- 源文件查看弹窗 -->
+<div id="file-modal" class="source-modal-overlay" onclick="if(event.target===this)closeFileModal()">
+    <div class="source-modal" style="width:90vw; max-width:1000px;">
+        <div class="source-modal-header">
+            <span id="file-modal-title" class="source-modal-title">文件内容</span>
+            <button class="source-modal-close" onclick="closeFileModal()">&times;</button>
+        </div>
+        <div id="file-modal-body" class="source-modal-body" style="max-height:70vh; overflow:auto;">
+            <div class="source-modal-loading">加载中…</div>
+        </div>
+    </div>
+</div>
+
+<style>
+.source-modal-overlay{display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);align-items:center;justify-content:center;padding:2rem}
+.source-modal{background:#fff;border-radius:12px;box-shadow:0 8px 40px rgba(0,0,0,.3);display:flex;flex-direction:column;overflow:hidden;max-height:85vh}
+.source-modal-header{display:flex;align-items:center;justify-content:space-between;padding:1rem 1.5rem;border-bottom:1px solid #eee;flex-shrink:0}
+.source-modal-title{font-weight:600;font-size:.95rem;color:#333}
+.source-modal-close{background:none;border:none;font-size:1.5rem;color:#999;cursor:pointer;padding:0 .3rem;line-height:1}
+.source-modal-close:hover{color:#333}
+.source-modal-body{overflow:auto;padding:1.5rem;flex:1;min-height:120px}
+.source-modal-loading{text-align:center;padding:2rem;color:var(--text-secondary)}
+.file-table{width:100%;border-collapse:collapse;font-size:.8rem}
+.file-table th{background:#f5f7fa;padding:6px 8px;text-align:left;border-bottom:2px solid #e0e0e0;font-weight:600;position:sticky;top:0;white-space:nowrap}
+.file-table td{padding:4px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap}
+.file-table tr:hover td{background:#f8f9ff}
+.sheet-tabs{display:flex;gap:4px;margin-bottom:.75rem;flex-wrap:wrap}
+.sheet-tab{padding:4px 12px;border:1px solid #ddd;border-radius:4px;font-size:.8rem;cursor:pointer;background:#f8f9fa}
+.sheet-tab.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+</style>
+
+<script>
+function viewSourceFile(filename, sheet) {
+    var modal = document.getElementById('file-modal');
+    var body = document.getElementById('file-modal-body');
+    var title = document.getElementById('file-modal-title');
+    title.textContent = filename;
+    body.innerHTML = '<div class="source-modal-loading">加载中…</div>';
+    modal.style.display = 'flex';
+
+    var url = '/api/source-file/view?filename=' + encodeURIComponent(filename);
+    if (sheet) url += '&sheet=' + encodeURIComponent(sheet);
+
+    fetch(url)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                body.innerHTML = '<p style="text-align:center;color:var(--danger);">' + data.error + '</p>';
+                return;
+            }
+            if (data.type === 'excel') {
+                var html = '';
+                if (data.sheets.length > 1 || data.all_sheet_names.length > 1) {
+                    html += '<div class="sheet-tabs">';
+                    data.all_sheet_names.forEach(function(sn, i) {
+                        var isActive = data.sheets.some(function(s) { return s.sheet_name === sn; });
+                        html += '<span class="sheet-tab' + (isActive ? ' active' : '') + '" '
+                              + 'onclick="viewSourceFile(\'' + filename.replace(/'/g, "\\'") + '\', \'' + sn.replace(/'/g, "\\'") + '\')">'
+                              + sn + '</span>';
+                    });
+                    html += '</div>';
+                }
+                data.sheets.forEach(function(s) {
+                    if (data.sheets.length > 1) {
+                        html += '<h3 style="font-size:.9rem;margin:.75rem 0 .25rem;">' + s.sheet_name + '</h3>';
+                    }
+                    html += '<div style="overflow-x:auto;"><table class="file-table"><tbody>';
+                    s.rows.forEach(function(row, ri) {
+                        html += '<tr>';
+                        row.forEach(function(cell) {
+                            var tag = ri === 0 ? 'th' : 'td';
+                            html += '<' + tag + '>' + (cell || '') + '</' + tag + '>';
+                        });
+                        html += '</tr>';
+                    });
+                    html += '</tbody></table></div>';
+                    if (s.truncated) {
+                        html += '<p style="text-align:center;color:#999;font-size:.8rem;margin-top:.5rem;">仅显示前 200 行</p>';
+                    }
+                });
+                body.innerHTML = html;
+            } else if (data.type === 'image') {
+                body.innerHTML = '<div style="text-align:center;"><img src="data:' + data.mime + ';base64,' + data.data + '" style="max-width:100%;max-height:65vh;"></div>';
+            } else if (data.type === 'csv') {
+                var html = '<div style="overflow-x:auto;"><table class="file-table"><thead><tr>';
+                data.headers.forEach(function(h) { html += '<th>' + h + '</th>'; });
+                html += '</tr></thead><tbody>';
+                data.rows.forEach(function(row) {
+                    html += '<tr>';
+                    row.forEach(function(cell) { html += '<td>' + (cell || '') + '</td>'; });
+                    html += '</tr>';
+                });
+                html += '</tbody></table></div>';
+                body.innerHTML = html;
+            }
+        })
+        .catch(function(e) {
+            body.innerHTML = '<p style="text-align:center;color:var(--danger);">加载失败: ' + e + '</p>';
+        });
+}
+
+function closeFileModal() {
+    document.getElementById('file-modal').style.display = 'none';
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeFileModal();
+});
 </script>
 
 <!-- 统计卡片 -->

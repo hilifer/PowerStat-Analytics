@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS meters (
     is_locked       INTEGER DEFAULT 0,               -- 锁定标志 (1=锁定, 0=未锁定)
     paired_meter_id INTEGER,                         -- 配对电表ID（发电表↔上网表）
     project_name    TEXT,                            -- 所属项目
+    source_file     TEXT,                            -- 数据来源文件名
+    source_sheet    TEXT,                            -- 数据来源工作表
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -209,6 +211,14 @@ class Database:
             log.info("迁移: 添加 meters.paired_meter_id 列")
             conn.execute("ALTER TABLE meters ADD COLUMN paired_meter_id INTEGER")
 
+        # 添加 source_file / source_sheet 列（如果缺失）
+        if "source_file" not in columns:
+            log.info("迁移: 添加 meters.source_file 列")
+            conn.execute("ALTER TABLE meters ADD COLUMN source_file TEXT")
+        if "source_sheet" not in columns:
+            log.info("迁移: 添加 meters.source_sheet 列")
+            conn.execute("ALTER TABLE meters ADD COLUMN source_sheet TEXT")
+
         # 添加 monthly_readings 的本月/上月表数列（如果缺失）
         reading_columns = {row[1] for row in conn.execute("PRAGMA table_info(monthly_readings)").fetchall()}
         for col in ("rev_sharp_peak", "rev_peak", "rev_flat", "rev_valley", "rev_total",
@@ -318,6 +328,8 @@ class Database:
                     is_locked       INTEGER DEFAULT 0,
                     paired_meter_id INTEGER,
                     project_name    TEXT,
+                    source_file     TEXT,
+                    source_sheet    TEXT,
                     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
@@ -352,7 +364,8 @@ class Database:
 
     def upsert_meter(self, meter_number: str, user_id: str = None,
                      meter_type: str = "未知", asset_number: str = None,
-                     multiplier: float = None, project_name: str = None) -> int:
+                     multiplier: float = None, project_name: str = None,
+                     source_file: str = None, source_sheet: str = None) -> int:
         """插入或更新电表信息，返回电表 ID。
 
         电表号是唯一标识。user_id、asset_number 等是关联属性，
@@ -381,8 +394,8 @@ class Database:
                 meter_number = resolved
 
             conn.execute(
-                """INSERT INTO meters (meter_number, user_id, meter_type, asset_number, multiplier, project_name)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                """INSERT INTO meters (meter_number, user_id, meter_type, asset_number, multiplier, project_name, source_file, source_sheet)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(meter_number) DO UPDATE SET
                        user_id = CASE
                            WHEN meters.is_locked = 1 THEN meters.user_id
@@ -413,10 +426,21 @@ class Database:
                            THEN COALESCE(excluded.project_name, meters.project_name)
                            ELSE meters.project_name
                        END,
+                       source_file = CASE
+                           WHEN meters.source_file IS NULL OR meters.source_file = ''
+                           THEN COALESCE(excluded.source_file, meters.source_file)
+                           ELSE meters.source_file
+                       END,
+                       source_sheet = CASE
+                           WHEN meters.source_sheet IS NULL OR meters.source_sheet = ''
+                           THEN COALESCE(excluded.source_sheet, meters.source_sheet)
+                           ELSE meters.source_sheet
+                       END,
                        updated_at = CURRENT_TIMESTAMP
                 """,
                 (meter_number, user_id or '', meter_type, asset_number,
-                 multiplier if multiplier is not None else 1.0, project_name),
+                 multiplier if multiplier is not None else 1.0, project_name,
+                 source_file or '', source_sheet or ''),
             )
             row = conn.execute(
                 "SELECT id FROM meters WHERE meter_number = ?",

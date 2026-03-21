@@ -417,6 +417,8 @@ class Pipeline:
                     asset_number=rec.get("asset_number"),
                     multiplier=rec.get("multiplier"),
                     project_name=rec.get("project_name"),
+                    source_file=rec.get("source_file"),
+                    source_sheet=rec.get("source_sheet"),
                 )
                 # 折扣单独更新（仅在有值且未锁定时）
                 discount = rec.get("discount")

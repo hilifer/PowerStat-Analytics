@@ -274,6 +274,7 @@ def _register_routes(app: Flask, db: Database):
                 new_count = 0
                 skipped = 0
                 meters_added = 0
+                processed_files = []  # 记录处理了哪些文件
 
                 dispatcher = SmartDispatcher()
                 all_sheets = []
@@ -291,6 +292,7 @@ def _register_routes(app: Flask, db: Database):
                         continue
 
                     new_attachments.append((att, fp, date_str))
+                    processed_files.append(att.filename)
                     _log(f"加载附件 [{len(new_attachments)}/{len(attachments)}] {att.filename}")
                     source_info = {
                         "email_date": att.email_date,
@@ -349,6 +351,8 @@ def _register_routes(app: Flask, db: Database):
                             asset_number=rec.get("asset_number"),
                             multiplier=rec.get("multiplier"),
                             project_name=rec.get("project_name"),
+                            source_file=rec.get("source_file"),
+                            source_sheet=rec.get("source_sheet"),
                         )
                         discount = rec.get("discount")
                         if discount and discount != 1.0:
@@ -391,6 +395,7 @@ def _register_routes(app: Flask, db: Database):
                     "skipped": skipped,
                     "meters_added": meters_added,
                     "cleaned": cleaned,
+                    "processed_files": processed_files,
                 }
 
                 _log(f"新增 {new_count} 个附件，电表 {meters_added} 条，清理 {cleaned} 条")
@@ -1829,12 +1834,18 @@ def _register_routes(app: Flask, db: Database):
     # ---- 电表数据来源 API ----
     @app.route("/api/meters/sources")
     def meter_sources_api():
-        """查询某个用户编号下所有电表的数据来源文件。"""
+        """查询某个用户编号下所有电表的数据来源文件。
+
+        合并两个层级的来源信息：
+        1. 电表档案来源（meters.source_file）—— 首页更新时写入
+        2. 抄表数据来源（monthly_readings.source_file）—— 账单导入时写入
+        """
         user_id = request.args.get("user_id", "")
         if not user_id:
             return jsonify({"error": "缺少 user_id 参数"}), 400
         with db.connection() as conn:
-            rows = conn.execute("""
+            # 抄表数据来源
+            reading_rows = conn.execute("""
                 SELECT DISTINCT m.meter_number, m.meter_type,
                        r.reading_month, r.source_file, r.source_sheet
                 FROM meters m
@@ -1842,8 +1853,144 @@ def _register_routes(app: Flask, db: Database):
                 WHERE m.user_id = ?
                 ORDER BY m.meter_number, r.reading_month
             """, (user_id,)).fetchall()
-            sources = [dict(r) for r in rows]
+
+            # 电表档案来源（仅补充没有抄表来源的电表）
+            meter_rows = conn.execute("""
+                SELECT m.meter_number, m.meter_type,
+                       '电表档案' AS reading_month,
+                       m.source_file, m.source_sheet
+                FROM meters m
+                WHERE m.user_id = ?
+                  AND m.source_file IS NOT NULL AND m.source_file != ''
+                ORDER BY m.meter_number
+            """, (user_id,)).fetchall()
+
+            sources = [dict(r) for r in reading_rows]
+
+            # 把电表档案来源也加入（标记为"电表档案"）
+            meters_with_readings = {r["meter_number"] for r in reading_rows}
+            for r in meter_rows:
+                d = dict(r)
+                if d["meter_number"] not in meters_with_readings:
+                    sources.append(d)
+                else:
+                    # 已有抄表来源的电表，也追加档案来源行
+                    sources.append(d)
+
+            # 按电表号排序
+            sources.sort(key=lambda x: (x.get("meter_number", ""), x.get("reading_month", "")))
+
         return jsonify({"user_id": user_id, "sources": sources})
+
+    # ---- 源文件内容查看 API ----
+    @app.route("/api/source-file/view")
+    def source_file_view():
+        """查看数据来源文件的内容。
+
+        支持 Excel (.xlsx/.xls) 文件：返回指定工作表的表格内容。
+        支持图片文件：返回图片的 Base64 编码。
+        """
+        filename = request.args.get("filename", "").strip()
+        sheet_name = request.args.get("sheet", "").strip()
+        if not filename:
+            return jsonify({"error": "缺少 filename 参数"}), 400
+
+        # 在 temp_attachments 和 archive 目录中查找文件
+        search_dirs = [
+            Path(config.get("attachments", "temp_dir",
+                            default="output/temp_attachments")),
+            Path(config.get("storage", "archive_root",
+                            default="output/archive")),
+        ]
+
+        found_path = None
+        for base_dir in search_dirs:
+            if not base_dir.exists():
+                continue
+            for p in base_dir.rglob(filename):
+                if p.is_file() and not p.name.startswith("~$"):
+                    found_path = p
+                    break
+            if found_path:
+                break
+
+        if not found_path:
+            return jsonify({"error": f"文件未找到: {filename}"}), 404
+
+        suffix = found_path.suffix.lower()
+
+        # Excel 文件：读取并返回表格内容
+        if suffix in (".xlsx", ".xls"):
+            try:
+                import pandas as pd
+                xls = pd.ExcelFile(str(found_path))
+                all_sheets = xls.sheet_names
+
+                if sheet_name and sheet_name in all_sheets:
+                    target_sheets = [sheet_name]
+                else:
+                    target_sheets = all_sheets
+
+                result_sheets = []
+                for sn in target_sheets:
+                    df = pd.read_excel(xls, sheet_name=sn, header=None,
+                                       dtype=str, keep_default_na=False)
+                    # 限制返回行数避免数据过大
+                    max_rows = 200
+                    truncated = len(df) > max_rows
+                    if truncated:
+                        df = df.head(max_rows)
+                    rows = df.values.tolist()
+                    result_sheets.append({
+                        "sheet_name": sn,
+                        "rows": rows,
+                        "total_rows": len(df) if not truncated else f"{max_rows}+",
+                        "truncated": truncated,
+                    })
+
+                return jsonify({
+                    "filename": filename,
+                    "type": "excel",
+                    "sheets": result_sheets,
+                    "all_sheet_names": all_sheets,
+                })
+            except Exception as e:
+                return jsonify({"error": f"读取文件失败: {e}"}), 500
+
+        # 图片文件
+        elif suffix in (".png", ".jpg", ".jpeg", ".bmp", ".tiff"):
+            import base64
+            with open(found_path, "rb") as f:
+                data = base64.b64encode(f.read()).decode("ascii")
+            mime = {
+                ".png": "image/png", ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg", ".bmp": "image/bmp",
+                ".tiff": "image/tiff",
+            }.get(suffix, "image/png")
+            return jsonify({
+                "filename": filename,
+                "type": "image",
+                "mime": mime,
+                "data": data,
+            })
+
+        # CSV 文件
+        elif suffix == ".csv":
+            try:
+                import pandas as pd
+                df = pd.read_csv(str(found_path), dtype=str,
+                                 keep_default_na=False, nrows=200)
+                return jsonify({
+                    "filename": filename,
+                    "type": "csv",
+                    "headers": list(df.columns),
+                    "rows": df.values.tolist(),
+                })
+            except Exception as e:
+                return jsonify({"error": f"读取文件失败: {e}"}), 500
+
+        else:
+            return jsonify({"error": f"不支持的文件类型: {suffix}"}), 400
 
     # ---- CSV 文件下载 ----
     @app.route("/download-csv/<filename>")
