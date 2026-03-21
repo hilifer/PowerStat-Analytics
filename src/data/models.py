@@ -817,7 +817,8 @@ class Database:
                    r.is_locked AS reading_locked,
                    r.source_file, r.source_sheet,
                    p.sharp_peak_price, p.peak_price, p.flat_price, p.valley_price,
-                   p.average_price, p.source_file AS price_source
+                   p.average_price, p.is_locked AS price_locked,
+                   p.source_file AS price_source
             FROM meters m
             JOIN monthly_readings r ON r.meter_id = m.id
             LEFT JOIN price_records p ON p.user_id = m.user_id AND p.reading_month = r.reading_month
@@ -868,6 +869,14 @@ class Database:
                 """,
                 (user_id, reading_month, sharp_peak_price, peak_price, flat_price, valley_price,
                  average_price, source_file),
+            )
+
+    def lock_price(self, user_id: str, reading_month: str, locked: bool = True):
+        """锁定/解锁单价记录。"""
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE price_records SET is_locked = ? WHERE user_id = ? AND reading_month = ?",
+                (1 if locked else 0, user_id, reading_month),
             )
 
     # ---- 查询 ----

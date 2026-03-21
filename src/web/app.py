@@ -1095,7 +1095,7 @@ def _register_routes(app: Flask, db: Database):
 
     @app.route("/api/readings/batch-lock", methods=["POST"])
     def readings_batch_lock():
-        """按用户+月份批量锁定/解锁抄表数据。"""
+        """按用户+月份批量锁定/解锁抄表数据和单价数据。"""
         data = request.get_json()
         user_id = data.get("user_id")
         month = data.get("month")
@@ -1104,15 +1104,37 @@ def _register_routes(app: Flask, db: Database):
             return jsonify({"ok": False, "error": "缺少 user_id 或 month"})
         try:
             with db.connection() as conn:
+                # 锁定/解锁抄表数据
                 conn.execute("""
                     UPDATE monthly_readings SET is_locked = ?
                     WHERE reading_month = ? AND meter_id IN (
                         SELECT id FROM meters WHERE user_id = ?
                     )
                 """, (1 if locked else 0, month, user_id))
+                # 同时锁定/解锁单价数据
+                conn.execute("""
+                    UPDATE price_records SET is_locked = ?
+                    WHERE user_id = ? AND reading_month = ?
+                """, (1 if locked else 0, user_id, month))
             return jsonify({"ok": True})
         except Exception as e:
             log.error("批量锁定失败: %s", e)
+            return jsonify({"ok": False, "error": str(e)})
+
+    @app.route("/api/prices/lock", methods=["POST"])
+    def prices_lock():
+        """单独锁定/解锁单价数据。"""
+        data = request.get_json()
+        user_id = data.get("user_id")
+        month = data.get("month")
+        locked = data.get("locked", True)
+        if not user_id or not month:
+            return jsonify({"ok": False, "error": "缺少 user_id 或 month"})
+        try:
+            db.lock_price(user_id, month, locked)
+            return jsonify({"ok": True})
+        except Exception as e:
+            log.error("单价锁定失败: %s", e)
             return jsonify({"ok": False, "error": str(e)})
 
     @app.route("/api/files/images")

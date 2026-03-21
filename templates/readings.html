@@ -95,6 +95,7 @@
     {% for month_data in group.months %}
     {% set first_r = month_data.gen or month_data.grid %}
     {% set any_locked = (month_data.gen.reading_locked if month_data.gen else false) or (month_data.grid.reading_locked if month_data.grid else false) %}
+    {% set price_locked = first_r and first_r.price_locked %}
     {% set has_price = first_r and first_r.sharp_peak_price is not none %}
     {% set price_missing = first_r and first_r.sharp_peak_price is none and first_r.peak_price is none and first_r.flat_price is none and first_r.valley_price is none %}
     <div class="month-block" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
@@ -281,8 +282,13 @@
                             &#128065; {{ first_r.price_source|truncate(25) }}
                         </span>
                         {% endif %}
+                        <button class="btn btn-sm {% if price_locked %}btn-danger{% else %}btn-outline{% endif %}"
+                                onclick="togglePriceLock('{{ group.user_id }}', '{{ month_data.month }}', {{ 'true' if price_locked else 'false' }})"
+                                title="{{ '解锁单价' if price_locked else '锁定单价' }}">
+                            {% if price_locked %}&#128274; 已锁定{% else %}&#128275; 未锁定{% endif %}
+                        </button>
                         <button class="btn btn-sm btn-outline" onclick="openImagePicker(this, '{{ group.user_id }}', '{{ month_data.month }}')"
-                                {% if any_locked %}disabled{% endif %}
+                                {% if price_locked or any_locked %}disabled{% endif %}
                                 title="手动选择图片重新提取单价">&#128247; 选图提取</button>
                     </div>
                 </div>
@@ -291,25 +297,25 @@
                         <label>尖价</label>
                         <input type="number" step="0.0001" class="cell-input price-input" name="sharp_peak_price"
                             value="{{ '%.4f'|format(first_r.sharp_peak_price) if first_r and first_r.sharp_peak_price is not none else '' }}"
-                            {% if any_locked %}disabled{% endif %}>
+                            {% if price_locked or any_locked %}disabled{% endif %}>
                     </div>
                     <div class="price-item">
                         <label>峰价</label>
                         <input type="number" step="0.0001" class="cell-input price-input" name="peak_price"
                             value="{{ '%.4f'|format(first_r.peak_price) if first_r and first_r.peak_price is not none else '' }}"
-                            {% if any_locked %}disabled{% endif %}>
+                            {% if price_locked or any_locked %}disabled{% endif %}>
                     </div>
                     <div class="price-item">
                         <label>平价</label>
                         <input type="number" step="0.0001" class="cell-input price-input" name="flat_price"
                             value="{{ '%.4f'|format(first_r.flat_price) if first_r and first_r.flat_price is not none else '' }}"
-                            {% if any_locked %}disabled{% endif %}>
+                            {% if price_locked or any_locked %}disabled{% endif %}>
                     </div>
                     <div class="price-item">
                         <label>谷价</label>
                         <input type="number" step="0.0001" class="cell-input price-input" name="valley_price"
                             value="{{ '%.4f'|format(first_r.valley_price) if first_r and first_r.valley_price is not none else '' }}"
-                            {% if any_locked %}disabled{% endif %}>
+                            {% if price_locked or any_locked %}disabled{% endif %}>
                     </div>
                 </div>
             </div>
@@ -690,6 +696,25 @@ function toggleMonthLock(userId, month, currentlyLocked) {
         return;
     }
     fetch('/api/readings/batch-lock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, month: month, locked: !currentlyLocked })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.ok) location.reload();
+        else alert('操作失败: ' + (data.error || '未知错误'));
+    })
+    .catch(function(e) { alert('请求失败: ' + e); });
+}
+
+function togglePriceLock(userId, month, currentlyLocked) {
+    var action = currentlyLocked ? '解锁' : '锁定';
+    if (!confirm('确定' + action + '用户 ' + userId + ' 的 ' + month + ' 单价数据？\n\n' +
+                 (currentlyLocked ? '解锁后单价可编辑，程序也可自动更新。' : '锁定后单价不可编辑，程序不能自动更改。'))) {
+        return;
+    }
+    fetch('/api/prices/lock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId, month: month, locked: !currentlyLocked })
