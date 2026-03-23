@@ -270,7 +270,7 @@ class OCREngine:
             if match:
                 return match.group(1).strip()
 
-        # 增强匹配：各种常见标签格式
+        # 增强匹配：各种常见标签格式（同行）
         extra_patterns = [
             r'(?:用户编号|用户号|户号|客户编号|用户编码|客户号)\s*[:：\s]\s*(\d{6,20})',
             r'(?:编号|No\.?|NO\.?)\s*[:：\s]\s*(\d{8,20})',
@@ -280,6 +280,36 @@ class OCREngine:
             match = re.search(pattern, text)
             if match:
                 return match.group(1).strip()
+
+        # 跨行匹配：OCR 可能将标签和值分成多行（间隔最多8行）
+        # 例如: "用户编号：\n用电分类\n...\n0948030028524999"
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            line_s = line.strip()
+            if re.search(r'(?:用户编号|用户号|户号|客户编号)[：:\s]*$', line_s):
+                # 标签行后查找后续行中以09开头的16位用户编号
+                for j in range(i + 1, min(i + 10, len(lines))):
+                    next_line = lines[j].strip()
+                    m = re.match(r'(09\d{14})\b', next_line)
+                    if m:
+                        return m.group(1)
+                # 如果没找到09开头的，放宽为任何10-20位数字（排除9000开头）
+                for j in range(i + 1, min(i + 10, len(lines))):
+                    next_line = lines[j].strip()
+                    m = re.match(r'(\d{10,20})', next_line)
+                    if m:
+                        uid = m.group(1)
+                        if not uid.startswith("9000"):
+                            return uid
+
+        # 南方电网账单特殊格式：标签和值在一串连字符中
+        # "9000000003630310-0948030027271344-1111111114384312-..."
+        # 第2段通常是用户编号（09开头的16位数字）
+        dash_match = re.search(r'\d+-(\d{16})-\d+', text)
+        if dash_match:
+            uid = dash_match.group(1)
+            if uid.startswith("09"):
+                return uid
 
         # 兜底：查找连续数字串（8-20位），只取唯一一个
         numbers = re.findall(r'\b(\d{8,20})\b', text)
@@ -605,13 +635,16 @@ class OCREngine:
         """从「电费信息 Charge Information」表格中提取分时段单价。
 
         匹配格式（南方电网工业分时）：
-          格式A: 尖期电量电费  0       0         0
-                 峰期电量电费  5725    0.95786875  5483.81
-          格式B: 电度电费(尖)  0       0         0
-                 电度电费(峰)  17550   0.62779000  11017.72
-          格式C: 电脑电费(峰)  17550   0.62779000  11017.72  (OCR误读)
+          格式A（同行）: 尖期电量电费  0       0         0
+          格式B（跨行）: 尖期电量电费
+                         0
+                         0
+                         0
+          格式C: 电度电费(尖)  0       0         0
+          格式D: 电脑电费(峰)  17550   0.62779000  11017.72
 
-        每行: 标签  计费电量  单价  金额 — 单价是第2个小数（8位精度）
+        每行: 标签  计费电量  单价  金额 — 单价是有多位小数的数字
+        OCR 可能将标签和数字分到不同行，需要跨行查找。
         """
         prices = {}
         lines = text.split("\n")
@@ -628,7 +661,7 @@ class OCREngine:
                                  r'电[度脑]\s*电费\s*[(\(]\s*谷'],
         }
 
-        for line in lines:
+        for i, line in enumerate(lines):
             line_clean = line.strip()
             if not line_clean:
                 continue
@@ -641,8 +674,20 @@ class OCREngine:
                         # 特殊处理：peak 行不能含"尖"
                         if field == "peak_price" and "尖" in line_clean:
                             continue
-                        # 提取该行所有数字
-                        nums = re.findall(r'(\d+\.?\d*)', line_clean)
+
+                        # 收集当前行及后续几行的数字（OCR 可能将数字分行）
+                        combined_text = line_clean
+                        for j in range(i + 1, min(i + 6, len(lines))):
+                            next_line = lines[j].strip()
+                            if not next_line:
+                                continue
+                            # 遇到下一个标签行就停止
+                            if re.search(r'[尖峰平谷].*电费|电[度脑].*电费|以上小计|平均电价|力调电费', next_line):
+                                break
+                            combined_text += " " + next_line
+
+                        # 提取合并文本中的所有数字
+                        nums = re.findall(r'(\d+\.?\d*)', combined_text)
                         float_nums = []
                         for n in nums:
                             try:
@@ -1084,21 +1129,33 @@ class OCREngine:
     def _extract_single_price(self, text: str) -> Optional[float]:
         """提取单一电价（居民合表等无分时段账单）。
 
-        匹配格式：
-          电量电费  6066.6  0.69986875  4245.82
-          → 单价是第2个带多位小数的数字
+        匹配格式（同行或跨行）：
+          同行: 电量电费  6066.6  0.69986875  4245.82
+          跨行: 电量电费
+                6066.6
+                0.69986875
+                4245.82
         """
         lines = text.split("\n")
-        for line in lines:
+        for i, line in enumerate(lines):
             line_clean = line.strip()
             # 匹配"电量电费"但不含"尖/峰/平/谷"前缀
             if "电量电费" not in line_clean:
                 continue
             if any(kw in line_clean for kw in ["尖", "峰", "平", "谷"]):
                 continue
-            # 这行是单一电价行，提取单价（多位小数的那个数字）
-            nums = re.findall(r'(\d+\.\d{2,8})', line_clean)
-            # 单价通常在 0.1~3.0 之间，选精度最高的
+
+            # 收集当前行及后续几行的数字（OCR 可能将数字分行）
+            combined_text = line_clean
+            for j in range(i + 1, min(i + 6, len(lines))):
+                next_line = lines[j].strip()
+                if not next_line:
+                    continue
+                if re.search(r'以上小计|平均电价|[尖峰平谷].*电费|电[度脑].*电费', next_line):
+                    break
+                combined_text += " " + next_line
+
+            nums = re.findall(r'(\d+\.\d{2,8})', combined_text)
             candidates = []
             for n in nums:
                 val = float(n)
