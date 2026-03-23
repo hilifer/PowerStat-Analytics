@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block title %}手动创建抄表记录 - PowerStat{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <a href="{{ url_for('readings') }}">抄表数据</a>
+    <span class="sep">/</span>
+    <span>手动创建</span>
+</div>
+
+<h1 style="margin-bottom:1rem;">手动创建抄表记录</h1>
+
+<div class="card">
+    <div class="card-header">
+        <h2>基本信息</h2>
+    </div>
+    <form method="POST" action="{{ url_for('reading_create') }}">
+        <div class="form-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; padding:1rem;">
+            <div class="form-group">
+                <label>选择电表 <span style="color:red;">*</span></label>
+                <select name="meter_id" required class="form-input" id="meterSelect">
+                    <option value="">-- 请选择电表 --</option>
+                    {% for m in meters %}
+                    <option value="{{ m.id }}"
+                            data-project="{{ m.project_name or '' }}"
+                            data-user="{{ m.user_id or '' }}"
+                            data-type="{{ m.meter_type or '' }}">
+                        {{ m.meter_number }}
+                        {% if m.meter_type and m.meter_type != '未知' %} ({{ m.meter_type }}){% endif %}
+                        {% if m.project_name %} - {{ m.project_name }}{% endif %}
+                        {% if m.user_id %} [{{ m.user_id }}]{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>月份 <span style="color:red;">*</span></label>
+                <input type="month" name="reading_month" required class="form-input" placeholder="YYYY-MM">
+            </div>
+        </div>
+
+        <!-- 选中电表信息 -->
+        <div id="meterInfo" style="display:none; padding:0 1rem; margin-bottom:1rem;">
+            <div style="background:var(--surface, #f8f9fa); border:1px solid var(--border, #dee2e6); border-radius:6px; padding:0.75rem; font-size:0.85rem; color:#666;">
+                <span id="infoProject"></span>
+                <span id="infoUser"></span>
+                <span id="infoType"></span>
+            </div>
+        </div>
+
+        <!-- 正向有功电量（用电量） -->
+        <div class="card-header" style="border-top:1px solid var(--border, #dee2e6);">
+            <h2>正向有功电量（用电量）</h2>
+        </div>
+        <div class="form-grid" style="display:grid; grid-template-columns:repeat(5, 1fr); gap:1rem; padding:1rem;">
+            <div class="form-group">
+                <label>尖</label>
+                <input type="number" step="0.01" name="sharp_peak" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>峰</label>
+                <input type="number" step="0.01" name="peak" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>平</label>
+                <input type="number" step="0.01" name="flat" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>谷</label>
+                <input type="number" step="0.01" name="valley" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>总电量</label>
+                <input type="number" step="0.01" name="total_kwh" class="form-input" placeholder="留空自动求和">
+            </div>
+        </div>
+
+        <!-- 反向有功电量 -->
+        <div class="card-header" style="border-top:1px solid var(--border, #dee2e6);">
+            <h2>反向有功电量</h2>
+        </div>
+        <div class="form-grid" style="display:grid; grid-template-columns:repeat(5, 1fr); gap:1rem; padding:1rem;">
+            <div class="form-group">
+                <label>尖</label>
+                <input type="number" step="0.01" name="rev_sharp_peak" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>峰</label>
+                <input type="number" step="0.01" name="rev_peak" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>平</label>
+                <input type="number" step="0.01" name="rev_flat" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>谷</label>
+                <input type="number" step="0.01" name="rev_valley" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>总电量</label>
+                <input type="number" step="0.01" name="rev_total" class="form-input" placeholder="留空自动求和">
+            </div>
+        </div>
+
+        <!-- 本月表数 -->
+        <div class="card-header" style="border-top:1px solid var(--border, #dee2e6);">
+            <h2>本月表数</h2>
+        </div>
+        <div class="form-grid" style="display:grid; grid-template-columns:repeat(5, 1fr); gap:1rem; padding:1rem;">
+            <div class="form-group">
+                <label>尖</label>
+                <input type="number" step="0.01" name="cur_sharp_peak" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>峰</label>
+                <input type="number" step="0.01" name="cur_peak" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>平</label>
+                <input type="number" step="0.01" name="cur_flat" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>谷</label>
+                <input type="number" step="0.01" name="cur_valley" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>总</label>
+                <input type="number" step="0.01" name="cur_total" class="form-input" placeholder="可选">
+            </div>
+        </div>
+
+        <!-- 上月表数 -->
+        <div class="card-header" style="border-top:1px solid var(--border, #dee2e6);">
+            <h2>上月表数</h2>
+        </div>
+        <div class="form-grid" style="display:grid; grid-template-columns:repeat(5, 1fr); gap:1rem; padding:1rem;">
+            <div class="form-group">
+                <label>尖</label>
+                <input type="number" step="0.01" name="prev_sharp_peak" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>峰</label>
+                <input type="number" step="0.01" name="prev_peak" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>平</label>
+                <input type="number" step="0.01" name="prev_flat" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>谷</label>
+                <input type="number" step="0.01" name="prev_valley" class="form-input" placeholder="可选">
+            </div>
+            <div class="form-group">
+                <label>总</label>
+                <input type="number" step="0.01" name="prev_total" class="form-input" placeholder="可选">
+            </div>
+        </div>
+
+        <div style="padding:0 1rem 1rem; display:flex; gap:0.5rem;">
+            <button type="submit" class="btn btn-primary">创建记录</button>
+            <a href="{{ url_for('readings') }}" class="btn btn-secondary">取消</a>
+        </div>
+    </form>
+</div>
+
+<style>
+.form-group { display:flex; flex-direction:column; gap:0.3rem; }
+.form-group label { font-weight:600; font-size:0.9rem; color:#333; }
+.form-input { padding:0.5rem; border:1px solid #ddd; border-radius:4px; font-size:0.9rem; }
+</style>
+
+<script>
+document.getElementById('meterSelect').addEventListener('change', function() {
+    var opt = this.options[this.selectedIndex];
+    var info = document.getElementById('meterInfo');
+    if (!this.value) { info.style.display = 'none'; return; }
+    info.style.display = 'block';
+    var parts = [];
+    if (opt.dataset.project) parts.push('项目: ' + opt.dataset.project);
+    if (opt.dataset.user) parts.push('用户: ' + opt.dataset.user);
+    if (opt.dataset.type) parts.push('类型: ' + opt.dataset.type);
+    document.getElementById('infoProject').textContent = parts.join('  |  ') || '无附加信息';
+});
+</script>
+{% endblock %}

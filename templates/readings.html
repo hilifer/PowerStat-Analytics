@@ -30,6 +30,7 @@
                 onclick="startDataUpdate('incremental','readings')">增量提取</button>
         <button type="button" class="btn btn-danger btn-sm update-btn"
                 onclick="startDataUpdate('full','readings')">全量提取</button>
+        <a href="{{ url_for('reading_create') }}" class="btn btn-sm" style="background:var(--success, #28a745); color:#fff; text-decoration:none;">手动创建</a>
     </div>
     <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
                 background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">

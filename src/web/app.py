@@ -1084,6 +1084,69 @@ def _register_routes(app: Flask, db: Database):
                                sel_user_id=sel_user_id,
                                sel_month=sel_month)
 
+    # ---- 手动创建抄表记录 ----
+    @app.route("/readings/create", methods=["GET", "POST"])
+    def reading_create():
+        if request.method == "POST":
+            meter_id = request.form.get("meter_id", "").strip()
+            reading_month = request.form.get("reading_month", "").strip()
+
+            if not meter_id or not reading_month:
+                flash("请选择电表并填写月份", "danger")
+                return redirect(url_for("reading_create"))
+
+            # 验证月份格式
+            import re as _re
+            if not _re.match(r'^\d{4}-\d{2}$', reading_month):
+                flash("月份格式应为 YYYY-MM", "danger")
+                return redirect(url_for("reading_create"))
+
+            # 验证电表存在
+            with db.connection() as conn:
+                meter = conn.execute("SELECT id FROM meters WHERE id = ?", (int(meter_id),)).fetchone()
+                if not meter:
+                    flash("所选电表不存在", "danger")
+                    return redirect(url_for("reading_create"))
+
+            def _float_or_none(key):
+                v = request.form.get(key, "").strip()
+                return float(v) if v else None
+
+            try:
+                db.upsert_reading(
+                    meter_id=int(meter_id),
+                    reading_month=reading_month,
+                    sharp_peak=_float_or_none("sharp_peak"),
+                    peak=_float_or_none("peak"),
+                    flat=_float_or_none("flat"),
+                    valley=_float_or_none("valley"),
+                    total_kwh=_float_or_none("total_kwh"),
+                    rev_sharp_peak=_float_or_none("rev_sharp_peak"),
+                    rev_peak=_float_or_none("rev_peak"),
+                    rev_flat=_float_or_none("rev_flat"),
+                    rev_valley=_float_or_none("rev_valley"),
+                    rev_total=_float_or_none("rev_total"),
+                    cur_sharp_peak=_float_or_none("cur_sharp_peak"),
+                    cur_peak=_float_or_none("cur_peak"),
+                    cur_flat=_float_or_none("cur_flat"),
+                    cur_valley=_float_or_none("cur_valley"),
+                    cur_total=_float_or_none("cur_total"),
+                    prev_sharp_peak=_float_or_none("prev_sharp_peak"),
+                    prev_peak=_float_or_none("prev_peak"),
+                    prev_flat=_float_or_none("prev_flat"),
+                    prev_valley=_float_or_none("prev_valley"),
+                    prev_total=_float_or_none("prev_total"),
+                    source_file="手动创建",
+                )
+                flash(f"抄表记录创建成功（月份: {reading_month}）", "success")
+                return redirect(url_for("readings", month=reading_month))
+            except Exception as e:
+                flash(f"创建失败: {e}", "danger")
+                return redirect(url_for("reading_create"))
+
+        meters = db.get_meters()
+        return render_template("reading_create.html", meters=meters)
+
     @app.route("/api/readings/batch-update", methods=["POST"])
     def readings_batch_update():
         """批量更新抄表数据。"""
