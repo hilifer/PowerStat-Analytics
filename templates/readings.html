@@ -427,8 +427,10 @@
             <div class="bill-meter-section">
                 <div class="section-label" style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
                     {% if gen %}<span class="tag tag-gen">发电表 {{ gen.meter_number }}</span>
+                    {% if gen.asset_number %}<span style="font-size:0.75rem; color:var(--text-secondary);">资产号: {{ gen.asset_number }}</span>{% endif %}
                     <span style="font-size:0.75rem; color:var(--text-secondary);">倍率: {{ gen_mult }}</span>{% endif %}
                     {% if grid %}<span class="tag tag-grid" style="margin-left:0.5rem;">上网表 {{ grid.meter_number }}</span>
+                    {% if grid.asset_number %}<span style="font-size:0.75rem; color:var(--text-secondary);">资产号: {{ grid.asset_number }}</span>{% endif %}
                     <span style="font-size:0.75rem; color:var(--text-secondary);">倍率: {{ grid_mult }}</span>{% endif %}
                     {% if discount != 1.0 %}<span style="font-size:0.75rem; color:var(--text-secondary);">| 折扣: {{ discount }}</span>{% endif %}
                 </div>
