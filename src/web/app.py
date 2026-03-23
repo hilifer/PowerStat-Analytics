@@ -997,51 +997,10 @@ def _register_routes(app: Flask, db: Database):
             y, mo = int(match.group(1)), int(match.group(2))
             return f"{y-1}-12" if mo == 1 else f"{y}-{str(mo-1).zfill(2)}"
 
-        def _backfill_prev_cur(r):
-            """如果 prev_*/cur_* 为空，尝试从上月数据回填。"""
-            if r is None:
-                return
-            meter_id = r["meter_id"]
-            month = r["reading_month"]
-            pm = _calc_prev_month(month)
-            prev_r = prev_by_meter.get(meter_id, {}).get(pm) if pm else None
-
-            field_pairs = [
-                ("sharp_peak", "cur_sharp_peak", "prev_sharp_peak"),
-                ("peak", "cur_peak", "prev_peak"),
-                ("flat", "cur_flat", "prev_flat"),
-                ("valley", "cur_valley", "prev_valley"),
-                ("total_kwh", "cur_total", "prev_total"),
-            ]
-            for usage_key, cur_key, prev_key in field_pairs:
-                # 回填 prev_*：用上月数据的 cur_* 值
-                if r.get(prev_key) is None and prev_r is not None:
-                    if prev_r.get(cur_key) is not None:
-                        r[prev_key] = prev_r[cur_key]
-                    elif prev_r.get(prev_key) is not None and prev_r.get(usage_key) is not None:
-                        r[prev_key] = prev_r[prev_key] + prev_r[usage_key]
-                # 回填 cur_*：prev + usage
-                if r.get(cur_key) is None:
-                    if r.get(prev_key) is not None and r.get(usage_key) is not None:
-                        r[cur_key] = r[prev_key] + r[usage_key]
-
-            # 回填反向数据的上月表数（用上月数据的 rev_* 值）
-            rev_fields = [
-                ("rev_sharp_peak", "prev_rev_sharp_peak"),
-                ("rev_peak", "prev_rev_peak"),
-                ("rev_flat", "prev_rev_flat"),
-                ("rev_valley", "prev_rev_valley"),
-                ("rev_total", "prev_rev_total"),
-            ]
-            for rev_key, prev_rev_key in rev_fields:
-                if r.get(prev_rev_key) is None and prev_r is not None:
-                    r[prev_rev_key] = prev_r.get(rev_key)
-
         # 构建 按用户→按月→发电表/上网表 的分组结构
         from collections import OrderedDict
         user_groups = OrderedDict()  # user_id -> {project_name, months: {month -> {gen, grid}}}
         for r in raw:
-            _backfill_prev_cur(r)
             uid = r["user_id"] or "unknown"
             if uid not in user_groups:
                 user_groups[uid] = {"user_id": uid, "project_name": r["project_name"], "months_dict": OrderedDict()}
@@ -1131,11 +1090,6 @@ def _register_routes(app: Flask, db: Database):
                     cur_flat=_float_or_none("cur_flat"),
                     cur_valley=_float_or_none("cur_valley"),
                     cur_total=_float_or_none("cur_total"),
-                    prev_sharp_peak=_float_or_none("prev_sharp_peak"),
-                    prev_peak=_float_or_none("prev_peak"),
-                    prev_flat=_float_or_none("prev_flat"),
-                    prev_valley=_float_or_none("prev_valley"),
-                    prev_total=_float_or_none("prev_total"),
                     source_file="手动创建",
                 )
                 flash(f"抄表记录创建成功（月份: {reading_month}）", "success")
