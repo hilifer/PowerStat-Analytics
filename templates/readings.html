@@ -414,166 +414,135 @@
         </div>
 
         <div class="month-content">
-            {# ---- 发电表：仅显示正向数据 ---- #}
-            {% if month_data.gen %}
-            {% set gen = month_data.gen %}
-            {% set gen_mult = gen.multiplier or 1 %}
-            {% set gen_disc = gen.discount or 1 %}
-            <div class="bill-meter-section">
-                <div class="section-label" style="display:flex; align-items:center; gap:0.5rem;">
-                    <span class="tag tag-gen">发电表</span>
-                    <span>{{ gen.meter_number }}</span>
-                    <span style="font-size:0.75rem; color:var(--text-secondary);">倍率: {{ gen_mult }} {% if gen_disc != 1 %}| 折扣: {{ gen_disc }}{% endif %}</span>
-                </div>
-                <div class="table-wrap">
-                    <table class="bill-table">
-                        <thead>
-                            <tr>
-                                <th>类别</th>
-                                <th class="num">上月表数</th>
-                                <th class="num">本月表数</th>
-                                <th class="num">用量(kWh)</th>
-                                <th class="num">实际用量</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% set gen_tiers = [
-                                ('正有功尖峰', gen.prev_sharp_peak, gen.cur_sharp_peak, gen.sharp_peak),
-                                ('正有功峰', gen.prev_peak, gen.cur_peak, gen.peak),
-                                ('正有功平', gen.prev_flat, gen.cur_flat, gen.flat),
-                                ('正有功谷', gen.prev_valley, gen.cur_valley, gen.valley),
-                            ] %}
-                            {% set ns_gen = namespace(total_usage=0, total_actual=0) %}
-                            {% for label, prev_val, cur_val, usage in gen_tiers %}
-                            {% set actual = (usage or 0) * gen_mult %}
-                            {% if usage is not none %}{% set ns_gen.total_usage = ns_gen.total_usage + (usage or 0) %}{% endif %}
-                            {% set ns_gen.total_actual = ns_gen.total_actual + actual %}
-                            <tr>
-                                <td>{{ label }}</td>
-                                <td class="num">{{ '%.2f'|format(prev_val) if prev_val is not none else '-' }}</td>
-                                <td class="num">{{ '%.2f'|format(cur_val) if cur_val is not none else '-' }}</td>
-                                <td class="num">{{ '%.2f'|format(usage) if usage is not none else '-' }}</td>
-                                <td class="num">{{ '%.2f'|format(actual) if usage is not none else '-' }}</td>
-                            </tr>
-                            {% endfor %}
-                            <tr class="bill-total-row">
-                                <td><strong>正有功总</strong></td>
-                                <td class="num">{{ '%.2f'|format(gen.prev_total) if gen.prev_total is not none else '-' }}</td>
-                                <td class="num">{{ '%.2f'|format(gen.cur_total) if gen.cur_total is not none else '-' }}</td>
-                                <td class="num"><strong>{{ '%.2f'|format(gen.total_kwh) if gen.total_kwh is not none else '%.2f'|format(ns_gen.total_usage) }}</strong></td>
-                                <td class="num"><strong>{{ '%.2f'|format(ns_gen.total_actual) }}</strong></td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            {% endif %}
-
-            {# ---- 上网表：仅显示反向数据 ---- #}
-            {% if month_data.grid %}
-            {% set grid = month_data.grid %}
-            {% set grid_mult = grid.multiplier or 1 %}
-            <div class="bill-meter-section">
-                <div class="section-label" style="display:flex; align-items:center; gap:0.5rem;">
-                    <span class="tag tag-grid">上网表</span>
-                    <span>{{ grid.meter_number }}</span>
-                    <span style="font-size:0.75rem; color:var(--text-secondary);">倍率: {{ grid_mult }}</span>
-                </div>
-                <div class="table-wrap">
-                    <table class="bill-table">
-                        <thead>
-                            <tr>
-                                <th>类别</th>
-                                <th class="num">用量(kWh)</th>
-                                <th class="num">实际用量</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% set grid_rev_tiers = [
-                                ('反向尖峰', grid.rev_sharp_peak),
-                                ('反向峰', grid.rev_peak),
-                                ('反向平', grid.rev_flat),
-                                ('反向谷', grid.rev_valley),
-                            ] %}
-                            {% set ns_grid = namespace(total_actual=0) %}
-                            {% for label, val in grid_rev_tiers %}
-                            {% set rev_actual = (val or 0) * grid_mult %}
-                            {% set ns_grid.total_actual = ns_grid.total_actual + rev_actual %}
-                            <tr>
-                                <td>{{ label }}</td>
-                                <td class="num">{{ '%.2f'|format(val) if val is not none else '-' }}</td>
-                                <td class="num">{{ '%.2f'|format(rev_actual) if val is not none else '-' }}</td>
-                            </tr>
-                            {% endfor %}
-                            <tr class="bill-total-row">
-                                <td><strong>反向总</strong></td>
-                                <td class="num"><strong>{{ '%.2f'|format(grid.rev_total) if grid.rev_total is not none else '-' }}</strong></td>
-                                <td class="num"><strong>{{ '%.2f'|format(ns_grid.total_actual) }}</strong></td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            {% endif %}
-
-            {# ---- 用户用电量 = 发电(正向) - 上网(反向)，及电费计算 ---- #}
-            {% if month_data.gen and month_data.grid %}
+            {# ---- 发电统计表：正向(发电) + 反向(上网) + 自发用电 ---- #}
             {% set gen = month_data.gen %}
             {% set grid = month_data.grid %}
-            {% set gen_mult = gen.multiplier or 1 %}
-            {% set grid_mult = grid.multiplier or 1 %}
-            {% set disc = gen.discount or 1 %}
+            {% set prev_gen = month_data.prev_gen %}
+            {% set prev_grid = month_data.prev_grid %}
+            {% set gen_mult = gen.multiplier if gen else 1.0 %}
+            {% set grid_mult = grid.multiplier if grid else 1.0 %}
+            {% set discount = gen.discount if gen and gen.discount else 1.0 %}
+
+            {% if gen or grid %}
             <div class="bill-meter-section">
-                <div class="section-label" style="display:flex; align-items:center; gap:0.5rem;">
-                    <span class="tag" style="background:#fef3c7; color:#92400e;">用户用电</span>
-                    <span style="font-size:0.75rem; color:var(--text-secondary);">用电量 = 发电(正向) - 上网(反向){% if disc != 1 %} | 折扣: {{ disc }}{% endif %}</span>
+                <div class="section-label" style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                    {% if gen %}<span class="tag tag-gen">发电表 {{ gen.meter_number }}</span>
+                    <span style="font-size:0.75rem; color:var(--text-secondary);">倍率: {{ gen_mult }}</span>{% endif %}
+                    {% if grid %}<span class="tag tag-grid" style="margin-left:0.5rem;">上网表 {{ grid.meter_number }}</span>
+                    <span style="font-size:0.75rem; color:var(--text-secondary);">倍率: {{ grid_mult }}</span>{% endif %}
+                    {% if discount != 1.0 %}<span style="font-size:0.75rem; color:var(--text-secondary);">| 折扣: {{ discount }}</span>{% endif %}
                 </div>
                 <div class="table-wrap">
-                    <table class="bill-table">
+                    <table class="calc-table">
                         <thead>
                             <tr>
-                                <th>类别</th>
-                                <th class="num">发电量</th>
-                                <th class="num">上网电量</th>
-                                <th class="num">用电量</th>
-                                <th class="num">单价(元)</th>
-                                <th class="num">金额(元)</th>
+                                <th rowspan="2" style="min-width:65px;">类别</th>
+                                <th colspan="5" style="text-align:center; background:#f0fdf4;">正向数据（发电量）</th>
+                                <th colspan="5" style="text-align:center; background:#eff6ff;">反向数据（上网电量）</th>
+                                <th colspan="4" style="text-align:center; background:#fef9f0;">自发用电量/金额</th>
+                            </tr>
+                            <tr>
+                                <th class="num" style="background:#f0fdf4;">上月表数</th>
+                                <th class="num" style="background:#f0fdf4;">本月表数</th>
+                                <th class="num" style="background:#f0fdf4;">电表用量</th>
+                                <th class="num" style="background:#f0fdf4;">倍率</th>
+                                <th class="num" style="background:#f0fdf4;">发电量</th>
+                                <th class="num" style="background:#eff6ff;">上月表数</th>
+                                <th class="num" style="background:#eff6ff;">本月表数</th>
+                                <th class="num" style="background:#eff6ff;">电表用量</th>
+                                <th class="num" style="background:#eff6ff;">倍率</th>
+                                <th class="num" style="background:#eff6ff;">上网电量</th>
+                                <th class="num" style="background:#fef9f0;">实际用电数</th>
+                                <th class="num" style="background:#fef9f0;">原电价</th>
+                                <th class="num" style="background:#fef9f0;">优惠后电价</th>
+                                <th class="num" style="background:#fef9f0;">金额</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {% set user_tiers = [
-                                ('尖峰', gen.sharp_peak, gen_mult, grid.rev_sharp_peak, grid_mult, gen.sharp_peak_price),
-                                ('峰', gen.peak, gen_mult, grid.rev_peak, grid_mult, gen.peak_price),
-                                ('平', gen.flat, gen_mult, grid.rev_flat, grid_mult, gen.flat_price),
-                                ('谷', gen.valley, gen_mult, grid.rev_valley, grid_mult, gen.valley_price),
-                            ] %}
-                            {% set ns_user = namespace(total_gen=0, total_grid=0, total_use=0, total_amount=0) %}
-                            {% for label, gen_usage, gm, grid_rev, grm, price in user_tiers %}
-                            {% set gen_actual = (gen_usage or 0) * gm %}
-                            {% set grid_actual = (grid_rev or 0) * grm %}
-                            {% set user_use = gen_actual - grid_actual %}
-                            {% set amount = user_use * (price or 0) * disc %}
-                            {% set ns_user.total_gen = ns_user.total_gen + gen_actual %}
-                            {% set ns_user.total_grid = ns_user.total_grid + grid_actual %}
-                            {% set ns_user.total_use = ns_user.total_use + user_use %}
-                            {% set ns_user.total_amount = ns_user.total_amount + amount %}
-                            <tr>
-                                <td>{{ label }}</td>
-                                <td class="num">{{ '%.2f'|format(gen_actual) }}</td>
-                                <td class="num">{{ '%.2f'|format(grid_actual) }}</td>
-                                <td class="num"><strong>{{ '%.2f'|format(user_use) }}</strong></td>
-                                <td class="num">{{ '%.4f'|format(price) if price is not none else '-' }}</td>
-                                <td class="num">{{ '%.2f'|format(amount) if price is not none else '-' }}</td>
-                            </tr>
-                            {% endfor %}
-                            <tr class="bill-total-row">
-                                <td><strong>合计</strong></td>
-                                <td class="num"><strong>{{ '%.2f'|format(ns_user.total_gen) }}</strong></td>
-                                <td class="num"><strong>{{ '%.2f'|format(ns_user.total_grid) }}</strong></td>
-                                <td class="num"><strong>{{ '%.2f'|format(ns_user.total_use) }}</strong></td>
-                                <td class="num">-</td>
-                                <td class="num"><strong>{{ '%.2f'|format(ns_user.total_amount) }}</strong></td>
-                            </tr>
+                        {% set tiers = [
+                            ('正有功尖峰', 'sharp_peak', 'rev_sharp_peak', 'sharp_peak_price'),
+                            ('正有功峰', 'peak', 'rev_peak', 'peak_price'),
+                            ('正有功平', 'flat', 'rev_flat', 'flat_price'),
+                            ('正有功谷', 'valley', 'rev_valley', 'valley_price'),
+                        ] %}
+
+                        {% set ns = namespace(
+                            gen_prev_total=0, gen_cur_total=0, gen_diff_total=0, gen_amount_total=0,
+                            grid_prev_total=0, grid_cur_total=0, grid_diff_total=0, grid_amount_total=0,
+                            self_total=0, amount_total=0
+                        ) %}
+
+                        {% for tier_label, fwd_field, rev_field, price_field in tiers %}
+                        {# 正向（发电表）: 上月表数/本月表数 来自 prev_gen 和 gen 的对应字段 #}
+                        {% set gen_prev = prev_gen[fwd_field] if prev_gen and prev_gen[fwd_field] is not none else none %}
+                        {% set gen_cur = gen[fwd_field] if gen and gen[fwd_field] is not none else none %}
+                        {% set gen_diff = (gen_cur - gen_prev) if gen_cur is not none and gen_prev is not none else none %}
+                        {% set gen_amount = (gen_diff * gen_mult) if gen_diff is not none else none %}
+
+                        {# 反向（上网表）: 上月表数/本月表数 来自 prev_grid 和 grid 的反向字段 #}
+                        {% set grid_prev = prev_grid[rev_field] if prev_grid and prev_grid[rev_field] is not none else none %}
+                        {% set grid_cur = grid[rev_field] if grid and grid[rev_field] is not none else none %}
+                        {% set grid_diff = (grid_cur - grid_prev) if grid_cur is not none and grid_prev is not none else none %}
+                        {% set grid_amount = (grid_diff * grid_mult) if grid_diff is not none else none %}
+
+                        {# 自发用电 = 发电量 - 上网电量 #}
+                        {% set self_use = (gen_amount - grid_amount) if gen_amount is not none and grid_amount is not none else none %}
+                        {% set price = gen[price_field] if gen and gen[price_field] is not none else none %}
+                        {% set discounted_price = (price * discount) if price is not none else none %}
+                        {% set tier_amount = (self_use * discounted_price) if self_use is not none and discounted_price is not none else none %}
+
+                        {# 累加总计 #}
+                        {% if gen_prev is not none %}{% set ns.gen_prev_total = ns.gen_prev_total + gen_prev %}{% endif %}
+                        {% if gen_cur is not none %}{% set ns.gen_cur_total = ns.gen_cur_total + gen_cur %}{% endif %}
+                        {% if gen_diff is not none %}{% set ns.gen_diff_total = ns.gen_diff_total + gen_diff %}{% endif %}
+                        {% if gen_amount is not none %}{% set ns.gen_amount_total = ns.gen_amount_total + gen_amount %}{% endif %}
+                        {% if grid_prev is not none %}{% set ns.grid_prev_total = ns.grid_prev_total + grid_prev %}{% endif %}
+                        {% if grid_cur is not none %}{% set ns.grid_cur_total = ns.grid_cur_total + grid_cur %}{% endif %}
+                        {% if grid_diff is not none %}{% set ns.grid_diff_total = ns.grid_diff_total + grid_diff %}{% endif %}
+                        {% if grid_amount is not none %}{% set ns.grid_amount_total = ns.grid_amount_total + grid_amount %}{% endif %}
+                        {% if self_use is not none %}{% set ns.self_total = ns.self_total + self_use %}{% endif %}
+                        {% if tier_amount is not none %}{% set ns.amount_total = ns.amount_total + tier_amount %}{% endif %}
+
+                        <tr>
+                            <td style="font-weight:600; white-space:nowrap;">{{ tier_label }}</td>
+                            {# 正向（发电量） #}
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_prev) if gen_prev is not none else '-' }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_cur) if gen_cur is not none else '-' }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_diff) if gen_diff is not none else '-' }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_mult) }}</td>
+                            <td class="num fwd-cell"><strong>{{ "%.2f"|format(gen_amount) if gen_amount is not none else '-' }}</strong></td>
+                            {# 反向（上网电量） #}
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_prev) if grid_prev is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_cur) if grid_cur is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_diff) if grid_diff is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_mult) }}</td>
+                            <td class="num rev-cell"><strong>{{ "%.2f"|format(grid_amount) if grid_amount is not none else '-' }}</strong></td>
+                            {# 自发用电 #}
+                            <td class="num self-cell"><strong>{{ "%.2f"|format(self_use) if self_use is not none else '-' }}</strong></td>
+                            <td class="num self-cell">{{ "%.8f"|format(price) if price is not none else '-' }}</td>
+                            <td class="num self-cell">{{ "%.8f"|format(discounted_price) if discounted_price is not none else '-' }}</td>
+                            <td class="num self-cell"><strong>{{ "%.2f"|format(tier_amount) if tier_amount is not none else '-' }}</strong></td>
+                        </tr>
+                        {% endfor %}
+
+                        {# 合计行 #}
+                        <tr class="total-row">
+                            <td style="font-weight:700;">正有功总</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(ns.gen_prev_total) }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(ns.gen_cur_total) }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(ns.gen_diff_total) }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_mult) }}</td>
+                            <td class="num fwd-cell"><strong>{{ "%.2f"|format(ns.gen_amount_total) }}</strong></td>
+                            <td class="num rev-cell">{{ "%.2f"|format(ns.grid_prev_total) }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(ns.grid_cur_total) }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(ns.grid_diff_total) }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_mult) }}</td>
+                            <td class="num rev-cell"><strong>{{ "%.2f"|format(ns.grid_amount_total) }}</strong></td>
+                            <td class="num self-cell"><strong>{{ "%.2f"|format(ns.self_total) }}</strong></td>
+                            <td class="num self-cell"></td>
+                            <td class="num self-cell"></td>
+                            <td class="num self-cell"><strong>{{ "%.2f"|format(ns.amount_total) }}</strong></td>
+                        </tr>
                         </tbody>
                     </table>
                 </div>
@@ -756,6 +725,12 @@
 .cell-input.total-input { font-weight:600; }
 .fwd-cell { background:#f0fdf4; }
 .rev-cell { background:#eff6ff; }
+.self-cell { background:#fefbf5; }
+.calc-table { font-size:0.82rem; }
+.calc-table th { font-size:0.78rem; padding:6px 8px; white-space:nowrap; }
+.calc-table td { padding:5px 8px; }
+.total-row { background:#f0f0f0; font-weight:600; border-top:2px solid #ccc; }
+.total-row td { padding-top:8px; padding-bottom:8px; }
 .reading-table { font-size:0.8rem; }
 
 /* 行状态 */

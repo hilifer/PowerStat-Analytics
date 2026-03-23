@@ -1099,6 +1099,18 @@ def _register_routes(app: Flask, db: Database):
                     if r.get(prev_key) is not None and r.get(usage_key) is not None:
                         r[cur_key] = r[prev_key] + r[usage_key]
 
+            # 回填反向数据的上月表数（用上月数据的 rev_* 值）
+            rev_fields = [
+                ("rev_sharp_peak", "prev_rev_sharp_peak"),
+                ("rev_peak", "prev_rev_peak"),
+                ("rev_flat", "prev_rev_flat"),
+                ("rev_valley", "prev_rev_valley"),
+                ("rev_total", "prev_rev_total"),
+            ]
+            for rev_key, prev_rev_key in rev_fields:
+                if r.get(prev_rev_key) is None and prev_r is not None:
+                    r[prev_rev_key] = prev_r.get(rev_key)
+
         # 构建 按用户→按月→发电表/上网表 的分组结构
         from collections import OrderedDict
         user_groups = OrderedDict()  # user_id -> {project_name, months: {month -> {gen, grid}}}
@@ -1110,11 +1122,24 @@ def _register_routes(app: Flask, db: Database):
             md = user_groups[uid]["months_dict"]
             month = r["reading_month"]
             if month not in md:
-                md[month] = {"month": month, "gen": None, "grid": None}
+                md[month] = {"month": month, "gen": None, "grid": None,
+                             "prev_gen": None, "prev_grid": None}
             if r["meter_type"] == "发电表":
                 md[month]["gen"] = r
             elif r["meter_type"] == "上网表":
                 md[month]["grid"] = r
+
+        # 为每个月附加上月数据引用（用于电费单计算）
+        for uid, gdata in user_groups.items():
+            for month, mdata in gdata["months_dict"].items():
+                pm = _calc_prev_month(month)
+                if pm:
+                    if mdata["gen"]:
+                        mid = mdata["gen"]["meter_id"]
+                        mdata["prev_gen"] = prev_by_meter.get(mid, {}).get(pm)
+                    if mdata["grid"]:
+                        mid = mdata["grid"]["meter_id"]
+                        mdata["prev_grid"] = prev_by_meter.get(mid, {}).get(pm)
 
         grouped_data = []
         for uid, gdata in user_groups.items():
