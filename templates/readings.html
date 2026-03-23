@@ -1179,7 +1179,10 @@ function openImagePicker(btn, userId, month) {
     document.getElementById('imagePickerSearch').value = '';
 
     fetch('/api/files/images')
-        .then(function(r) { return r.json(); })
+        .then(function(r) {
+            if (!r.ok) throw new Error('服务器返回 ' + r.status);
+            return r.json();
+        })
         .then(function(data) {
             document.getElementById('imagePickerLoading').style.display = 'none';
             if (!data.groups || data.groups.length === 0) {
@@ -1436,13 +1439,24 @@ function showSourcePreview(filename) {
     modal.style.display = 'flex';
 
     fetch('/api/archive/preview/' + encodeURIComponent(filename))
-        .then(function(r) { return r.json(); })
+        .then(function(r) {
+            if (!r.ok) throw new Error('服务器返回 ' + r.status);
+            return r.json();
+        })
         .then(function(data) {
             loading.style.display = 'none';
             if (!data.found) {
-                content.innerHTML = '<div class="source-preview-error">未找到文件: ' + escapeHtml(filename) + '</div>';
-                content.style.display = '';
-                return;
+                /* 精确文件名未找到时，尝试用 find-image API 做模糊搜索 */
+                return fetch('/api/files/find-image/' + encodeURIComponent(filename))
+                    .then(function(r2) { return r2.ok ? r2.json() : null; })
+                    .then(function(d2) {
+                        if (d2 && d2.found) {
+                            content.innerHTML = '<img src="' + d2.url + '" class="source-preview-image" alt="' + escapeHtml(filename) + '">';
+                        } else {
+                            content.innerHTML = '<div class="source-preview-error">未找到文件: ' + escapeHtml(filename) + '</div>';
+                        }
+                        content.style.display = '';
+                    });
             }
             if (data.download_url) {
                 dlBtn.href = data.download_url;
@@ -1463,6 +1477,17 @@ function showSourcePreview(filename) {
         })
         .catch(function(e) {
             loading.textContent = '加载失败: ' + e;
+            /* 作为兜底，尝试直接显示 find-image 搜索到的图片 */
+            fetch('/api/files/find-image/' + encodeURIComponent(filename))
+                .then(function(r) { return r.ok ? r.json() : null; })
+                .then(function(d) {
+                    if (d && d.found) {
+                        loading.style.display = 'none';
+                        content.innerHTML = '<img src="' + d.url + '" class="source-preview-image" alt="' + escapeHtml(filename) + '">';
+                        content.style.display = '';
+                    }
+                })
+                .catch(function() {});
         });
 }
 

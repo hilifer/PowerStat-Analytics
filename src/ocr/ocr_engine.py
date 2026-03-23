@@ -745,7 +745,7 @@ class OCREngine:
             "分摊": ["市场化分摊", "分摊费用"],
         }
 
-        for line in lines:
+        for i, line in enumerate(lines):
             line_clean = line.strip()
             if not line_clean:
                 continue
@@ -756,11 +756,20 @@ class OCREngine:
 
             # 检查是否是不分时段的固定费用行（基金附加费，无时段标记）
             is_flat_fee = any(kw in line_clean for kw in flat_fee_keywords)
-            has_period_marker = bool(re.search(r'[(\(]\s*[尖峰平谷]\s*[)\)]', line_clean)) or \
+            # 支持 ASCII 括号 () 和中文全角括号（）
+            has_period_marker = bool(re.search(r'[(\(（]\s*[尖峰平谷]\s*[)\)）]', line_clean)) or \
                                 bool(re.search(r'[尖峰平谷]\s*期', line_clean))
 
             if is_flat_fee and not has_period_marker:
-                nums = re.findall(r'(\d+\.\d{2,8})', line_clean)
+                # 当前行无数字时，查找后续行中的单价
+                combined = line_clean
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    nl = lines[j].strip()
+                    if nl and not any(kw in nl for kw in component_keywords):
+                        combined += " " + nl
+                    else:
+                        break
+                nums = re.findall(r'(\d+\.\d{2,8})', combined)
                 for n in nums:
                     val = float(n)
                     if 0.001 <= val <= 1.0:
@@ -780,9 +789,9 @@ class OCREngine:
             if not comp_type:
                 continue
 
-            # 识别时段标签（取括号内或"X期"的字符）
+            # 识别时段标签（取括号内或"X期"的字符，支持全角括号）
             period_label = None
-            pm = re.search(r'[(\(]\s*([尖峰平谷])\s*[)\)]', line_clean)
+            pm = re.search(r'[(\(（]\s*([尖峰平谷])\s*[)\)）]', line_clean)
             if pm:
                 period_label = pm.group(1)
             else:
@@ -793,8 +802,19 @@ class OCREngine:
             if not period_label:
                 continue
 
-            # 提取该行中的单价
-            nums = re.findall(r'(\d+\.\d{2,8})', line_clean)
+            # 提取该行中的单价；若当前行无数字则查找后续行（跨行 OCR）
+            combined_text = line_clean
+            for j in range(i + 1, min(i + 4, len(lines))):
+                next_line = lines[j].strip()
+                if not next_line:
+                    continue
+                # 遇到下一个组件标签行或其他结构行则停止
+                if any(kw in next_line for kw in component_keywords) or \
+                   re.search(r'[尖峰平谷].*电费|基本电费|力调电费|以上小计|平均电价', next_line):
+                    break
+                combined_text += " " + next_line
+
+            nums = re.findall(r'(\d+\.\d{2,8})', combined_text)
             price_val = None
             for n in nums:
                 val = float(n)
