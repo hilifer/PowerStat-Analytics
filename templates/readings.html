@@ -12,14 +12,7 @@
     <h1 style="margin:0;">抄表数据</h1>
 </div>
 
-<!-- Tab 切换 -->
-<div class="tab-bar">
-    <button class="tab-btn active" data-tab="readings" onclick="switchTab('readings')">抄表记录</button>
-    <button class="tab-btn" data-tab="bills" onclick="switchTab('bills')">电费单</button>
-</div>
 
-<!-- ========== Tab 1: 抄表记录 ========== -->
-<div id="tab-readings" class="tab-content active">
 
 <!-- 操作区 -->
 <div style="display:flex; gap:1rem; margin-bottom:0.75rem; flex-wrap:wrap; align-items:center;">
@@ -380,208 +373,6 @@
 </div>
 {% endif %}
 
-</div>{# end tab-readings #}
-
-<!-- ========== Tab 2: 电费单 ========== -->
-<div id="tab-bills" class="tab-content">
-
-{% if grouped_data %}
-{% for group in grouped_data %}
-<div class="card reading-group">
-    <div class="card-header" style="flex-wrap:wrap; gap:0.5rem;">
-        <h2 style="margin:0;">
-            {{ group.project_name or '未分类' }}
-            <span style="font-weight:400; font-size:0.85rem; color:var(--text-secondary); margin-left:0.5rem;">
-                用户 {{ group.user_id }}
-            </span>
-        </h2>
-    </div>
-
-    {% for month_data in group.months %}
-    {% set first_r = month_data.gen or month_data.grid %}
-    {% set has_price = first_r and first_r.sharp_peak_price is not none %}
-    <div class="month-block bill-month-block">
-        <div class="month-header">
-            <div style="display:flex; align-items:center; gap:0.5rem;">
-                <h3 style="margin:0; font-size:1rem;">{{ month_data.month }} 电费单</h3>
-            </div>
-            <div style="display:flex; gap:0.5rem; align-items:center;">
-                <button class="btn btn-sm btn-primary"
-                        onclick="exportMonthBill('{{ group.user_id }}', '{{ month_data.month }}', '{{ group.project_name or '' }}')">
-                    导出 Excel
-                </button>
-            </div>
-        </div>
-
-        <div class="month-content">
-            {# ---- 发电统计表：正向(发电) + 反向(上网) + 自发用电 ---- #}
-            {% set gen = month_data.gen %}
-            {% set grid = month_data.grid %}
-            {% set prev_gen = month_data.prev_gen %}
-            {% set prev_grid = month_data.prev_grid %}
-            {% set gen_mult = gen.multiplier if gen else 1.0 %}
-            {% set grid_mult = grid.multiplier if grid else 1.0 %}
-            {% set discount = gen.discount if gen and gen.discount else 1.0 %}
-
-            {% if gen or grid %}
-            <div class="bill-meter-section">
-                <div class="section-label" style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
-                    {% if gen %}<span class="tag tag-gen">发电表 {{ gen.meter_number }}</span>
-                    {% if gen.asset_number %}<span style="font-size:0.75rem; color:var(--text-secondary);">资产号: {{ gen.asset_number }}</span>{% endif %}
-                    <span style="font-size:0.75rem; color:var(--text-secondary);">倍率: {{ gen_mult }}</span>{% endif %}
-                    {% if grid %}<span class="tag tag-grid" style="margin-left:0.5rem;">上网表 {{ grid.meter_number }}</span>
-                    {% if grid.asset_number %}<span style="font-size:0.75rem; color:var(--text-secondary);">资产号: {{ grid.asset_number }}</span>{% endif %}
-                    <span style="font-size:0.75rem; color:var(--text-secondary);">倍率: {{ grid_mult }}</span>{% endif %}
-                    {% if discount != 1.0 %}<span style="font-size:0.75rem; color:var(--text-secondary);">| 折扣: {{ discount }}</span>{% endif %}
-                </div>
-                <div class="table-wrap">
-                    <table class="calc-table">
-                        <thead>
-                            <tr>
-                                <th rowspan="2" style="min-width:65px;">类别</th>
-                                <th colspan="5" style="text-align:center; background:#f0fdf4;">正向数据（发电量）</th>
-                                <th colspan="5" style="text-align:center; background:#eff6ff;">反向数据（上网电量）</th>
-                                <th colspan="4" style="text-align:center; background:#fef9f0;">自发用电量/金额</th>
-                            </tr>
-                            <tr>
-                                <th class="num" style="background:#f0fdf4;">上月表数</th>
-                                <th class="num" style="background:#f0fdf4;">本月表数</th>
-                                <th class="num" style="background:#f0fdf4;">电表用量</th>
-                                <th class="num" style="background:#f0fdf4;">倍率</th>
-                                <th class="num" style="background:#f0fdf4;">发电量</th>
-                                <th class="num" style="background:#eff6ff;">上月表数</th>
-                                <th class="num" style="background:#eff6ff;">本月表数</th>
-                                <th class="num" style="background:#eff6ff;">电表用量</th>
-                                <th class="num" style="background:#eff6ff;">倍率</th>
-                                <th class="num" style="background:#eff6ff;">上网电量</th>
-                                <th class="num" style="background:#fef9f0;">实际用电数</th>
-                                <th class="num" style="background:#fef9f0;">原电价</th>
-                                <th class="num" style="background:#fef9f0;">优惠后电价</th>
-                                <th class="num" style="background:#fef9f0;">金额</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                        {% set tiers = [
-                            ('正有功尖峰', 'sharp_peak', 'rev_sharp_peak', 'sharp_peak_price'),
-                            ('正有功峰', 'peak', 'rev_peak', 'peak_price'),
-                            ('正有功平', 'flat', 'rev_flat', 'flat_price'),
-                            ('正有功谷', 'valley', 'rev_valley', 'valley_price'),
-                        ] %}
-
-                        {% set ns = namespace(
-                            gen_prev_total=0, gen_cur_total=0, gen_diff_total=0, gen_amount_total=0,
-                            grid_prev_total=0, grid_cur_total=0, grid_diff_total=0, grid_amount_total=0,
-                            self_total=0, amount_total=0
-                        ) %}
-
-                        {% for tier_label, fwd_field, rev_field, price_field in tiers %}
-                        {# 正向（发电表）: 上月表数/本月表数 来自 prev_gen 和 gen 的对应字段 #}
-                        {% set gen_prev = prev_gen[fwd_field] if prev_gen and prev_gen[fwd_field] is not none else none %}
-                        {% set gen_cur = gen[fwd_field] if gen and gen[fwd_field] is not none else none %}
-                        {% set gen_diff = (gen_cur - gen_prev) if gen_cur is not none and gen_prev is not none else none %}
-                        {% set gen_amount = (gen_diff * gen_mult) if gen_diff is not none else none %}
-
-                        {# 反向（上网表）: 上月表数/本月表数 来自 prev_grid 和 grid 的反向字段 #}
-                        {% set grid_prev = prev_grid[rev_field] if prev_grid and prev_grid[rev_field] is not none else none %}
-                        {% set grid_cur = grid[rev_field] if grid and grid[rev_field] is not none else none %}
-                        {% set grid_diff = (grid_cur - grid_prev) if grid_cur is not none and grid_prev is not none else none %}
-                        {% set grid_amount = (grid_diff * grid_mult) if grid_diff is not none else none %}
-
-                        {# 自发用电 = 发电量 - 上网电量 #}
-                        {% set self_use = (gen_amount - grid_amount) if gen_amount is not none and grid_amount is not none else none %}
-                        {% set price = gen[price_field] if gen and gen[price_field] is not none else none %}
-                        {% set discounted_price = (price * discount) if price is not none else none %}
-                        {% set tier_amount = (self_use * discounted_price) if self_use is not none and discounted_price is not none else none %}
-
-                        {# 累加总计 #}
-                        {% if gen_prev is not none %}{% set ns.gen_prev_total = ns.gen_prev_total + gen_prev %}{% endif %}
-                        {% if gen_cur is not none %}{% set ns.gen_cur_total = ns.gen_cur_total + gen_cur %}{% endif %}
-                        {% if gen_diff is not none %}{% set ns.gen_diff_total = ns.gen_diff_total + gen_diff %}{% endif %}
-                        {% if gen_amount is not none %}{% set ns.gen_amount_total = ns.gen_amount_total + gen_amount %}{% endif %}
-                        {% if grid_prev is not none %}{% set ns.grid_prev_total = ns.grid_prev_total + grid_prev %}{% endif %}
-                        {% if grid_cur is not none %}{% set ns.grid_cur_total = ns.grid_cur_total + grid_cur %}{% endif %}
-                        {% if grid_diff is not none %}{% set ns.grid_diff_total = ns.grid_diff_total + grid_diff %}{% endif %}
-                        {% if grid_amount is not none %}{% set ns.grid_amount_total = ns.grid_amount_total + grid_amount %}{% endif %}
-                        {% if self_use is not none %}{% set ns.self_total = ns.self_total + self_use %}{% endif %}
-                        {% if tier_amount is not none %}{% set ns.amount_total = ns.amount_total + tier_amount %}{% endif %}
-
-                        <tr>
-                            <td style="font-weight:600; white-space:nowrap;">{{ tier_label }}</td>
-                            {# 正向（发电量） #}
-                            <td class="num fwd-cell">{{ "%.2f"|format(gen_prev) if gen_prev is not none else '-' }}</td>
-                            <td class="num fwd-cell">{{ "%.2f"|format(gen_cur) if gen_cur is not none else '-' }}</td>
-                            <td class="num fwd-cell">{{ "%.2f"|format(gen_diff) if gen_diff is not none else '-' }}</td>
-                            <td class="num fwd-cell">{{ "%.2f"|format(gen_mult) }}</td>
-                            <td class="num fwd-cell"><strong>{{ "%.2f"|format(gen_amount) if gen_amount is not none else '-' }}</strong></td>
-                            {# 反向（上网电量） #}
-                            <td class="num rev-cell">{{ "%.2f"|format(grid_prev) if grid_prev is not none else '-' }}</td>
-                            <td class="num rev-cell">{{ "%.2f"|format(grid_cur) if grid_cur is not none else '-' }}</td>
-                            <td class="num rev-cell">{{ "%.2f"|format(grid_diff) if grid_diff is not none else '-' }}</td>
-                            <td class="num rev-cell">{{ "%.2f"|format(grid_mult) }}</td>
-                            <td class="num rev-cell"><strong>{{ "%.2f"|format(grid_amount) if grid_amount is not none else '-' }}</strong></td>
-                            {# 自发用电 #}
-                            <td class="num self-cell"><strong>{{ "%.2f"|format(self_use) if self_use is not none else '-' }}</strong></td>
-                            <td class="num self-cell">{{ "%.8f"|format(price) if price is not none else '-' }}</td>
-                            <td class="num self-cell">{{ "%.8f"|format(discounted_price) if discounted_price is not none else '-' }}</td>
-                            <td class="num self-cell"><strong>{{ "%.2f"|format(tier_amount) if tier_amount is not none else '-' }}</strong></td>
-                        </tr>
-                        {% endfor %}
-
-                        {# 合计行 #}
-                        <tr class="total-row">
-                            <td style="font-weight:700;">正有功总</td>
-                            <td class="num fwd-cell">{{ "%.2f"|format(ns.gen_prev_total) }}</td>
-                            <td class="num fwd-cell">{{ "%.2f"|format(ns.gen_cur_total) }}</td>
-                            <td class="num fwd-cell">{{ "%.2f"|format(ns.gen_diff_total) }}</td>
-                            <td class="num fwd-cell">{{ "%.2f"|format(gen_mult) }}</td>
-                            <td class="num fwd-cell"><strong>{{ "%.2f"|format(ns.gen_amount_total) }}</strong></td>
-                            <td class="num rev-cell">{{ "%.2f"|format(ns.grid_prev_total) }}</td>
-                            <td class="num rev-cell">{{ "%.2f"|format(ns.grid_cur_total) }}</td>
-                            <td class="num rev-cell">{{ "%.2f"|format(ns.grid_diff_total) }}</td>
-                            <td class="num rev-cell">{{ "%.2f"|format(grid_mult) }}</td>
-                            <td class="num rev-cell"><strong>{{ "%.2f"|format(ns.grid_amount_total) }}</strong></td>
-                            <td class="num self-cell"><strong>{{ "%.2f"|format(ns.self_total) }}</strong></td>
-                            <td class="num self-cell"></td>
-                            <td class="num self-cell"></td>
-                            <td class="num self-cell"><strong>{{ "%.2f"|format(ns.amount_total) }}</strong></td>
-                        </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            {% endif %}
-
-            {# ---- 单价汇总 ---- #}
-            {% if has_price %}
-            <div class="bill-price-summary">
-                <span class="section-label">单价:</span>
-                <span class="bill-price-tag">尖 {{ '%.4f'|format(first_r.sharp_peak_price) if first_r.sharp_peak_price is not none else '-' }}</span>
-                <span class="bill-price-tag">峰 {{ '%.4f'|format(first_r.peak_price) if first_r.peak_price is not none else '-' }}</span>
-                <span class="bill-price-tag">平 {{ '%.4f'|format(first_r.flat_price) if first_r.flat_price is not none else '-' }}</span>
-                <span class="bill-price-tag">谷 {{ '%.4f'|format(first_r.valley_price) if first_r.valley_price is not none else '-' }}</span>
-                {% if first_r.average_price is not none %}
-                <span class="bill-price-tag">均价 {{ '%.4f'|format(first_r.average_price) }}</span>
-                {% endif %}
-            </div>
-            {% else %}
-            <div class="bill-price-summary" style="color:var(--warning);">
-                <span>⚠ 单价数据未匹配，无法计算费用</span>
-            </div>
-            {% endif %}
-
-        </div>
-    </div>
-    {% endfor %}
-</div>
-{% endfor %}
-{% else %}
-<div class="empty-state">
-    <p>暂无电费单数据</p>
-    <p style="font-size:0.9rem;">请先在「抄表记录」中录入数据</p>
-</div>
-{% endif %}
-
-</div>{# end tab-bills #}
 
 {# ---- 图片选择弹窗 ---- #}
 <div id="imagePickerModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeImagePicker()">
@@ -662,44 +453,6 @@
 </div>
 
 <style>
-/* Tab 栏 */
-.tab-bar {
-    display:flex; gap:0; margin-bottom:1rem;
-    border-bottom:2px solid var(--border);
-}
-.tab-btn {
-    padding:0.6rem 1.5rem; border:none; background:none;
-    font-size:0.9rem; font-weight:500; cursor:pointer;
-    color:var(--text-secondary); border-bottom:2px solid transparent;
-    margin-bottom:-2px; transition:all 0.15s;
-}
-.tab-btn:hover { color:var(--text); background:#f8fafc; }
-.tab-btn.active {
-    color:var(--primary); border-bottom-color:var(--primary); font-weight:600;
-}
-.tab-content { display:none; }
-.tab-content.active { display:block; }
-
-/* 电费单表格 */
-.bill-table { font-size:0.83rem; width:100%; border-collapse:collapse; }
-.bill-table th, .bill-table td { padding:0.4rem 0.6rem; border-bottom:1px solid var(--border); }
-.bill-table th { background:#f8fafc; font-weight:600; font-size:0.78rem; color:var(--text-secondary); }
-.bill-total-row { background:#f0fdf4; }
-.bill-total-row td { border-top:2px solid var(--border); }
-.bill-meter-section {
-    background:var(--surface); border:1px solid var(--border);
-    border-radius:var(--radius); padding:0.75rem; margin-bottom:0.5rem;
-}
-.bill-price-summary {
-    display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap;
-    padding:0.5rem 0.75rem; font-size:0.8rem;
-    background:#f8fafc; border:1px solid var(--border); border-radius:var(--radius);
-}
-.bill-price-tag {
-    background:#eff6ff; color:var(--text); padding:0.15rem 0.5rem;
-    border-radius:4px; font-variant-numeric:tabular-nums; font-size:0.78rem;
-}
-
 /* 月份块 */
 .month-block { margin-bottom:1.5rem; }
 .month-header {
@@ -727,12 +480,6 @@
 .cell-input.total-input { font-weight:600; }
 .fwd-cell { background:#f0fdf4; }
 .rev-cell { background:#eff6ff; }
-.self-cell { background:#fefbf5; }
-.calc-table { font-size:0.82rem; }
-.calc-table th { font-size:0.78rem; padding:6px 8px; white-space:nowrap; }
-.calc-table td { padding:5px 8px; }
-.total-row { background:#f0f0f0; font-weight:600; border-top:2px solid #ccc; }
-.total-row td { padding-top:8px; padding-bottom:8px; }
 .reading-table { font-size:0.8rem; }
 
 /* 行状态 */
@@ -882,37 +629,6 @@
 </style>
 
 <script>
-
-/* === Tab 切换 === */
-function switchTab(tabName) {
-    document.querySelectorAll('.tab-btn').forEach(function(btn) {
-        btn.classList.toggle('active', btn.getAttribute('data-tab') === tabName);
-    });
-    document.querySelectorAll('.tab-content').forEach(function(panel) {
-        panel.classList.toggle('active', panel.id === 'tab-' + tabName);
-    });
-    // 记住选中的 tab
-    try { sessionStorage.setItem('readings_tab', tabName); } catch(e) {}
-}
-// 恢复上次选中的 tab
-(function() {
-    try {
-        var saved = sessionStorage.getItem('readings_tab');
-        if (saved && document.getElementById('tab-' + saved)) switchTab(saved);
-    } catch(e) {}
-})();
-
-/* === 单月电费单导出 === */
-function exportMonthBill(userId, month, project) {
-    var params = new URLSearchParams();
-    if (project) params.set('project', project);
-    if (userId) params.set('user_id', userId);
-    if (month) params.set('month', month);
-    var url = "{{ url_for('bills_export_excel') }}";
-    var qs = params.toString();
-    if (qs) url += '?' + qs;
-    window.location.href = url;
-}
 
 /* === 保存（抄表 + 单价一起保存） === */
 function saveAll(btn, userId, month) {

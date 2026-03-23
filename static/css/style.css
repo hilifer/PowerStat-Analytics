@@ -305,19 +305,6 @@ a.row-link:hover { text-decoration: underline; }
 .file-name { font-size: 0.85rem; }
 .file-meta { font-size: 0.75rem; color: var(--text-secondary); }
 
-/* ---- Charts ---- */
-.chart-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(500px, 1fr));
-    gap: 1.5rem;
-}
-.chart-card img {
-    width: 100%;
-    height: auto;
-    border-radius: var(--radius);
-    border: 1px solid var(--border);
-}
-
 /* ---- Breadcrumb ---- */
 .breadcrumb {
     display: flex;
@@ -455,9 +442,6 @@ a.row-link:hover { text-decoration: underline; }
 
     /* Refresh panel */
     .refresh-panel { flex-direction: column; align-items: flex-start; gap: 0.5rem; padding: 0.75rem; }
-
-    /* Chart grid */
-    .chart-grid { grid-template-columns: 1fr; }
 
     /* Breadcrumb */
     .breadcrumb { font-size: 0.8rem; flex-wrap: wrap; }
