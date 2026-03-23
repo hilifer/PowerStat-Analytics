@@ -385,9 +385,54 @@
 <!-- ========== Tab 2: 电费单 ========== -->
 <div id="tab-bills" class="tab-content">
 
+<!-- 电费单筛选栏 -->
+<div class="filter-bar" style="margin-bottom:1rem;">
+    <div class="filter-group">
+        <label>项目</label>
+        <select id="billFilterProject" onchange="filterBills()">
+            <option value="">全部项目</option>
+            {% for p in projects %}
+            <option value="{{ p }}">{{ p }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>用户编号</label>
+        <select id="billFilterUser" onchange="filterBills()">
+            <option value="">全部用户</option>
+            {% for u in user_ids %}
+            <option value="{{ u }}">{{ u }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>月份</label>
+        <select id="billFilterMonth" onchange="filterBills()">
+            <option value="">全部月份</option>
+            {% for m in months %}
+            <option value="{{ m }}">{{ m }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <button type="button" class="btn btn-outline btn-sm" onclick="resetBillFilter()">重置</button>
+</div>
+
+<!-- 批量操作栏 -->
+<div class="bill-batch-bar" style="display:flex; align-items:center; gap:1rem; margin-bottom:0.75rem; flex-wrap:wrap;">
+    <label style="display:flex; align-items:center; gap:0.3rem; cursor:pointer; font-size:0.85rem;">
+        <input type="checkbox" id="billSelectAll" onchange="toggleBillSelectAll(this)">
+        <span>全选</span>
+    </label>
+    <span id="billSelectedCount" style="font-size:0.85rem; color:var(--text-secondary);">已选 0 项</span>
+    <button type="button" class="btn btn-primary btn-sm" id="billBatchExportBtn" disabled
+            onclick="exportSelectedBills()">
+        批量导出 Excel
+    </button>
+</div>
+
 {% if grouped_data %}
 {% for group in grouped_data %}
-<div class="card reading-group">
+<div class="card reading-group bill-group-card" data-project="{{ group.project_name or '' }}" data-user="{{ group.user_id }}">
     <div class="card-header" style="flex-wrap:wrap; gap:0.5rem;">
         <h2 style="margin:0;">
             {{ group.project_name or '未分类' }}
@@ -400,9 +445,10 @@
     {% for month_data in group.months %}
     {% set first_r = month_data.gen or month_data.grid %}
     {% set has_price = first_r and first_r.sharp_peak_price is not none %}
-    <div class="month-block bill-month-block">
+    <div class="month-block bill-month-block" data-month="{{ month_data.month }}">
         <div class="month-header">
             <div style="display:flex; align-items:center; gap:0.5rem;">
+                <input type="checkbox" class="bill-check" data-user="{{ group.user_id }}" data-month="{{ month_data.month }}" data-project="{{ group.project_name or '' }}" onchange="updateBillSelection()">
                 <h3 style="margin:0; font-size:1rem;">{{ month_data.month }} 电费单</h3>
             </div>
             <div style="display:flex; gap:0.5rem; align-items:center;">
@@ -912,6 +958,108 @@ function exportMonthBill(userId, month, project) {
     var qs = params.toString();
     if (qs) url += '?' + qs;
     window.location.href = url;
+}
+
+/* === 电费单筛选 === */
+function filterBills() {
+    var project = document.getElementById('billFilterProject').value;
+    var user = document.getElementById('billFilterUser').value;
+    var month = document.getElementById('billFilterMonth').value;
+
+    document.querySelectorAll('.bill-group-card').forEach(function(card) {
+        var cardProject = card.getAttribute('data-project');
+        var cardUser = card.getAttribute('data-user');
+        var projectMatch = !project || cardProject === project;
+        var userMatch = !user || cardUser === user;
+
+        if (!projectMatch || !userMatch) {
+            card.style.display = 'none';
+            return;
+        }
+
+        // 按月份过滤月块
+        var anyVisible = false;
+        card.querySelectorAll('.bill-month-block').forEach(function(block) {
+            var blockMonth = block.getAttribute('data-month');
+            var monthMatch = !month || blockMonth === month;
+            block.style.display = monthMatch ? '' : 'none';
+            if (monthMatch) anyVisible = true;
+        });
+        card.style.display = anyVisible ? '' : 'none';
+    });
+    // 筛选后重置选择状态
+    uncheckHiddenBills();
+    updateBillSelection();
+}
+
+function resetBillFilter() {
+    document.getElementById('billFilterProject').value = '';
+    document.getElementById('billFilterUser').value = '';
+    document.getElementById('billFilterMonth').value = '';
+    filterBills();
+}
+
+function uncheckHiddenBills() {
+    document.querySelectorAll('.bill-check').forEach(function(cb) {
+        var block = cb.closest('.bill-month-block');
+        var card = cb.closest('.bill-group-card');
+        if ((block && block.style.display === 'none') || (card && card.style.display === 'none')) {
+            cb.checked = false;
+        }
+    });
+}
+
+/* === 电费单勾选 === */
+function getVisibleBillChecks() {
+    return Array.from(document.querySelectorAll('.bill-check')).filter(function(cb) {
+        var block = cb.closest('.bill-month-block');
+        var card = cb.closest('.bill-group-card');
+        return (!block || block.style.display !== 'none') && (!card || card.style.display !== 'none');
+    });
+}
+
+function toggleBillSelectAll(masterCb) {
+    var visible = getVisibleBillChecks();
+    visible.forEach(function(cb) { cb.checked = masterCb.checked; });
+    updateBillSelection();
+}
+
+function updateBillSelection() {
+    var visible = getVisibleBillChecks();
+    var checked = visible.filter(function(cb) { return cb.checked; });
+    document.getElementById('billSelectedCount').textContent = '已选 ' + checked.length + ' 项';
+    document.getElementById('billBatchExportBtn').disabled = checked.length === 0;
+    // 同步全选框状态
+    var masterCb = document.getElementById('billSelectAll');
+    masterCb.checked = visible.length > 0 && checked.length === visible.length;
+    masterCb.indeterminate = checked.length > 0 && checked.length < visible.length;
+}
+
+/* === 批量导出已选电费单 === */
+function exportSelectedBills() {
+    var checked = document.querySelectorAll('.bill-check:checked');
+    if (checked.length === 0) return;
+
+    var items = [];
+    checked.forEach(function(cb) {
+        items.push({ user_id: cb.getAttribute('data-user'), month: cb.getAttribute('data-month') });
+    });
+
+    // 通过隐藏表单 POST 提交
+    var form = document.createElement('form');
+    form.method = 'POST';
+    form.action = "{{ url_for('bills_export_excel') }}";
+    form.style.display = 'none';
+
+    var input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'items';
+    input.value = JSON.stringify(items);
+    form.appendChild(input);
+
+    document.body.appendChild(form);
+    form.submit();
+    document.body.removeChild(form);
 }
 
 /* === 保存（抄表 + 单价一起保存） === */
