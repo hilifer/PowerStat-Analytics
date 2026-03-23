@@ -68,8 +68,6 @@ _COLUMNS = [
     (13, "原电价",     14),
     (14, "优惠后电价", 14),
     (15, "金额",       14),
-    # 备注
-    (16, "用户号",     20),
 ]
 
 
@@ -272,8 +270,6 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
     for c in range(13, 16):
         ws.cell(row=row, column=c).border = _border
         ws.cell(row=row, column=c).fill = _self_fill
-    # 用户号列
-    _apply_cell(ws.cell(row=row, column=16), "", _header_font, _header_fill)
 
     # ---- 列标题行 ----
     row += 1
@@ -306,28 +302,7 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
     self_total = 0.0
     amount_total = 0.0
 
-    # 备注信息
-    notes = []
-    if gen:
-        notes.append(gen["meter_number"])
-        if gen.get("asset_number"):
-            notes.append(gen["asset_number"])
-    if grid:
-        notes.append(grid["meter_number"])
-        if grid.get("asset_number"):
-            notes.append(grid["asset_number"])
-
-    note_labels = []
-    if gen:
-        note_labels.append("发电表号")
-        if gen.get("asset_number"):
-            note_labels.append("发电表资产编号")
-    if grid:
-        note_labels.append("上网表号")
-        if grid.get("asset_number"):
-            note_labels.append("上网表资产号")
-
-    for idx, (tier_label, fwd_field, rev_field, price_field) in enumerate(_TIERS):
+    for tier_label, fwd_field, rev_field, price_field in _TIERS:
         # 正向（发电表）
         gp = prev_gen.get(fwd_field) if prev_gen else None
         gc = gen.get(fwd_field) if gen else None
@@ -387,11 +362,6 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
         _apply_cell(ws.cell(row=row, column=13), price, _data_font, None, _right, "0.00000000")
         _apply_cell(ws.cell(row=row, column=14), d_price, _data_font, None, _right, "0.00000000")
         _apply_cell(ws.cell(row=row, column=15), tier_amount, _data_font, None, _right, "#,##0.00")
-        # 备注（用户号列）
-        note_val = ""
-        if idx < len(note_labels):
-            note_val = note_labels[idx]
-        _apply_cell(ws.cell(row=row, column=16), note_val, _data_font, None, _left)
 
         row += 1
 
@@ -411,9 +381,3 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
     _apply_cell(ws.cell(row=row, column=13), None, _total_font, _total_fill, _right)
     _apply_cell(ws.cell(row=row, column=14), None, _total_font, _total_fill, _right)
     _apply_cell(ws.cell(row=row, column=15), amount_total, _total_font, _total_fill, _right, "#,##0.00")
-
-    # 备注列：显示备注信息
-    note_str = ""
-    if notes:
-        note_str = "; ".join(f"{lbl}: {val}" for lbl, val in zip(note_labels, notes) if val)
-    _apply_cell(ws.cell(row=row, column=16), note_str, _total_font, _total_fill, _left)
