@@ -1,4 +1,4 @@
-"""主处理管线：智能化协调邮件抓取、解析、入库、归档、可视化。
+"""主处理管线：智能化协调邮件抓取、解析、入库、归档。
 
 支持任意格式的附件和邮件正文，自动检测文件类型并路由到对应解析器。
 """
@@ -13,7 +13,6 @@ from src.email_fetcher.fetcher import EmailFetcher, EmailAttachment
 from src.parsers.multi_pass import MultiPassExtractor
 from src.parsers.text_extractor import extract_meters_from_text, read_text_file
 from src.ocr.ocr_engine import OCREngine, OCRResult
-from src.visualization.charts import ChartGenerator
 from src.logger import log
 
 
@@ -259,9 +258,8 @@ class Pipeline:
     def __init__(self, db: Database = None):
         self.db = db or Database()
         self.dispatcher = SmartDispatcher()
-        self.chart_gen = ChartGenerator(self.db)
 
-    def run_full(self, skip_fetch: bool = False, skip_viz: bool = False):
+    def run_full(self, skip_fetch: bool = False):
         """执行完整流程。"""
         log.info("=" * 60)
         log.info("PowerStat-Analytics 管线启动")
@@ -282,10 +280,6 @@ class Pipeline:
 
         # 3. 导出 CSV
         self.db.export_csv()
-
-        # 4. 生成图表
-        if not skip_viz:
-            self._generate_visualizations()
 
         log.info("=" * 60)
         log.info("管线执行完成")
@@ -665,22 +659,3 @@ class Pipeline:
                     updates_count += 1
 
         log.info("  关联补齐完成: %d 条更新", updates_count)
-
-    def _generate_visualizations(self):
-        """生成可视化图表。"""
-        log.info("[阶段6] 生成图表...")
-        self.chart_gen.generate_all()
-        for project in self.db.get_projects():
-            self.chart_gen.generate_all(project_name=project)
-
-    def query(self, project_name: str = None, user_id: str = None,
-              meter_number: str = None, month_from: str = None,
-              month_to: str = None) -> list[dict]:
-        """查询账单数据。"""
-        return self.db.get_monthly_bill(
-            project_name=project_name,
-            user_id=user_id,
-            meter_number=meter_number,
-            month_from=month_from,
-            month_to=month_to,
-        )

@@ -55,12 +55,6 @@ class Config:
                 if not p.is_absolute():
                     self._data["storage"][key] = str(project_root / p)
 
-        for key in ("output_dir",):
-            if key in self._data.get("visualization", {}):
-                p = Path(self._data["visualization"][key])
-                if not p.is_absolute():
-                    self._data["visualization"][key] = str(project_root / p)
-
         temp_dir = self._data.get("attachments", {}).get("temp_dir")
         if temp_dir:
             p = Path(temp_dir)

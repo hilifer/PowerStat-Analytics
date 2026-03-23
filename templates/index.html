@@ -26,7 +26,7 @@
         <small style="color:#666;">
             <strong>增量更新</strong>：下载新邮件 → 建立电表档案 → 交叉验证 → 补全/清理<br>
             <strong>全部更新</strong>：清空所有数据 → 从头下载 → 建立电表档案 → 交叉验证 → 补全/清理<br>
-            <small style="color:#999;">抄表数据和单价请在「账单查询」页面单独操作</small>
+            <small style="color:#999;">抄表数据和单价请在「抄表数据」页面单独操作</small>
         </small>
     </div>
     <div class="refresh-info">
@@ -308,9 +308,9 @@ document.addEventListener('keydown', function(e) {
     <div class="card-header"><h2>快捷操作</h2></div>
     <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
         <a href="{{ url_for('meters_list') }}" class="btn btn-outline">电表管理</a>
-        <a href="{{ url_for('bills') }}" class="btn btn-outline">账单查询</a>
+        <a href="{{ url_for('readings') }}" class="btn btn-outline">抄表数据</a>
+        <a href="{{ url_for('bill_calc') }}" class="btn btn-outline">发电统计</a>
         <a href="{{ url_for('archive_index') }}" class="btn btn-outline">归档浏览</a>
-        <a href="{{ url_for('charts') }}" class="btn btn-outline">可视化图表</a>
         <a href="{{ url_for('export_csv') }}" class="btn btn-success">导出 CSV</a>
     </div>
 </div>

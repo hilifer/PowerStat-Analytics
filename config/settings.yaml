@@ -275,21 +275,6 @@ storage:
   # 归档根目录
   archive_root: "output/archive"
 
-# --- 可视化设置 ---
-visualization:
-  # 图表输出目录
-  output_dir: "output/charts"
-  # 图表样式
-  style: "seaborn-v0_8-whitegrid"
-  # 中文字体（确保系统已安装）
-  font_family: "SimHei"
-  # 备用字体
-  fallback_fonts: ["WenQuanYi Micro Hei", "Noto Sans CJK SC", "DejaVu Sans"]
-  # DPI
-  dpi: 150
-  # 默认图表尺寸
-  figure_size: [14, 8]
-
 # --- 日志设置 ---
 logging:
   level: "INFO"

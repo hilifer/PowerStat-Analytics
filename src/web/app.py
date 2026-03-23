@@ -51,7 +51,7 @@ def create_app() -> Flask:
         "started_at": None,  # 任务开始时间
     }
 
-    # 账单更新独立状态（与首页更新分开）
+    # 数据更新独立状态（与首页更新分开）
     app.config["BILL_REFRESH_LOCK"] = threading.Lock()
     app.config["BILL_REFRESH_STATUS"] = {
         "running": False,
@@ -527,28 +527,6 @@ def _register_routes(app: Flask, db: Database):
                                paired_meter=paired_meter, paired_readings=paired_readings,
                                merged_readings=merged_readings, price_records=price_records)
 
-    # ---- 账单查询 ----
-    @app.route("/bills")
-    def bills():
-        project = request.args.get("project")
-        user_id = request.args.get("user_id")
-        meter = request.args.get("meter")
-        month = request.args.get("month") or None
-
-        results = db.get_monthly_bill(
-            project_name=project, user_id=user_id,
-            meter_number=meter, month_from=month, month_to=month,
-        )
-        projects = db.get_projects()
-        user_ids = db.get_user_ids()
-        months = db.get_months()
-        refresh_status = app.config["REFRESH_STATUS"]
-        return render_template("bills.html",
-                               bills=results, projects=projects, user_ids=user_ids,
-                               months=months, sel_project=project, sel_user_id=user_id,
-                               sel_meter=meter, sel_month=month,
-                               refresh_status=refresh_status)
-
     # ---- 电费单计算 ----
 
     @app.route("/bill-calc")
@@ -944,16 +922,6 @@ def _register_routes(app: Flask, db: Database):
         t.start()
         return jsonify({"success": True, "message": f"{task_label}{mode}更新已启动"})
 
-    @app.route("/api/bills/incremental-update", methods=["POST"])
-    def bill_incremental_update():
-        """增量更新：下载新邮件 + 扫描所有归档文件，提取抄表和单价。"""
-        return _start_bill_update(clear_first=False, task_type="all")
-
-    @app.route("/api/bills/full-update", methods=["POST"])
-    def bill_full_update():
-        """全量更新：清空抄表+单价，下载新邮件 + 扫描所有归档文件重新提取。"""
-        return _start_bill_update(clear_first=True, task_type="all")
-
     @app.route("/api/bills/readings/incremental", methods=["POST"])
     def bill_readings_incremental():
         """抄表数据增量更新。"""
@@ -978,48 +946,6 @@ def _register_routes(app: Flask, db: Database):
     @app.route("/api/bill-refresh-status")
     def bill_refresh_status_api():
         return jsonify(app.config["BILL_REFRESH_STATUS"])
-
-    # ---- 单价关联诊断 API ----
-    @app.route("/api/bills/price-diagnosis")
-    def price_diagnosis():
-        """诊断单价记录为什么没有关联到账单。"""
-        with db.connection() as conn:
-            # 单价记录中的 user_id
-            price_users = conn.execute(
-                "SELECT DISTINCT user_id, reading_month FROM price_records ORDER BY user_id"
-            ).fetchall()
-            # 电表中的 user_id
-            meter_users = conn.execute(
-                "SELECT DISTINCT user_id FROM meters WHERE user_id IS NOT NULL ORDER BY user_id"
-            ).fetchall()
-            # 已成功关联的
-            matched = conn.execute("""
-                SELECT COUNT(*) FROM v_monthly_bill
-                WHERE sharp_peak_price IS NOT NULL OR peak_price IS NOT NULL
-                   OR flat_price IS NOT NULL OR valley_price IS NOT NULL
-                   OR average_price IS NOT NULL
-            """).fetchone()[0]
-            # 未关联的单价记录
-            unmatched = conn.execute("""
-                SELECT p.user_id, p.reading_month, p.sharp_peak_price, p.peak_price,
-                       p.flat_price, p.valley_price, p.average_price, p.source_file
-                FROM price_records p
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM meters m WHERE m.user_id = p.user_id
-                )
-            """).fetchall()
-
-        return jsonify({
-            "price_user_ids": [{"user_id": r["user_id"], "month": r["reading_month"]} for r in price_users],
-            "meter_user_ids": [r["user_id"] for r in meter_users],
-            "matched_bills": matched,
-            "unmatched_prices": [dict(r) for r in unmatched],
-            "diagnosis": (
-                "所有单价记录的 user_id 在 meters 表中都找不到匹配" if len(unmatched) == len(price_users)
-                else f"{len(unmatched)}/{len(price_users)} 条单价记录未匹配"
-                if unmatched else "全部匹配成功"
-            ),
-        })
 
     # ---- 抄表数据查看/编辑 ----
     @app.route("/readings")
@@ -1632,46 +1558,6 @@ def _register_routes(app: Flask, db: Database):
             "download_url": download_url,
             "filename": found.name,
         })
-
-    # ---- 可视化 ----
-    @app.route("/charts")
-    def charts():
-        project = request.args.get("project")
-        user_id = request.args.get("user_id")
-
-        from src.visualization.charts import ChartGenerator
-        gen = ChartGenerator(db)
-
-        suffix = ""
-        if project:
-            suffix += f"_proj_{project}"
-        if user_id:
-            suffix += f"_user_{user_id}"
-
-        gen.generate_all(project_name=project, user_id=user_id)
-
-        chart_dir = Path(config.get("visualization", "output_dir",
-                                    default="output/charts"))
-        chart_files = []
-        if chart_dir.exists():
-            for f in sorted(chart_dir.glob(f"*{suffix}.png")):
-                chart_files.append(f.name)
-            # 如果没有带 suffix 的图，显示全部
-            if not chart_files:
-                chart_files = [f.name for f in sorted(chart_dir.glob("*.png"))]
-
-        projects = db.get_projects()
-        user_ids = db.get_user_ids()
-        return render_template("charts.html",
-                               chart_files=chart_files,
-                               projects=projects, user_ids=user_ids,
-                               sel_project=project, sel_user_id=user_id)
-
-    # ---- 图表静态文件 ----
-    @app.route("/chart-images/<path:filename>")
-    def chart_image(filename):
-        chart_dir = config.get("visualization", "output_dir", default="output/charts")
-        return send_from_directory(chart_dir, filename)
 
     # ---- 已处理邮件记录 ----
     @app.route("/processed")
