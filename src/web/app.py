@@ -3,12 +3,13 @@
 import hashlib
 import os
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
 from flask import (
     Flask, render_template, request, redirect, url_for,
-    jsonify, send_from_directory, flash, abort,
+    jsonify, send_from_directory, flash, abort, send_file,
 )
 
 
@@ -48,6 +49,17 @@ def create_app() -> Flask:
         "result": None,
         "logs": [],          # 详细进度日志列表
         "started_at": None,  # 任务开始时间
+    }
+
+    # 数据更新独立状态（与首页更新分开）
+    app.config["BILL_REFRESH_LOCK"] = threading.Lock()
+    app.config["BILL_REFRESH_STATUS"] = {
+        "running": False,
+        "progress": "",
+        "last_run": None,
+        "result": None,
+        "logs": [],
+        "started_at": None,
     }
 
     _register_routes(app, db)
@@ -515,6 +527,425 @@ def _register_routes(app: Flask, db: Database):
                                paired_meter=paired_meter, paired_readings=paired_readings,
                                merged_readings=merged_readings, price_records=price_records)
 
+    # ---- 电费单计算 ----
+
+    @app.route("/bill-calc")
+    def bill_calc():
+        """电费单计算页面：按项目+月份查看发电统计表。
+
+        计算逻辑（参照发电统计表）：
+        - 正向数据（发电量）：发电表的正向有功数据
+          电表用量 = 本月表数 - 上月表数
+          发电量 = 电表用量 × 倍率
+        - 反向数据（上网电量）：上网表的反向有功数据
+          电表用量 = 本月表数 - 上月表数
+          上网电量 = 电表用量 × 倍率
+        - 自发用电量 = 发电量 - 上网电量
+        - 金额 = 自发用电量 × 优惠后电价
+        """
+        from collections import OrderedDict
+
+        sel_project = request.args.get("project", "")
+        sel_month = request.args.get("month", "")
+
+        projects = db.get_projects()
+        months = db.get_months()
+
+        bill_groups = []  # [{user_id, project_name, month, gen, grid, prev_gen, prev_grid, prices}]
+
+        if sel_project and sel_month:
+            # 计算上月
+            import re
+            prev_month = ""
+            m = re.match(r'(\d{4})-(\d{2})', sel_month)
+            if m:
+                y, mo = int(m.group(1)), int(m.group(2))
+                if mo == 1:
+                    prev_month = f"{y-1}-12"
+                else:
+                    prev_month = f"{y}-{str(mo-1).zfill(2)}"
+
+            # 查询当月数据
+            raw = db.get_readings_grouped(
+                project_name=sel_project,
+                reading_month=sel_month,
+            )
+
+            # 查询上月数据（用于计算电表用量）
+            prev_raw = []
+            if prev_month:
+                prev_raw = db.get_readings_grouped(
+                    project_name=sel_project,
+                    reading_month=prev_month,
+                )
+
+            # 上月数据按 meter_id 索引
+            prev_by_meter = {}
+            for r in prev_raw:
+                prev_by_meter[r["meter_id"]] = r
+
+            # 分组: user_id -> {gen, grid, prev_gen, prev_grid}
+            user_map = OrderedDict()
+            for r in raw:
+                uid = r["user_id"] or "unknown"
+                if uid not in user_map:
+                    user_map[uid] = {
+                        "user_id": uid,
+                        "project_name": r["project_name"],
+                        "month": sel_month,
+                        "prev_month": prev_month,
+                        "gen": None,
+                        "grid": None,
+                        "prev_gen": None,
+                        "prev_grid": None,
+                    }
+                if r["meter_type"] == "发电表":
+                    user_map[uid]["gen"] = r
+                    user_map[uid]["prev_gen"] = prev_by_meter.get(r["meter_id"])
+                elif r["meter_type"] == "上网表":
+                    user_map[uid]["grid"] = r
+                    user_map[uid]["prev_grid"] = prev_by_meter.get(r["meter_id"])
+
+            bill_groups = list(user_map.values())
+
+        return render_template("bill_calc.html",
+                               bill_groups=bill_groups,
+                               projects=projects,
+                               months=months,
+                               sel_project=sel_project,
+                               sel_month=sel_month)
+
+    @app.route("/api/bill-calc/save-prices", methods=["POST"])
+    def bill_calc_save_prices():
+        """保存电费单页面的单价数据。"""
+        data = request.get_json()
+        if not data:
+            return jsonify({"ok": False, "error": "无数据"})
+        items = data.get("items", [])
+        for item in items:
+            user_id = item.get("user_id")
+            month = item.get("month")
+            prices = item.get("prices", {})
+            if user_id and month:
+                db.upsert_price(
+                    user_id=user_id,
+                    reading_month=month,
+                    sharp_peak_price=prices.get("sharp_peak_price"),
+                    peak_price=prices.get("peak_price"),
+                    flat_price=prices.get("flat_price"),
+                    valley_price=prices.get("valley_price"),
+                    average_price=prices.get("average_price"),
+                )
+        return jsonify({"ok": True})
+
+    # ---- 账单数据更新（共用核心逻辑） ----
+
+    def _do_bill_update(clear_first: bool, task_type: str = "all", log_fn=None):
+        """账单更新核心逻辑。
+
+        task_type: 'readings' 只提取抄表数据, 'prices' 只提取单价, 'all' 两者都做
+        clear_first: 全量模式，先清空对应数据
+        log_fn: 可选，外部传入的日志函数。不传则写入 BILL_REFRESH_STATUS。
+        """
+        status = app.config["BILL_REFRESH_STATUS"]
+
+        def _default_log(msg):
+            ts = datetime.now().strftime("%H:%M:%S")
+            status["logs"].append(f"[{ts}] {msg}")
+            status["progress"] = msg
+
+        _log = log_fn or _default_log
+
+        try:
+            from src.email_fetcher.fetcher import EmailFetcher
+            from src.pipeline import SmartDispatcher
+            from src.parsers.multi_pass import MultiPassExtractor
+            import re, shutil
+
+            mode_label = "全量" if clear_first else "增量"
+            task_labels = {"readings": "抄表数据", "prices": "单价提取", "all": "全部"}
+            task_label = task_labels.get(task_type, task_type)
+
+            # ---- 步骤 1：全量时先清空 ----
+            if clear_first:
+                with db.connection() as conn:
+                    if task_type in ("readings", "all"):
+                        rc = conn.execute("SELECT COUNT(*) FROM monthly_readings").fetchone()[0]
+                        conn.execute("DELETE FROM monthly_readings")
+                        _log(f"已清空 {rc} 条抄表数据")
+                    if task_type in ("prices", "all"):
+                        pc = conn.execute("SELECT COUNT(*) FROM price_records").fetchone()[0]
+                        conn.execute("DELETE FROM price_records")
+                        _log(f"已清空 {pc} 条单价记录")
+
+            # ---- 步骤 2：下载新邮件附件 ----
+            _log("正在连接邮箱搜索新附件…")
+            new_email_count = 0
+            try:
+                with EmailFetcher() as fetcher:
+                    attachments = fetcher.fetch_attachments()
+                _log(f"邮箱中共 {len(attachments)} 个附件")
+
+                for i, att in enumerate(attachments, 1):
+                    date_str = att.email_date.strftime("%Y-%m-%d %H:%M") if att.email_date else ""
+                    fp = _email_fingerprint(att.email_subject, att.email_sender, date_str, att.filename)
+
+                    if _is_already_processed(db, fp):
+                        continue
+
+                    _log(f"  新附件 [{new_email_count + 1}] {att.filename}")
+
+                    _mark_processed(db, fp, att.filename, att.email_subject, date_str)
+                    new_email_count += 1
+
+            except Exception as e:
+                _log(f"邮箱连接失败（继续处理已有文件）: {e}")
+                log.error("邮箱连接失败: %s", e)
+
+            if new_email_count > 0:
+                _log(f"已下载 {new_email_count} 个新附件")
+            else:
+                _log("没有新邮件附件")
+
+            # ---- 步骤 3：扫描所有原始文件（邮件附件 + 归档） ----
+            temp_dir = Path(config.get("attachments", "temp_dir",
+                                       default="output/temp_attachments"))
+            archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
+            IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
+            EXCEL_EXTS = {".xlsx", ".xls", ".csv"}
+            ALL_EXTS = IMAGE_EXTS | EXCEL_EXTS | {".pdf", ".html", ".htm", ".txt", ".zip"}
+            SKIP_PREFIXES = ("~$",)  # 跳过 Office 临时文件
+
+            source_files = []
+            # 优先扫描邮件附件原始目录
+            for scan_root in [temp_dir, archive_root]:
+                if scan_root.exists():
+                    for f in sorted(scan_root.rglob("*")):
+                        if f.is_file() and f.suffix.lower() in ALL_EXTS and not f.name.startswith(SKIP_PREFIXES):
+                            rel = f.relative_to(scan_root)
+                            # 从目录名推断月份
+                            month_dir = rel.parts[0] if rel.parts else f.parent.name
+                            source_info = {"filename": f.name, "archive_month": month_dir}
+                            source_files.append((str(f), source_info))
+
+            _log(f"共 {len(source_files)} 个文件（邮件附件 + 归档），开始扫描…")
+
+            if not source_files:
+                _log("没有文件可处理，完成")
+                status["result"] = {"readings_added": 0, "prices_added": 0, "new_emails": new_email_count}
+                status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                return
+
+            # ---- 步骤 4：提取抄表数据 ----
+            dispatcher = SmartDispatcher()
+            readings_added = 0
+            ocr_count = 0
+            price_saved = 0
+
+            if task_type in ("readings", "all"):
+                all_sheets = []
+                _log(f"[抄表] 开始从 {len(source_files)} 个文件中提取…")
+                for i, (fpath, sinfo) in enumerate(source_files, 1):
+                    fname = Path(fpath).name
+                    if i <= 3 or i % 10 == 0 or i == len(source_files):
+                        _log(f"[抄表] 加载文件 [{i}/{len(source_files)}] {fname}")
+                    try:
+                        sheets = dispatcher.load_as_dataframes(fpath, sinfo)
+                        all_sheets.extend(sheets)
+                    except Exception as e:
+                        log.error("加载文件失败 %s: %s", fname, e)
+
+                _log(f"[抄表] 多轮扫描提取（{len(all_sheets)} 个 sheet）…")
+                extractor = MultiPassExtractor()
+                extractor.load_dataframes(all_sheets)
+                all_records = extractor.extract_all()
+
+                _log(f"[抄表] 提取到 {len(all_records)} 条记录，写入数据库…")
+                for rec in all_records:
+                    meter_number = rec.get("meter_number", "").strip()
+                    if not meter_number:
+                        continue
+                    month = rec.get("reading_month")
+                    if not month or month == "unknown":
+                        continue
+                    try:
+                        with db.connection() as conn:
+                            row = conn.execute("SELECT id FROM meters WHERE meter_number = ?",
+                                               (meter_number,)).fetchone()
+                        if not row:
+                            continue
+                        meter_id = row["id"]
+                        db.upsert_reading(
+                            meter_id=meter_id,
+                            reading_month=month,
+                            sharp_peak=rec.get("sharp_peak"),
+                            peak=rec.get("peak"),
+                            flat=rec.get("flat"),
+                            valley=rec.get("valley"),
+                            total_kwh=rec.get("total_kwh"),
+                            rev_sharp_peak=rec.get("rev_sharp_peak"),
+                            rev_peak=rec.get("rev_peak"),
+                            rev_flat=rec.get("rev_flat"),
+                            rev_valley=rec.get("rev_valley"),
+                            rev_total=rec.get("rev_total"),
+                            cur_sharp_peak=rec.get("cur_sharp_peak"),
+                            cur_peak=rec.get("cur_peak"),
+                            cur_flat=rec.get("cur_flat"),
+                            cur_valley=rec.get("cur_valley"),
+                            cur_total=rec.get("cur_total"),
+                            prev_sharp_peak=rec.get("prev_sharp_peak"),
+                            prev_peak=rec.get("prev_peak"),
+                            prev_flat=rec.get("prev_flat"),
+                            prev_valley=rec.get("prev_valley"),
+                            prev_total=rec.get("prev_total"),
+                            stat_date=rec.get("stat_date"),
+                            source_file=rec.get("source_file"),
+                            source_sheet=rec.get("source_sheet"),
+                        )
+                        readings_added += 1
+                    except Exception as e:
+                        log.error("抄表入库失败: %s - %s", meter_number, e)
+
+            # ---- 步骤 5：提取单价数据（图片 OCR） ----
+            if task_type in ("prices", "all"):
+                all_ocr = []
+                _log(f"[单价] 开始从 {len(source_files)} 个文件中识别图片…")
+                for i, (fpath, sinfo) in enumerate(source_files, 1):
+                    fname = Path(fpath).name
+                    file_type = dispatcher.detect_type(fpath)
+                    if file_type != "image":
+                        continue
+                    ocr_count += 1
+                    if ocr_count <= 3 or ocr_count % 10 == 0:
+                        _log(f"[单价] OCR 图片 [{ocr_count}] {fname}")
+                    try:
+                        ocr = dispatcher.ocr_engine.extract_from_image(fpath, sinfo)
+                        if ocr.has_any_data():
+                            all_ocr.append(ocr)
+                            if ocr.has_price_data():
+                                _log(f"  OCR 单价: {fname} → 用户={ocr.user_id or '?'}, "
+                                     f"月={ocr.reading_month or '?'}, "
+                                     f"尖={ocr.sharp_peak_price}, 峰={ocr.peak_price}, "
+                                     f"平={ocr.flat_price}, 谷={ocr.valley_price}, "
+                                     f"均价={ocr.average_price}")
+                            elif ocr.user_id:
+                                _log(f"  OCR: {fname} → 用户={ocr.user_id}, 未提取到单价")
+                    except Exception as e:
+                        log.error("OCR 失败 %s: %s", fname, e)
+
+                _log(f"[单价] OCR 识别 {ocr_count} 张图片，有效 {len(all_ocr)} 条，写入数据库…")
+                # 获取已知 user_id 用于修正 OCR 提取结果
+                known_user_ids = set()
+                try:
+                    for m in db.get_meters():
+                        uid = m.get("user_id")
+                        if uid:
+                            known_user_ids.add(uid)
+                except Exception:
+                    pass
+
+                from src.pipeline import Pipeline
+                for ocr in all_ocr:
+                    if not ocr.reading_month or not ocr.has_price_data():
+                        continue
+                    user_id = ocr.user_id
+                    if not user_id:
+                        log.warning("单价无 user_id，跳过: src=%s", ocr.source_file)
+                        continue
+                    # 修正 user_id
+                    if user_id not in known_user_ids and known_user_ids:
+                        matched = Pipeline._match_user_id(user_id, known_user_ids)
+                        if matched:
+                            log.info("单价 user_id 修正: %s -> %s", user_id, matched)
+                            user_id = matched
+                        else:
+                            log.warning("单价 user_id 无法匹配: %s, src=%s",
+                                        user_id, ocr.source_file)
+                            continue
+                    try:
+                        db.upsert_price(
+                            user_id=user_id,
+                            reading_month=ocr.reading_month,
+                            sharp_peak_price=ocr.sharp_peak_price,
+                            peak_price=ocr.peak_price,
+                            flat_price=ocr.flat_price,
+                            valley_price=ocr.valley_price,
+                            average_price=ocr.average_price,
+                            source_file=ocr.source_file,
+                        )
+                        price_saved += 1
+                    except Exception as e:
+                        log.error("单价入库失败: %s", e)
+
+            _log(f"[{task_label}] {mode_label}更新完成！"
+                 f"抄表 {readings_added} 条，单价 {price_saved} 条"
+                 f"（扫描 {len(source_files)} 个文件，OCR {ocr_count} 张，新邮件 {new_email_count} 个）")
+            status["result"] = {
+                "readings_added": readings_added,
+                "prices_added": price_saved,
+                "new_emails": new_email_count,
+                "files_scanned": len(source_files),
+                "ocr_images": ocr_count,
+            }
+            status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        except Exception as e:
+            log.error("账单更新失败: %s", e, exc_info=True)
+            _log(f"错误: {e}")
+            status["result"] = {"error": str(e)}
+
+    def _start_bill_update(clear_first: bool, task_type: str = "all"):
+        """启动账单更新后台任务。"""
+        lock = app.config["BILL_REFRESH_LOCK"]
+        status = app.config["BILL_REFRESH_STATUS"]
+
+        if not lock.acquire(blocking=False):
+            return jsonify({"error": "账单更新任务正在执行中"}), 409
+
+        mode = "全量" if clear_first else "增量"
+        task_labels = {"readings": "抄表数据", "prices": "单价提取", "all": "全部"}
+        task_label = task_labels.get(task_type, task_type)
+        status["running"] = True
+        status["progress"] = f"正在启动{task_label}{mode}更新…"
+        status["result"] = None
+        status["logs"] = []
+        status["started_at"] = datetime.now().strftime("%H:%M:%S")
+
+        def _worker():
+            try:
+                _do_bill_update(clear_first, task_type=task_type)
+            finally:
+                status["running"] = False
+                lock.release()
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        return jsonify({"success": True, "message": f"{task_label}{mode}更新已启动"})
+
+    @app.route("/api/bills/readings/incremental", methods=["POST"])
+    def bill_readings_incremental():
+        """抄表数据增量更新。"""
+        return _start_bill_update(clear_first=False, task_type="readings")
+
+    @app.route("/api/bills/readings/full", methods=["POST"])
+    def bill_readings_full():
+        """抄表数据全量更新：清空 monthly_readings 后重新提取。"""
+        return _start_bill_update(clear_first=True, task_type="readings")
+
+    @app.route("/api/bills/prices/incremental", methods=["POST"])
+    def bill_prices_incremental():
+        """单价提取增量更新。"""
+        return _start_bill_update(clear_first=False, task_type="prices")
+
+    @app.route("/api/bills/prices/full", methods=["POST"])
+    def bill_prices_full():
+        """单价提取全量更新：清空 price_records 后重新提取。"""
+        return _start_bill_update(clear_first=True, task_type="prices")
+
+    # ---- 账单更新状态轮询 API ----
+    @app.route("/api/bill-refresh-status")
+    def bill_refresh_status_api():
+        return jsonify(app.config["BILL_REFRESH_STATUS"])
 
     # ---- 抄表数据查看/编辑 ----
     @app.route("/readings")
@@ -1218,6 +1649,54 @@ def _register_routes(app: Flask, db: Database):
         csv_dir = config.get("storage", "csv_export_dir", default="output/data")
         flash(f"CSV 已导出到 {csv_dir}", "success")
         return redirect(url_for("index"))
+
+    @app.route("/bills/export-excel", methods=["GET", "POST"])
+    def bills_export_excel():
+        """导出月度电费单 Excel 文件。
+
+        GET: 按 project/user_id/month 筛选导出全部
+        POST: 导出指定的 user_id+month 组合 (items JSON)
+        """
+        import json
+        from src.web.bill_export import generate_bill_excel
+
+        selected_items = None
+        if request.method == "POST":
+            items_json = request.form.get("items", "")
+            if items_json:
+                try:
+                    selected_items = json.loads(items_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        project = request.args.get("project") or None
+        user_id = request.args.get("user_id") or None
+        month = request.args.get("month") or None
+
+        buf = generate_bill_excel(db, project_name=project, user_id=user_id,
+                                  month=month, selected_items=selected_items)
+
+        # 文件名
+        parts = []
+        if project:
+            parts.append(project)
+        if month:
+            parts.append(month)
+        elif selected_items:
+            months = sorted(set(it["month"] for it in selected_items))
+            if len(months) == 1:
+                parts.append(months[0])
+            elif len(months) <= 3:
+                parts.append("_".join(months))
+        parts.append("电费单")
+        filename = "_".join(parts) + ".xlsx"
+
+        return send_file(
+            buf,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=filename,
+        )
 
     # ---- 新建电表页面 ----
     @app.route("/meters/create", methods=["GET", "POST"])
