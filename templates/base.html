@@ -16,7 +16,6 @@
             <li><a href="{{ url_for('index') }}" class="{% if request.endpoint == 'index' %}active{% endif %}">首页</a></li>
             <li><a href="{{ url_for('meters_list') }}" class="{% if request.endpoint in ('meters_list', 'meter_detail') %}active{% endif %}">电表管理</a></li>
             <li><a href="{{ url_for('readings') }}" class="{% if request.endpoint == 'readings' %}active{% endif %}">抄表数据</a></li>
-            <li><a href="{{ url_for('bill_calc') }}" class="{% if request.endpoint == 'bill_calc' %}active{% endif %}">发电统计</a></li>
             <li><a href="{{ url_for('email_files') }}" class="{% if request.endpoint == 'email_files' %}active{% endif %}">邮件文件</a></li>
             <li><a href="{{ url_for('processed_list') }}" class="{% if request.endpoint == 'processed_list' %}active{% endif %}">处理记录</a></li>
         </ul>
