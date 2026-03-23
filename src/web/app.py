@@ -530,25 +530,23 @@ def _register_routes(app: Flask, db: Database):
     # ---- 账单查询 ----
     @app.route("/bills")
     def bills():
-        from datetime import date
         project = request.args.get("project")
         user_id = request.args.get("user_id")
         meter = request.args.get("meter")
-        current_month = date.today().strftime("%Y-%m")
-        month_from = request.args.get("from") or current_month
-        month_to = request.args.get("to") or current_month
+        month = request.args.get("month") or None
 
         results = db.get_monthly_bill(
             project_name=project, user_id=user_id,
-            meter_number=meter, month_from=month_from, month_to=month_to,
+            meter_number=meter, month_from=month, month_to=month,
         )
         projects = db.get_projects()
         user_ids = db.get_user_ids()
+        months = db.get_months()
         refresh_status = app.config["REFRESH_STATUS"]
         return render_template("bills.html",
                                bills=results, projects=projects, user_ids=user_ids,
-                               sel_project=project, sel_user_id=user_id,
-                               sel_meter=meter, sel_from=month_from, sel_to=month_to,
+                               months=months, sel_project=project, sel_user_id=user_id,
+                               sel_meter=meter, sel_month=month,
                                refresh_status=refresh_status)
 
     # ---- 电费单计算 ----

@@ -41,12 +41,13 @@
         <input type="text" name="meter" value="{{ sel_meter or '' }}" placeholder="输入电表号">
     </div>
     <div class="filter-group">
-        <label>起始月份</label>
-        <input type="month" name="from" value="{{ sel_from or '' }}">
-    </div>
-    <div class="filter-group">
-        <label>截止月份</label>
-        <input type="month" name="to" value="{{ sel_to or '' }}">
+        <label>月份</label>
+        <select name="month" class="auto-submit">
+            <option value="">全部月份</option>
+            {% for m in months %}
+            <option value="{{ m }}" {% if sel_month == m %}selected{% endif %}>{{ m }}</option>
+            {% endfor %}
+        </select>
     </div>
     <button type="submit" class="btn btn-secondary btn-sm">查询</button>
     <a href="{{ url_for('bills') }}" class="btn btn-outline btn-sm">重置</a>
@@ -239,7 +240,7 @@ function exportExcel() {
     var exportParams = new URLSearchParams();
     if (params.get('project')) exportParams.set('project', params.get('project'));
     if (params.get('user_id')) exportParams.set('user_id', params.get('user_id'));
-    if (params.get('from')) exportParams.set('month', params.get('from'));
+    if (params.get('month')) exportParams.set('month', params.get('month'));
     var qs = exportParams.toString();
     if (qs) url += '?' + qs;
     window.location.href = url;
