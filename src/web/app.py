@@ -1034,10 +1034,76 @@ def _register_routes(app: Flask, db: Database):
             reading_month=sel_month or None,
         )
 
+        # 收集所有出现的月份，计算上月列表，用于回填 prev/cur 表数
+        import re
+        months_in_data = set()
+        for r in raw:
+            months_in_data.add(r["reading_month"])
+
+        prev_months_needed = set()
+        for m in months_in_data:
+            match = re.match(r'(\d{4})-(\d{2})', m)
+            if match:
+                y, mo = int(match.group(1)), int(match.group(2))
+                pm = f"{y-1}-12" if mo == 1 else f"{y}-{str(mo-1).zfill(2)}"
+                prev_months_needed.add(pm)
+
+        # 只查询尚未包含在 raw 中的上月数据
+        prev_months_to_fetch = prev_months_needed - months_in_data
+        prev_by_meter = {}  # meter_id -> {month -> reading}
+        for pm in prev_months_to_fetch:
+            prev_raw = db.get_readings_grouped(
+                project_name=sel_project or None,
+                user_id=sel_user_id or None,
+                reading_month=pm,
+            )
+            for pr in prev_raw:
+                prev_by_meter.setdefault(pr["meter_id"], {})[pm] = pr
+
+        # 也把 raw 中的数据加入 prev_by_meter，以便跨月引用
+        for r in raw:
+            prev_by_meter.setdefault(r["meter_id"], {})[r["reading_month"]] = r
+
+        def _calc_prev_month(month_str):
+            match = re.match(r'(\d{4})-(\d{2})', month_str)
+            if not match:
+                return None
+            y, mo = int(match.group(1)), int(match.group(2))
+            return f"{y-1}-12" if mo == 1 else f"{y}-{str(mo-1).zfill(2)}"
+
+        def _backfill_prev_cur(r):
+            """如果 prev_*/cur_* 为空，尝试从上月数据回填。"""
+            if r is None:
+                return
+            meter_id = r["meter_id"]
+            month = r["reading_month"]
+            pm = _calc_prev_month(month)
+            prev_r = prev_by_meter.get(meter_id, {}).get(pm) if pm else None
+
+            field_pairs = [
+                ("sharp_peak", "cur_sharp_peak", "prev_sharp_peak"),
+                ("peak", "cur_peak", "prev_peak"),
+                ("flat", "cur_flat", "prev_flat"),
+                ("valley", "cur_valley", "prev_valley"),
+                ("total_kwh", "cur_total", "prev_total"),
+            ]
+            for usage_key, cur_key, prev_key in field_pairs:
+                # 回填 prev_*：用上月数据的 cur_* 值
+                if r.get(prev_key) is None and prev_r is not None:
+                    if prev_r.get(cur_key) is not None:
+                        r[prev_key] = prev_r[cur_key]
+                    elif prev_r.get(prev_key) is not None and prev_r.get(usage_key) is not None:
+                        r[prev_key] = prev_r[prev_key] + prev_r[usage_key]
+                # 回填 cur_*：prev + usage
+                if r.get(cur_key) is None:
+                    if r.get(prev_key) is not None and r.get(usage_key) is not None:
+                        r[cur_key] = r[prev_key] + r[usage_key]
+
         # 构建 按用户→按月→发电表/上网表 的分组结构
         from collections import OrderedDict
         user_groups = OrderedDict()  # user_id -> {project_name, months: {month -> {gen, grid}}}
         for r in raw:
+            _backfill_prev_cur(r)
             uid = r["user_id"] or "unknown"
             if uid not in user_groups:
                 user_groups[uid] = {"user_id": uid, "project_name": r["project_name"], "months_dict": OrderedDict()}
