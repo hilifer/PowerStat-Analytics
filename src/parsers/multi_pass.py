@@ -40,6 +40,27 @@ _MONTH_RE = re.compile(r'(\d{4})\s*[-年/]\s*(\d{1,2})\s*月?')
 # 紧凑格式：YYYYMM 或 YYYY + 数字 + 月（无分隔符）
 _MONTH_COMPACT_RE = re.compile(r'(\d{4})(0[1-9]|1[0-2])(?:\D|$)')
 
+# 账期偏移量（从配置读取）
+_BILLING_MONTH_OFFSET = config.get("billing_month_offset", default=0)
+
+
+def _apply_billing_offset(month_str: str) -> str:
+    """将 YYYY-MM 格式的抄表月份按 billing_month_offset 偏移，得到实际账期月份。
+
+    例如 offset=-1 时，"2026-02" → "2026-01"（2月抄表对应1月账期）。
+    """
+    if not _BILLING_MONTH_OFFSET or not month_str or month_str == "unknown":
+        return month_str
+    m = re.match(r'(\d{4})-(\d{2})', month_str)
+    if not m:
+        return month_str
+    y, mo = int(m.group(1)), int(m.group(2))
+    # 用总月数做偏移，自动处理跨年
+    total = y * 12 + (mo - 1) + _BILLING_MONTH_OFFSET
+    new_y = total // 12
+    new_mo = total % 12 + 1
+    return f"{new_y}-{str(new_mo).zfill(2)}"
+
 
 def _cell_str(val) -> str:
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -1174,7 +1195,7 @@ class MultiPassExtractor:
             if mm and non_empty <= 3:
                 y, mo = int(mm.group(1)), int(mm.group(2))
                 if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                    current_month = f"{y}-{str(mo).zfill(2)}"
+                    current_month = _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
                 continue
 
             # 汇总行跳过
@@ -1234,11 +1255,11 @@ class MultiPassExtractor:
                 if dm:
                     y, mo = int(dm.group(1)), int(dm.group(2))
                     if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                        row_month = f"{y}-{str(mo).zfill(2)}"
+                        row_month = _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
                 elif hasattr(row.iloc[date_col], 'year'):
                     try:
                         d = row.iloc[date_col]
-                        row_month = f"{d.year}-{str(d.month).zfill(2)}"
+                        row_month = _apply_billing_offset(f"{d.year}-{str(d.month).zfill(2)}")
                     except Exception:
                         pass
             if not row_month or row_month == "unknown":
@@ -1558,7 +1579,7 @@ class MultiPassExtractor:
                 if m:
                     y, mo = int(m.group(1)), int(m.group(2))
                     if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                        month = f"{y}-{str(mo).zfill(2)}"
+                        month = _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
                         break
                 # 紧凑格式（YYYYMM）
                 if not month:
@@ -1566,7 +1587,7 @@ class MultiPassExtractor:
                     if m:
                         y, mo = int(m.group(1)), int(m.group(2))
                         if 2015 <= y <= 2035:
-                            month = f"{y}-{str(mo).zfill(2)}"
+                            month = _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
                             break
             if month:
                 break
@@ -2436,16 +2457,16 @@ class MultiPassExtractor:
             for m in _MONTH_RE.finditer(text):
                 y, mo = int(m.group(1)), int(m.group(2))
                 if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                    return f"{y}-{str(mo).zfill(2)}"
+                    return _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
             # 紧凑格式：202601（YYYYMM，无分隔符）
             for m in _MONTH_COMPACT_RE.finditer(text):
                 y, mo = int(m.group(1)), int(m.group(2))
                 if 2015 <= y <= 2035:
-                    return f"{y}-{str(mo).zfill(2)}"
+                    return _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
         if source_info and source_info.get("email_date"):
             d = source_info["email_date"]
             if hasattr(d, "strftime"):
-                return d.strftime("%Y-%m")
+                return _apply_billing_offset(d.strftime("%Y-%m"))
         return "unknown"
 
     def _extract_project_name(self, text: str) -> Optional[str]:
