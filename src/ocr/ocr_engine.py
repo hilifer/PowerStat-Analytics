@@ -515,6 +515,11 @@ class OCREngine:
                 prices["flat_price"] = valid[2]
                 prices["valley_price"] = valid[3]
 
+        # 尖峰期没有值时，取峰期价格
+        if not prices.get("sharp_peak_price") and prices.get("peak_price"):
+            prices["sharp_peak_price"] = prices["peak_price"]
+            log.info("  尖峰期价格为空，使用峰期价格: %s", prices["peak_price"])
+
         # 补充平均电价
         if "average_price" not in prices:
             avg = self._extract_average_price(text)

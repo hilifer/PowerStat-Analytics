@@ -305,26 +305,26 @@
                 <div class="price-grid" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
                     <div class="price-item">
                         <label>尖价</label>
-                        <input type="number" step="0.0001" class="cell-input price-input" name="sharp_peak_price"
-                            value="{{ '%.4f'|format(first_r.sharp_peak_price) if first_r and first_r.sharp_peak_price is not none else '' }}"
+                        <input type="number" step="0.00000001" class="cell-input price-input" name="sharp_peak_price"
+                            value="{{ '%.8f'|format(first_r.sharp_peak_price) if first_r and first_r.sharp_peak_price is not none else '' }}"
                             {% if price_locked or any_locked %}disabled{% endif %}>
                     </div>
                     <div class="price-item">
                         <label>峰价</label>
-                        <input type="number" step="0.0001" class="cell-input price-input" name="peak_price"
-                            value="{{ '%.4f'|format(first_r.peak_price) if first_r and first_r.peak_price is not none else '' }}"
+                        <input type="number" step="0.00000001" class="cell-input price-input" name="peak_price"
+                            value="{{ '%.8f'|format(first_r.peak_price) if first_r and first_r.peak_price is not none else '' }}"
                             {% if price_locked or any_locked %}disabled{% endif %}>
                     </div>
                     <div class="price-item">
                         <label>平价</label>
-                        <input type="number" step="0.0001" class="cell-input price-input" name="flat_price"
-                            value="{{ '%.4f'|format(first_r.flat_price) if first_r and first_r.flat_price is not none else '' }}"
+                        <input type="number" step="0.00000001" class="cell-input price-input" name="flat_price"
+                            value="{{ '%.8f'|format(first_r.flat_price) if first_r and first_r.flat_price is not none else '' }}"
                             {% if price_locked or any_locked %}disabled{% endif %}>
                     </div>
                     <div class="price-item">
                         <label>谷价</label>
-                        <input type="number" step="0.0001" class="cell-input price-input" name="valley_price"
-                            value="{{ '%.4f'|format(first_r.valley_price) if first_r and first_r.valley_price is not none else '' }}"
+                        <input type="number" step="0.00000001" class="cell-input price-input" name="valley_price"
+                            value="{{ '%.8f'|format(first_r.valley_price) if first_r and first_r.valley_price is not none else '' }}"
                             {% if price_locked or any_locked %}disabled{% endif %}>
                     </div>
                 </div>
@@ -602,12 +602,12 @@
             {% if has_price %}
             <div class="bill-price-summary">
                 <span class="section-label">单价:</span>
-                <span class="bill-price-tag">尖 {{ '%.4f'|format(first_r.sharp_peak_price) if first_r.sharp_peak_price is not none else '-' }}</span>
-                <span class="bill-price-tag">峰 {{ '%.4f'|format(first_r.peak_price) if first_r.peak_price is not none else '-' }}</span>
-                <span class="bill-price-tag">平 {{ '%.4f'|format(first_r.flat_price) if first_r.flat_price is not none else '-' }}</span>
-                <span class="bill-price-tag">谷 {{ '%.4f'|format(first_r.valley_price) if first_r.valley_price is not none else '-' }}</span>
+                <span class="bill-price-tag">尖 {{ '%.8f'|format(first_r.sharp_peak_price) if first_r.sharp_peak_price is not none else '-' }}</span>
+                <span class="bill-price-tag">峰 {{ '%.8f'|format(first_r.peak_price) if first_r.peak_price is not none else '-' }}</span>
+                <span class="bill-price-tag">平 {{ '%.8f'|format(first_r.flat_price) if first_r.flat_price is not none else '-' }}</span>
+                <span class="bill-price-tag">谷 {{ '%.8f'|format(first_r.valley_price) if first_r.valley_price is not none else '-' }}</span>
                 {% if first_r.average_price is not none %}
-                <span class="bill-price-tag">均价 {{ '%.4f'|format(first_r.average_price) }}</span>
+                <span class="bill-price-tag">均价 {{ '%.8f'|format(first_r.average_price) }}</span>
                 {% endif %}
             </div>
             {% else %}
@@ -1342,7 +1342,7 @@ function showOcrResult(data) {
             Object.keys(priceLabels).forEach(function(k) {
                 if (data.prices[k] != null) {
                     html += '<tr><td class="ocr-label">' + priceLabels[k] + '</td><td class="ocr-value">' +
-                        data.prices[k].toFixed(4) + ' 元/kWh</td></tr>';
+                        data.prices[k].toFixed(8) + ' 元/kWh</td></tr>';
                 }
             });
             html += '</tbody></table>';
@@ -1405,7 +1405,7 @@ function applyOcrPrices() {
         Object.keys(ocrResultData.prices).forEach(function(k) {
             var inp = pg.querySelector('[name="' + k + '"]');
             if (inp && ocrResultData.prices[k] != null) {
-                inp.value = ocrResultData.prices[k].toFixed(4);
+                inp.value = ocrResultData.prices[k].toFixed(8);
             }
         });
         var sec = block.querySelector('.price-section');
