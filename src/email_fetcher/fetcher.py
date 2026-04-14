@@ -287,11 +287,11 @@ class EmailFetcher:
                 msg = email.message_from_bytes(raw)
 
                 if not _matches_filter(msg, self.filter_cfg):
-                    if debug_logged < 5:
+                    if debug_logged < 10:
                         _subj = _decode_header_value(msg.get("Subject", ""))
                         _from = _decode_header_value(msg.get("From", ""))
                         _to = _decode_header_value(msg.get("To", ""))
-                        log.debug("跳过邮件: Subject=[%s] From=[%s] To=[%s]", _subj, _from, _to)
+                        log.info("过滤跳过邮件: Subject=[%s] From=[%s] To=[%s]", _subj, _from, _to)
                         debug_logged += 1
                     continue
 
