@@ -328,17 +328,18 @@ def _register_routes(app: Flask, db: Database):
                             for sf in sub_files:
                                 queue.append((sf, sinfo))
 
-                # 1.2 多轮扫描提取电表档案（仅电表信息，不提取读数）
-                _log(f"多轮扫描提取电表档案（{len(all_sheets)} 个 sheet，{len(new_attachments)} 个新附件，跳过 {skipped} 个已处理）")
+                # 1.2 多轮扫描提取电表档案 + 读数（完整模式）
+                _log(f"多轮扫描提取电表档案 + 读数（{len(all_sheets)} 个 sheet，{len(new_attachments)} 个新附件，跳过 {skipped} 个已处理）")
                 extractor = MultiPassExtractor()
                 extractor.load_dataframes(all_sheets)
-                all_records = extractor.extract_meters_only()
+                all_records = extractor.extract_all()
 
                 if all_text_records:
                     all_records.extend(all_text_records)
 
-                # 1.3 只写入电表档案（不写抄表数据和单价）
-                _log(f"提取到 {len(all_records)} 条记录，写入电表档案…")
+                # 1.3 写入电表档案 + 抄表读数
+                readings_added = 0
+                _log(f"提取到 {len(all_records)} 条记录，写入电表档案和读数…")
                 for rec in all_records:
                     meter_number = rec.get("meter_number", "").strip()
                     if not meter_number:
@@ -361,7 +362,51 @@ def _register_routes(app: Flask, db: Database):
                     except Exception as e:
                         log.error("电表入库失败: %s - %s", rec.get("meter_number"), e)
 
-                _log(f"电表档案写入完成: {meters_added} 条")
+                    # 写入抄表读数
+                    month = rec.get("reading_month")
+                    if not month or month == "unknown":
+                        continue
+                    try:
+                        with db.connection() as conn:
+                            row = conn.execute(
+                                "SELECT id FROM meters WHERE meter_number = ?",
+                                (meter_number,),
+                            ).fetchone()
+                        if not row:
+                            continue
+                        meter_id = row["id"]
+                        db.upsert_reading(
+                            meter_id=meter_id,
+                            reading_month=month,
+                            sharp_peak=rec.get("sharp_peak"),
+                            peak=rec.get("peak"),
+                            flat=rec.get("flat"),
+                            valley=rec.get("valley"),
+                            total_kwh=rec.get("total_kwh"),
+                            rev_sharp_peak=rec.get("rev_sharp_peak"),
+                            rev_peak=rec.get("rev_peak"),
+                            rev_flat=rec.get("rev_flat"),
+                            rev_valley=rec.get("rev_valley"),
+                            rev_total=rec.get("rev_total"),
+                            cur_sharp_peak=rec.get("cur_sharp_peak"),
+                            cur_peak=rec.get("cur_peak"),
+                            cur_flat=rec.get("cur_flat"),
+                            cur_valley=rec.get("cur_valley"),
+                            cur_total=rec.get("cur_total"),
+                            prev_sharp_peak=rec.get("prev_sharp_peak"),
+                            prev_peak=rec.get("prev_peak"),
+                            prev_flat=rec.get("prev_flat"),
+                            prev_valley=rec.get("prev_valley"),
+                            prev_total=rec.get("prev_total"),
+                            stat_date=rec.get("stat_date"),
+                            source_file=rec.get("source_file"),
+                            source_sheet=rec.get("source_sheet"),
+                        )
+                        readings_added += 1
+                    except Exception as e:
+                        log.error("抄表入库失败: %s - %s", meter_number, e)
+
+                _log(f"电表档案写入完成: {meters_added} 条，抄表读数: {readings_added} 条")
 
                 # 1.4 保存配对关系
                 if extractor.pairs:
@@ -376,7 +421,73 @@ def _register_routes(app: Flask, db: Database):
                     _mark_processed(db, fp, att.filename, att.email_subject, date_str)
                     new_count += 1
 
-                # 1.5 推理补全
+                # 1.5 提取单价数据（图片 OCR）
+                price_saved = 0
+                ocr_count = 0
+                all_ocr = []
+                for att, fp, date_str in new_attachments:
+                    fpath = att.filepath
+                    file_type = dispatcher.detect_type(fpath)
+                    if file_type != "image":
+                        continue
+                    ocr_count += 1
+                    try:
+                        source_info = {
+                            "email_date": att.email_date,
+                            "email_subject": att.email_subject,
+                            "filename": att.filename,
+                        }
+                        ocr = dispatcher.ocr_engine.extract_from_image(fpath, source_info)
+                        if ocr.has_any_data():
+                            all_ocr.append(ocr)
+                            if ocr.has_price_data():
+                                _log(f"  OCR 单价: {att.filename} → 用户={ocr.user_id or '?'}, "
+                                     f"月={ocr.reading_month or '?'}")
+                    except Exception as e:
+                        log.error("OCR 失败 %s: %s", att.filename, e)
+
+                if all_ocr:
+                    _log(f"OCR 识别 {ocr_count} 张图片，有效 {len(all_ocr)} 条，写入数据库…")
+                    known_user_ids = set()
+                    try:
+                        for m in db.get_meters():
+                            uid = m.get("user_id")
+                            if uid:
+                                known_user_ids.add(uid)
+                    except Exception:
+                        pass
+
+                    from src.pipeline import Pipeline as _Pipeline
+                    for ocr in all_ocr:
+                        if not ocr.reading_month or not ocr.has_price_data():
+                            continue
+                        user_id = ocr.user_id
+                        if not user_id:
+                            continue
+                        if user_id not in known_user_ids and known_user_ids:
+                            matched = _Pipeline._match_user_id(user_id, known_user_ids)
+                            if matched:
+                                user_id = matched
+                            else:
+                                continue
+                        try:
+                            db.upsert_price(
+                                user_id=user_id,
+                                reading_month=ocr.reading_month,
+                                sharp_peak_price=ocr.sharp_peak_price,
+                                peak_price=ocr.peak_price,
+                                flat_price=ocr.flat_price,
+                                valley_price=ocr.valley_price,
+                                average_price=ocr.average_price,
+                                source_file=ocr.source_file,
+                            )
+                            price_saved += 1
+                        except Exception as e:
+                            log.error("单价入库失败: %s", e)
+
+                    _log(f"单价写入完成: {price_saved} 条")
+
+                # 1.6 推理补全
                 _log("推理补全缺失数据…")
                 db.infer_missing_data()
 
@@ -388,17 +499,21 @@ def _register_routes(app: Flask, db: Database):
 
                 with db.connection() as conn:
                     final_meter_count = conn.execute("SELECT COUNT(*) FROM meters").fetchone()[0]
-                _log(f"完成！电表档案已定型: {final_meter_count} 块电表")
+                    final_reading_count = conn.execute("SELECT COUNT(*) FROM monthly_readings").fetchone()[0]
+                    final_price_count = conn.execute("SELECT COUNT(*) FROM price_records").fetchone()[0]
+                _log(f"完成！电表: {final_meter_count}，读数: {final_reading_count}，单价: {final_price_count}")
 
                 status["result"] = {
                     "new": new_count,
                     "skipped": skipped,
                     "meters_added": meters_added,
+                    "readings_added": readings_added,
+                    "prices_added": price_saved,
                     "cleaned": cleaned,
                     "processed_files": processed_files,
                 }
 
-                _log(f"新增 {new_count} 个附件，电表 {meters_added} 条，清理 {cleaned} 条")
+                _log(f"新增 {new_count} 个附件，电表 {meters_added} 条，读数 {readings_added} 条，单价 {price_saved} 条")
                 status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             except Exception as e:
