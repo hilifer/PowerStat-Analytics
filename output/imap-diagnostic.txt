@@ -1,0 +1,67 @@
+=== IMAP 文件夹 ===
+  (\NoSelect \HasChildren) "/" "&UXZO1mWHTvZZOQ-"
+  (\HasNoChildren) "/" "INBOX"
+  (\HasNoChildren) "/" "Sent Messages"
+  (\HasNoChildren) "/" "Drafts"
+  (\HasNoChildren) "/" "Deleted Messages"
+  (\HasNoChildren) "/" "Junk"
+  (\HasNoChildren) "/" "&UXZO1mWHTvZZOQ-/QQ&kK5O9ouilgU-"
+
+=== INBOX 共 139 封邮件 ===
+
+=== 所有邮件列表（最近50封）===
+   [] From=" 腾讯微云 " <weiyun@tencent.com> To=2355279146@qq.com Subject=微云提醒：您的微云帐号一年未登录，帐号数据将被冻结，请您在30天内登录
+   [Thu, 28 Nov 2019 09:54:47] From=" 呆料拍卖现货交易网 " <simon@icwant.com> To=" 2355279146 " <2355279146@qq.com> Subject=处理电子呆废料 找IC现货 紧缺料
+   [Tue, 21 Jan 2020 02:58:07] From=" 信用卡中心 " <brave@effort.cebbankuser.com> To=2355279146@qq.com Subject=【邀请函】祝贺啊，请您收下光大金卡申请名额(AD)
+   [Mon, 10 Feb 2020 02:21:10] From=" 信用卡中心 " <success@ecitic.zhxinuser.com> To=2355279146@qq.com Subject=恭祝您的初步预审通过，您的金卡申请资格已送达邮箱(AD)
+   [Tue, 24 Mar 2020 02:36:59] From=" 信用卡中心 " <renal@zx.usersend.net> To=2355279146@qq.com Subject=【重大喜讯】恭喜你初选通过，可进入快速申卡通道(AD)
+   [Sat, 11 Apr 2020 04:44:32] From=" 拉卡拉pos机 " <decry@ransom.posletter.com> To=2355279146@qq.com Subject=亲，您是幸运用户，特邀您申领专属刷卡机，点击看详情(AD)
+   [Sat, 11 Apr 2020 04:47:55] From=" 拉卡拉pos机 " <decry@ransom.posletter.com> To=2355279146@qq.com Subject=亲，您是幸运用户，特邀您申领专属刷卡机，点击看详情(AD)
+   [Mon, 21 Jun 2021 04:36:50] From=" 信用卡推荐 " <emotion@bask.jhsent.com> To=2355279146@qq.com Subject=[提醒]交通超级金卡可免费使用，敬请知悉！(AD)
+  *** [Fri, 3 Sep 2021 10:49:12 ] From=雍兴春  <sandycpl@netvigator.com> To=2355279144@qq.com  <2355279144@qq.com>,  Subject=雍兴春
+   [Wed, 29 Sep 2021 00:11:56] From=" 信用卡精选 " <anyhow@Ukrainian.publishmail. To=2355279146@qq.com Subject=祝贺您满足资格，请签收审批下发的金卡办理邀请函(AD)
+   [Sat, 16 Oct 2021 03:40:13] From=" 度小满 " <muffle@oily.postbizx.com> To=2355279146@qq.com Subject=恭喜您2355279146@qq.com，您已有资格申请此次借款活动了，请留意，以审批为准！(AD)
+   [Fri, 22 Oct 2021 10:51:24] From=" 969017442 " <969017442@qq.com> To=" 2355279146 " <2355279146@qq.com> Subject=re:送别叶妙丽语录_BiliBili2
+   [Tue, 17 Jan 2023 15:45:41] From=" QQ邮箱管理员 " <ftnremind_admin@qq.com> To=" 2355279146 " <2355279146@qq.com> Subject=中转站超大附件到期提醒
+   [Mon, 20 Mar 2023 01:57:02] From=Discord <noreply@discord.com> To=2355279146@qq.com Subject=验证 Discord 的电子邮件地址
+   [Mon, 20 Mar 2023 02:03:54] From=Discord <noreply@discord.com> To=2355279146@qq.com Subject=验证来自新地点的Discord登录
+   [Tue, 6 Jun 2023 10:48:03 ] From=微支付通知  <member@perfect.cgbcosnews.com> To=" 2355279146@qq.com " <2355279146@qq.com Subject=通知：因您本人于2023年还款行为已超出指定基准，系统现送您手机壳盲盒惊喜抽奖机会，立即抽取(AD)
+   [Fri, 26 Jan 2024 06:40:24] From=WeTransfer <noreply@wetransfer.com> To=2355279146@qq.com Subject=Your code is: 717500
+   [Fri, 26 Jan 2024 06:47:29] From=WeTransfer <noreply@wetransfer.com> To=2355279146@qq.com Subject=NBL画册改色调位 嵌入.ai  sent successfully to sean@nebulit
+   [Fri, 26 Jan 2024 06:56:19] From=WeTransfer <noreply@wetransfer.com> To=2355279146@qq.com Subject=sean@nebulitetech.com downloaded NBL画册改色调位 嵌入.ai
+   [Wed, 31 Jan 2024 03:24:46] From=WeTransfer <noreply@wetransfer.com> To=2355279146@qq.com Subject=sean@nebulitetech.com sent you Web NBL2024 Catalog
+   [Wed, 31 Jan 2024 07:02:01] From=WeTransfer <noreply@wetransfer.com> To=2355279146@qq.com Subject=A transfer you sent is about to expire
+   [Wed, 07 Feb 2024 02:23:46] From=WeTransfer <noreply@wetransfer.com> To=2355279146@qq.com Subject=Your code is: 153664
+   [Wed, 07 Feb 2024 02:49:02] From=WeTransfer <noreply@wetransfer.com> To=2355279146@qq.com Subject=NBL接头-.ai  sent successfully to sean@nebulitetech.
+   [Wed, 07 Feb 2024 03:54:53] From=WeTransfer <noreply@wetransfer.com> To=2355279146@qq.com Subject=sean@nebulitetech.com downloaded  NBL接头-.ai
+   [Mon, 12 Feb 2024 03:00:32] From=WeTransfer <noreply@wetransfer.com> To=2355279146@qq.com Subject=A transfer you sent is about to expire
+   [Fri, 15 Mar 2024 01:32:36] From=" 信用卡还款金 " <untie@caress.gcnused.cn> To=2355279146@qq.com Subject=您的帐号@2355279146@qq.com申卡名额已到帐户，并已成功为您保留(AD)
+   [Thu, 28 Mar 2024 07:08:08] From=Discord <notifications@discord.com> To=2355279146@qq.com Subject=Discord  政策更新
+   [Fri, 7 Jun 2024 15:32:38 ] From=" SLDA胡君璇 " <2929972447@qq.com> To=" 小五玩渲染 " <2355279146@qq.com> Subject=回复：耀嵘会前宣传片
+   [] From=2355279146@qq.com To=2355279146@qq.com Subject=环境变量测试
+   [Thu, 5 Mar 2026 14:21:57 ] From=" QQ邮箱 " <10000@qq.com> To=" 2355279146 " <2355279146@qq.com> Subject=QQ邮箱异地登录提醒
+   [Thu, 5 Mar 2026 07:20:05 ] From=huggingface <website@huggingface.co> To=2355279146@qq.com Subject=New login to your Hugging Face account
+   [Fri, 6 Mar 2026 08:33:43 ] From=" 耀嵘照明 " <2355670099@qq.com> To=" 2355279146 " <2355279146@qq.com> Subject=回复：测试用电邮件 - Himalaya 配置成功
+   [Fri, 6 Mar 2026 08:52:50 ] From=" 耀嵘照明 " <2355670099@qq.com> To=" 2355279146 " <2355279146@qq.com> Subject=回复：测试用电2邮件 - Himalaya 配置成功
+  *** [Mon, 9 Mar 2026 10:31:45 ] From=" 耀嵘科技-曹先生 " <2355279143@qq.com> To=" 2355279146 " <2355279146@qq.com> Subject=2026年1月电费
+   [Mon, 9 Mar 2026 14:27:59 ] From=" 耀嵘照明 " <2355670099@qq.com> To=" 2355279146 " <2355279146@qq.com> Subject=回复：2026年2月发电量统计报表
+   [Mon, 09 Mar 2026 14:12:32] From=Desiree from n8n <product-updates@info.n To=2355279146@qq.com Subject=Your AI agents just got human checkpoints
+   [Thu, 12 Mar 2026 18:07:27] From=noreply@ahaspeed.net To=2355279146@qq.com Subject=🔥啊哈加速器限时周年庆，全场低至4.5折🔥
+   [Sat, 14 Mar 2026 09:12:44] From=Dify <hello@dify.ai> To=<2355279146@qq.com> Subject=Dify Raises $30M, Human Input Node, Template Marke
+   [Wed, 18 Mar 2026 13:37:14] From=Bart at n8n <bart@news.n8n.io> To=2355279146@qq.com Subject=Can you build OpenClaw in n8n?
+   [Tue, 24 Mar 2026 01:19:17] From=Microsoft  帐户团队 <account-security-norepl To=2355279146@qq.com Subject=验证你的电子邮件地址
+   [Tue, 24 Mar 2026 01:36:02] From=Microsoft  帐户团队 <account-security-norepl To=2355279146@qq.com Subject=你的一次性代码
+   [Tue, 24 Mar 2026 16:26:53] From=Bart from n8n <bart@info.n8n.io> To=2355279146@qq.com Subject=You're invited: join our livestream this Thursday
+   [Wed, 25 Mar 2026 05:54:42] From=Adobe <message@adobe.com> To=2355279146@qq.com Subject=歡迎加入 Adobe
+   [Fri, 3 Apr 2026 08:39:24 ] From=" QQ邮箱团队 " <10000@qq.com> To=" 2355279146 " <2355279146@qq.com> Subject=收到退税、补贴通知？当心！这可能是诈骗！
+   [Fri, 10 Apr 2026 04:57:43] From=huggingface <website@huggingface.co> To=2355279146@qq.com Subject=[Hugging Face] Password reset
+   [Fri, 10 Apr 2026 05:01:57] From=huggingface <website@huggingface.co> To=2355279146@qq.com Subject=New login to your Hugging Face account
+   [Mon, 13 Apr 2026 05:22:35] From=huggingface <website@huggingface.co> To=2355279146@qq.com Subject=New login to your Hugging Face account
+   [Mon, 13 Apr 2026 01:09:14] From=Cloudinary DevX <devnews@e.cloudinary.co To=2355279146@qq.com Subject=AI April is Here - What Devs Need to Know
+  *** [Tue, 14 Apr 2026 16:39:12] From=" UU也飞 " <2691510463@qq.com> To=" 2355279146 " <2355279146@qq.com> Subject=2月电费
+  *** [Tue, 14 Apr 2026 17:02:51] From=" UU也飞 " <2691510463@qq.com> To=" 2355279146 " <2355279146@qq.com> Subject=2026年2月电费
+
+=== 按发件人搜索 ===
+  2355279143@qq.com: 2 封
+  2355279144@qq.com: 1 封
+  2691510463@qq.com: 2 封
