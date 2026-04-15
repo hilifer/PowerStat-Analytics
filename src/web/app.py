@@ -2040,10 +2040,18 @@ def _register_routes(app: Flask, db: Database):
         for base_dir in search_dirs:
             if not base_dir.exists():
                 continue
-            for p in base_dir.rglob(filename):
-                if p.is_file() and not p.name.startswith("~$"):
-                    found_path = p
+            # 优先按相对路径精确匹配（source_file 含目录时）
+            if "/" in filename:
+                candidate = base_dir / filename
+                if candidate.is_file():
+                    found_path = candidate
                     break
+            # 兜底：按文件名搜索（兼容旧数据）
+            if not found_path:
+                for p in base_dir.rglob(Path(filename).name):
+                    if p.is_file() and not p.name.startswith("~$"):
+                        found_path = p
+                        break
             if found_path:
                 break
 

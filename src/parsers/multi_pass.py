@@ -1269,8 +1269,9 @@ class MultiPassExtractor:
             if not meter_number:
                 continue
 
-            # 月份
+            # 月份 + 抄表日期
             row_month = current_month
+            row_stat_date = None
             if date_col is not None:
                 dv = _cell_str(row.iloc[date_col])
                 dm = _MONTH_RE.search(dv)
@@ -1278,10 +1279,12 @@ class MultiPassExtractor:
                     y, mo = int(dm.group(1)), int(dm.group(2))
                     if 2015 <= y <= 2035 and 1 <= mo <= 12:
                         row_month = _stat_date_to_data_month(y, mo)
+                        row_stat_date = dv.strip()
                 elif hasattr(row.iloc[date_col], 'year'):
                     try:
                         d = row.iloc[date_col]
                         row_month = _stat_date_to_data_month(d.year, d.month)
+                        row_stat_date = d.strftime("%Y-%m-%d") if hasattr(d, 'strftime') else str(d)[:10]
                     except Exception:
                         pass
             if not row_month or row_month == "unknown":
@@ -1315,8 +1318,10 @@ class MultiPassExtractor:
                     # 双表号模式：正向写入发电表号列
                     fwd_target = gen_meter if has_dual_meter_cols else meter_number
                     if fwd_target:
+                        src = self._rel_source(filepath)
                         self._upsert_reading(fwd_target, row_month, fwd_readings,
-                                             fwd_total, filepath.name, sheet_name)
+                                             fwd_total, src, sheet_name,
+                                             stat_date=row_stat_date)
 
             # 反向读数 — 存入当前行电表的 rev_* 字段
             if rev_cols:
@@ -1329,8 +1334,10 @@ class MultiPassExtractor:
                     # 双表号模式：反向写入上网表号列
                     rev_target = grid_meter if has_dual_meter_cols else meter_number
                     if rev_target:
+                        src = self._rel_source(filepath)
                         self._upsert_rev_reading(rev_target, row_month, rev_readings,
-                                                 rev_total_val, filepath.name, sheet_name)
+                                                 rev_total_val, src, sheet_name,
+                                                 stat_date=row_stat_date)
 
     def _readings_from_transposed(self, df, filepath, sheet_name, source_info):
         """从转置表（行=尖峰平谷）提取读数。
@@ -1794,11 +1801,12 @@ class MultiPassExtractor:
 
         # === 正向数据 = 发电表的抄表数据，反向数据 = 上网表的抄表数据 ===
         # 两个不同电表，各存各的数据
+        src = self._rel_source(filepath)
         if has_fwd and gen_meter and gen_meter in self.meters:
             parts = [v for v in fwd_r.values() if v is not None]
             self._upsert_reading(gen_meter, month, fwd_r,
                                  fwd_total or (sum(parts) if parts else None),
-                                 filepath.name, sheet_name,
+                                 src, sheet_name,
                                  cur_readings=fwd_cur or None,
                                  prev_readings=fwd_prev or None,
                                  cur_total=fwd_cur_total,
@@ -1814,7 +1822,7 @@ class MultiPassExtractor:
             parts = [v for v in rev_r.values() if v is not None]
             self._upsert_reading(grid_meter, month, rev_r,
                                  rev_total or (sum(parts) if parts else None),
-                                 filepath.name, sheet_name,
+                                 src, sheet_name,
                                  cur_readings=rev_cur or None,
                                  prev_readings=rev_prev or None,
                                  cur_total=rev_cur_total,
@@ -1837,7 +1845,8 @@ class MultiPassExtractor:
     # ================================================================
 
     def _upsert_reading(self, meter_number, month, readings, total, source_file, source_sheet,
-                        cur_readings=None, prev_readings=None, cur_total=None, prev_total=None):
+                        cur_readings=None, prev_readings=None, cur_total=None, prev_total=None,
+                        stat_date=None):
         """写入或补全读数。
 
         cur_readings/prev_readings: 本月表数/上月表数的 {period: value} dict
@@ -1852,6 +1861,7 @@ class MultiPassExtractor:
                 "total_kwh": total,
                 "source_file": source_file,
                 "source_sheet": source_sheet,
+                "stat_date": stat_date,
             }
         else:
             existing = self.readings[key]
@@ -1879,13 +1889,14 @@ class MultiPassExtractor:
                 rec["prev_total"] = prev_total
 
     def _upsert_rev_reading(self, meter_number, month, rev_readings, rev_total,
-                            source_file, source_sheet):
+                            source_file, source_sheet, stat_date=None):
         """写入反向读数到同一电表的 rev_* 字段。"""
         key = (meter_number, month)
         if key not in self.readings:
             self.readings[key] = {
                 "source_file": source_file,
                 "source_sheet": source_sheet,
+                "stat_date": stat_date,
             }
         rec = self.readings[key]
         for f in ("sharp_peak", "peak", "flat", "valley"):
@@ -2480,6 +2491,15 @@ class MultiPassExtractor:
         if any(kw in text for kw in self._grid_keywords):
             return "上网表"
         return "未知"
+
+    def _rel_source(self, filepath: Path) -> str:
+        """返回相对于 temp_attachments 的源文件路径，用于精确匹配同名文件。"""
+        try:
+            temp_dir = Path(config.get("attachments", "temp_dir",
+                                       default="output/temp_attachments")).resolve()
+            return str(filepath.resolve().relative_to(temp_dir))
+        except (ValueError, TypeError):
+            return filepath.name
 
     def _infer_month(self, filename: str, sheet_name: str, source_info: dict) -> str:
         """从文件名/工作表名/邮件日期推断月份（仅在数据行无日期时作为兜底）。

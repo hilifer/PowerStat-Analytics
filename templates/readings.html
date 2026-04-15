@@ -1,15 +1,15 @@
 {% extends "base.html" %}
-{% block title %}抄表数据 - PowerStat{% endblock %}
+{% block title %}抄表日期 - PowerStat{% endblock %}
 
 {% block content %}
 <div class="breadcrumb">
     <a href="{{ url_for('index') }}">首页</a>
     <span class="sep">/</span>
-    <span>抄表数据</span>
+    <span>抄表日期</span>
 </div>
 
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem; flex-wrap:wrap; gap:0.5rem;">
-    <h1 style="margin:0;">抄表数据</h1>
+    <h1 style="margin:0;">抄表日期</h1>
 </div>
 
 <!-- Tab 切换 -->
@@ -25,7 +25,7 @@
 <div style="display:flex; gap:1rem; margin-bottom:0.75rem; flex-wrap:wrap; align-items:center;">
     <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
                 background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
-        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">抄表数据</span>
+        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">抄表日期</span>
         <button type="button" class="btn btn-primary btn-sm update-btn"
                 onclick="startDataUpdate('incremental','readings')">增量提取</button>
         <button type="button" class="btn btn-danger btn-sm update-btn"
@@ -111,7 +111,7 @@
             <div style="display:flex; align-items:center; gap:0.5rem;">
                 <h3 style="margin:0; font-size:1rem;">{{ month_data.month }}</h3>
                 {% if first_r and first_r.stat_date %}
-                <span style="font-size:0.8rem; color:var(--text-secondary);">统计日期: {{ first_r.stat_date }}</span>
+                <span style="font-size:0.85rem; color:var(--text-secondary);">抄表日期: {{ first_r.stat_date }}</span>
                 {% endif %}
             </div>
             <div style="display:flex; gap:0.5rem; align-items:center;">
@@ -127,8 +127,8 @@
         </div>
 
         <div class="month-content">
-            {# ---- 抄表数据区 ---- #}
-            <div class="section-label">抄表数据</div>
+            {# ---- 抄表日期区 ---- #}
+            <div class="section-label">抄表日期</div>
             <div class="table-wrap">
                 <table class="reading-table">
                     <thead>
@@ -337,8 +337,8 @@
                     {% if month_data.gen and month_data.gen.source_file %}
                     <div class="source-item">
                         <span class="tag tag-gen" style="font-size:0.7rem;">发电表</span>
-                        <span class="source-file source-link" title="点击查看: {{ month_data.gen.source_file }}"
-                              onclick="showSourcePreview('{{ month_data.gen.source_file }}')">{{ month_data.gen.source_file }}</span>
+                        <span class="source-file source-link" title="{{ month_data.gen.source_file }}"
+                              onclick="showSourcePreview('{{ month_data.gen.source_file }}')">{{ month_data.gen.source_file.split('/')[-1] }}</span>
                         {% if month_data.gen.source_sheet %}
                         <span class="source-sheet">/ {{ month_data.gen.source_sheet }}</span>
                         {% endif %}
@@ -347,8 +347,8 @@
                     {% if month_data.grid and month_data.grid.source_file %}
                     <div class="source-item">
                         <span class="tag tag-grid" style="font-size:0.7rem;">上网表</span>
-                        <span class="source-file source-link" title="点击查看: {{ month_data.grid.source_file }}"
-                              onclick="showSourcePreview('{{ month_data.grid.source_file }}')">{{ month_data.grid.source_file }}</span>
+                        <span class="source-file source-link" title="{{ month_data.grid.source_file }}"
+                              onclick="showSourcePreview('{{ month_data.grid.source_file }}')">{{ month_data.grid.source_file.split('/')[-1] }}</span>
                         {% if month_data.grid.source_sheet %}
                         <span class="source-sheet">/ {{ month_data.grid.source_sheet }}</span>
                         {% endif %}
@@ -1538,13 +1538,13 @@ document.addEventListener('keydown', function(e) {
 
 
 /* === 数据提取更新 === */
-var taskLabels = { readings: '抄表数据', prices: '单价提取', all: '全部' };
+var taskLabels = { readings: '抄表日期', prices: '单价提取', all: '全部' };
 
 function startDataUpdate(mode, taskType) {
     var label = taskLabels[taskType] || taskType;
     if (mode === 'full') {
         var warns = {
-            readings: '将清空所有抄表数据（monthly_readings），然后重新提取。',
+            readings: '将清空所有抄表记录（monthly_readings），然后重新提取。',
             prices:   '将清空所有单价记录（price_records），然后重新提取。',
         };
         if (!confirm(label + '全量提取\n\n' + (warns[taskType] || '') + '\n\n电表档案不受影响。确定继续？')) return;
