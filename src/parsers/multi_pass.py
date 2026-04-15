@@ -2452,17 +2452,30 @@ class MultiPassExtractor:
         return "未知"
 
     def _infer_month(self, filename: str, sheet_name: str, source_info: dict) -> str:
+        # 优先级1: 邮件主题（如"2026年2月电费"直接就是账期月份）
+        if source_info and source_info.get("email_subject"):
+            subj = source_info["email_subject"]
+            for m in _MONTH_RE.finditer(subj):
+                y, mo = int(m.group(1)), int(m.group(2))
+                if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                    month_str = f"{y}-{str(mo).zfill(2)}"
+                    # 主题含"电费/账单/费用"→已是账期，不偏移
+                    if any(kw in subj for kw in ("电费", "账单", "费用")):
+                        return month_str
+                    return _apply_billing_offset(month_str)
+
+        # 优先级2: 文件名 / 工作表名（可能是抄表日期，需偏移）
         for text in [filename, sheet_name]:
-            # 标准格式：2026年1月 / 2026-01 / 2026/01
             for m in _MONTH_RE.finditer(text):
                 y, mo = int(m.group(1)), int(m.group(2))
                 if 2015 <= y <= 2035 and 1 <= mo <= 12:
                     return _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
-            # 紧凑格式：202601（YYYYMM，无分隔符）
             for m in _MONTH_COMPACT_RE.finditer(text):
                 y, mo = int(m.group(1)), int(m.group(2))
                 if 2015 <= y <= 2035:
                     return _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
+
+        # 优先级3: 邮件收信日期（兜底）
         if source_info and source_info.get("email_date"):
             d = source_info["email_date"]
             if hasattr(d, "strftime"):
