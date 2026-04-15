@@ -38,7 +38,7 @@ _CHINESE_RE = re.compile(r'[\u4e00-\u9fff]')
 _DATE_RE = re.compile(r'^\d{4}[-/]\d{1,2}[-/]\d{1,2}$|^\d{4}[-/]\d{1,2}$|^\d{8}$')
 _MONTH_RE = re.compile(r'(\d{4})\s*[-年/]\s*(\d{1,2})\s*月?')
 # 紧凑格式：YYYYMM 或 YYYY + 数字 + 月（无分隔符）
-_MONTH_COMPACT_RE = re.compile(r'(\d{4})(0[1-9]|1[0-2])(?:\D|$)')
+_MONTH_COMPACT_RE = re.compile(r'(\d{4})(0[1-9]|1[0-2])(?:\d{0,2})(?:\D|$)')
 
 # 账期偏移量（从配置读取）
 _BILLING_MONTH_OFFSET = config.get("billing_month_offset", default=0)
