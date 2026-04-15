@@ -426,7 +426,106 @@ class EmailFetcher:
         # 解压 zip 文件，将内部文件展开为独立附件
         attachments = self._extract_archives(attachments)
 
+        # 合并同日期的重复目录
+        attachments = self._merge_duplicate_dirs(attachments)
+
         log.info("共获得 %d 个附件（含解压）", len(attachments))
+        return attachments
+
+    def _merge_duplicate_dirs(self, attachments: list) -> list:
+        """合并同日期前缀、内容高度重叠的邮件目录。
+
+        相同文件只保留一份，不同文件移入主目录并标注来源。
+        """
+        if not self.temp_dir.exists():
+            return attachments
+
+        # 按日期前缀分组顶层目录
+        groups: dict[str, list[Path]] = {}
+        for d in sorted(self.temp_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            m = re.match(r'(\d{8})_', d.name)
+            if m:
+                groups.setdefault(m.group(1), []).append(d)
+
+        merged_dirs = set()  # 被合并（删除）的目录路径
+
+        for date_prefix, dirs in groups.items():
+            if len(dirs) < 2:
+                continue
+
+            # 计算每个目录的文件哈希 {hash: [(dir, relpath), ...]}
+            dir_files: dict[Path, dict[str, list[str]]] = {}
+            for d in dirs:
+                file_hashes: dict[str, list[str]] = {}
+                for f in d.rglob("*"):
+                    if not f.is_file() or f.name.startswith("~$"):
+                        continue
+                    try:
+                        h = hashlib.md5(f.read_bytes()).hexdigest()
+                        file_hashes.setdefault(h, []).append(str(f.relative_to(d)))
+                    except Exception:
+                        pass
+                dir_files[d] = file_hashes
+
+            # 找文件最多的目录作为主目录
+            primary = max(dirs, key=lambda d: len(dir_files.get(d, {})))
+            primary_hashes = set(dir_files.get(primary, {}).keys())
+
+            for other in dirs:
+                if other == primary:
+                    continue
+                other_hashes = dir_files.get(other, {})
+                if not other_hashes:
+                    continue
+
+                # 计算重叠率
+                common = primary_hashes & set(other_hashes.keys())
+                overlap = len(common) / max(len(other_hashes), 1)
+
+                if overlap < 0.5:
+                    continue  # 重叠不足50%，不合并
+
+                # 找出主目录没有的文件，移入主目录
+                unique_hashes = set(other_hashes.keys()) - primary_hashes
+                moved = 0
+                for h in unique_hashes:
+                    for rel_path in other_hashes[h]:
+                        src = other / rel_path
+                        if not src.exists():
+                            continue
+                        dest = primary / src.name
+                        if dest.exists():
+                            dest = primary / f"[{other.name}]_{src.name}"
+                        try:
+                            src.rename(dest)
+                            moved += 1
+                        except Exception:
+                            pass
+
+                # 删除被合并的目录
+                import shutil
+                try:
+                    shutil.rmtree(other)
+                    merged_dirs.add(str(other))
+                    log.info("合并目录: %s -> %s（移入 %d 个独有文件，删除 %d 个重复文件）",
+                             other.name, primary.name, moved, len(common))
+                except Exception as e:
+                    log.warning("删除目录失败 %s: %s", other.name, e)
+
+        # 更新 attachments 列表，移除已删除目录的附件，更新已移动的路径
+        if merged_dirs:
+            updated = []
+            for att in attachments:
+                p = att.filepath
+                # 跳过已删除目录中的附件（文件已不存在）
+                if any(p.startswith(d) for d in merged_dirs):
+                    if not Path(p).exists():
+                        continue
+                updated.append(att)
+            return updated
+
         return attachments
 
     @staticmethod
