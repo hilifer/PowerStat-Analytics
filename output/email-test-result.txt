@@ -1,0 +1,65 @@
+=== IMAP 连接测试 ===
+Connecting to imap.qq.com:993...
+Connected!
+Login OK!
+
+收件箱共 139 封邮件
+
+最近 10 封邮件:
+  # 130 | Tue, 24 Mar 2026 01:36:02 | Microsoft  帐户团队 <account-secur | 你的一次性代码
+  # 131 | Tue, 24 Mar 2026 16:26:53 | Bart from n8n <bart@info.n8n.i | You're invited: join our livestream this Thursday
+  # 132 | Wed, 25 Mar 2026 05:54:42 | Adobe <message@adobe.com>      | 歡迎加入 Adobe
+  # 133 | Fri, 3 Apr 2026 08:39:24  | " QQ邮箱团队 " <10000@qq.com>      | 收到退税、补贴通知？当心！这可能是诈骗！
+  # 134 | Fri, 10 Apr 2026 04:57:43 | huggingface <website@huggingfa | [Hugging Face] Password reset
+  # 135 | Fri, 10 Apr 2026 05:01:57 | huggingface <website@huggingfa | New login to your Hugging Face account
+  # 136 | Mon, 13 Apr 2026 05:22:35 | huggingface <website@huggingfa | New login to your Hugging Face account
+  # 137 | Mon, 13 Apr 2026 01:09:14 | Cloudinary DevX <devnews@e.clo | AI April is Here - What Devs Need to Know
+  # 138 | Tue, 14 Apr 2026 16:39:12 | " UU也飞 " <2691510463@qq.com>   | 2月电费
+  # 139 | Tue, 14 Apr 2026 17:02:51 | " UU也飞 " <2691510463@qq.com>   | 2026年2月电费
+
+=== 电费相关邮件 ===
+  主题含'电费': 3 封
+  主题含'电量': 1 封
+  主题含'抄表': 0 封
+  主题含'电表': 0 封
+  来自 2355279143: 1 封
+  最近 5 封:
+    #123 | Mon, 9 Mar 2026 10:31:45  | 2026年1月电费
+
+=== IMAP 测试完成 ===
+SMTP connecting...
+SMTP OK!
+===== 邮箱诊断 =====
+
+邮箱账号: 2355279146@qq.com
+发件人过滤: ['2355279143@qq.com', '2355279143']
+主题过滤: ['电费', '电量', '抄表', '电表', '电力']
+
+连接邮箱...
+[2026-04-15 00:35:56] INFO     powerstat - 正在连接 IMAP 服务器 imap.qq.com:993 ...
+[2026-04-15 00:35:57] INFO     powerstat - IMAP 登录成功: 2355279146@qq.com
+连接成功
+
+IMAP 搜索条件: ['OR', 'FROM', '2355279143@qq.com', 'TO', '2355279143@qq.com']
+服务端返回: 2 封邮件
+已处理指纹数: 0
+
+--- 最近 2 封邮件的匹配情况 ---
+┏┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━┳━━┳━━━━━━━┓
+┃┃ 日期   ┃ 发件人              ┃ 主题                          ┃ … ┃  ┃ 状态  ┃
+┡╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━╇━━╇━━━━━━━┩
+││ Fri, 3 │ 雍兴春              │ 雍兴春                        │ … │  │ 被过… │
+││ Sep    │ <sandycpl@netvigat… │                               │   │  │       │
+││ 2021   │                     │                               │   │  │       │
+├┼────────┼─────────────────────┼───────────────────────────────┼───┼──┼───────┤
+││ Mon, 9 │ "耀嵘科技-曹先生"   │ 2026年1月电费                 │ … │  │ 待处… │
+││ Mar    │ <2355279143@qq      │                               │   │  │       │
+││ 2026   │                     │                               │   │  │       │
+└┴────────┴─────────────────────┴───────────────────────────────┴───┴──┴───────┘
+
+--- 诊断建议 ---
+• 如果新邮件 过滤=拒绝：检查发件人是否匹配 sender_keywords，主题是否包含 
+subject_keywords
+• 如果新邮件 去重=已处理：邮件之前已下载过，processed_emails 表中有记录
+• 如果新邮件显示 待处理：说明过滤和去重都没问题，再次运行 fetch 即可处理
+• 如果完全看不到新邮件：检查新邮件的发件人地址是否在 sender_keywords 列表中
