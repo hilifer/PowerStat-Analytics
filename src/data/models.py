@@ -362,10 +362,17 @@ class Database:
 
     @contextmanager
     def connection(self):
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        # 如果数据库文件被删后重建，自动补建表结构
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if "meters" not in tables:
+            conn.executescript(SCHEMA_SQL)
+            self._migrate(conn)
+            log.info("数据库表结构已自动重建: %s", self.db_path)
         try:
             yield conn
             conn.commit()
