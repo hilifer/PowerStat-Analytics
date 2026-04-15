@@ -5,6 +5,9 @@ on:
     branches:
       - claude/electricity-bill-automation-AHVjJ
 
+permissions:
+  contents: write
+
 jobs:
   email-test:
     runs-on: ubuntu-latest
@@ -29,33 +32,34 @@ jobs:
           echo "EMAIL_ACCOUNT=$EMAIL_ACCOUNT" > .env
           echo "EMAIL_AUTH_CODE=$EMAIL_AUTH_CODE" >> .env
 
-      - name: Test IMAP connection and list last 10 emails
+      - name: Test IMAP and list emails
         run: |
-          python3 << 'SCRIPT'
-          import imaplib, email, email.header, ssl
+          python3 << 'SCRIPT' | tee output/email-test-result.txt
+          import imaplib, email, email.header, os, ssl
+          os.makedirs("output", exist_ok=True)
 
-          def decode_header(value):
-              if not value:
-                  return ""
+          def decode_hdr(value):
+              if not value: return ""
               parts = email.header.decode_header(value)
-              result = []
-              for part, charset in parts:
-                  if isinstance(part, bytes):
-                      result.append(part.decode(charset or "utf-8", errors="replace"))
+              r = []
+              for p, c in parts:
+                  if isinstance(p, bytes):
+                      r.append(p.decode(c or "utf-8", errors="replace"))
                   else:
-                      result.append(part)
-              return " ".join(result)
+                      r.append(p)
+              return " ".join(r)
 
+          print("=== IMAP 连接测试 ===")
           print("Connecting to imap.qq.com:993...")
           conn = imaplib.IMAP4_SSL("imap.qq.com", 993)
-          print("Connected! Logging in...")
+          print("Connected!")
           conn.login("2355279146@qq.com", "mndmkfaqaeerdhjb")
           print("Login OK!")
 
           conn.select("INBOX")
           status, msgs = conn.search(None, "ALL")
           ids = msgs[0].split()
-          print(f"\n=== 收件箱共 {len(ids)} 封邮件 ===\n")
+          print(f"\n收件箱共 {len(ids)} 封邮件\n")
 
           print("最近 10 封邮件:")
           for mid in ids[-10:]:
@@ -63,45 +67,61 @@ jobs:
               if st == "OK":
                   raw = data[0][1]
                   msg = email.message_from_bytes(raw)
-                  subj = decode_header(msg.get("Subject", ""))
-                  sender = decode_header(msg.get("From", ""))
+                  subj = decode_hdr(msg.get("Subject", ""))
+                  sender = decode_hdr(msg.get("From", ""))
                   date = msg.get("Date", "")
-                  print(f"  #{mid.decode():>4} | {date[:20]:20} | {sender[:25]:25} | {subj[:50]}")
+                  print(f"  #{mid.decode():>4} | {date[:25]:25} | {sender[:30]:30} | {subj[:60]}")
+
+          # 搜索电费相关邮件
+          print("\n=== 电费相关邮件 ===")
+          for kw in ["电费", "电量", "抄表", "电表"]:
+              try:
+                  status, msgs = conn.search("UTF-8", "SUBJECT", kw.encode("utf-8"))
+                  kw_ids = msgs[0].split() if msgs[0] else []
+                  print(f"  主题含'{kw}': {len(kw_ids)} 封")
+              except:
+                  print(f"  主题含'{kw}': 搜索失败")
+
+          # 搜索发件人
+          try:
+              status, msgs = conn.search(None, "FROM", "2355279143@qq.com")
+              from_ids = msgs[0].split() if msgs[0] else []
+              print(f"  来自 2355279143: {len(from_ids)} 封")
+              if from_ids:
+                  print("  最近 5 封:")
+                  for mid in from_ids[-5:]:
+                      st, data = conn.fetch(mid, "(BODY[HEADER.FIELDS (SUBJECT FROM DATE)])")
+                      if st == "OK":
+                          msg = email.message_from_bytes(data[0][1])
+                          subj = decode_hdr(msg.get("Subject", ""))
+                          date = msg.get("Date", "")
+                          print(f"    #{mid.decode()} | {date[:25]} | {subj[:60]}")
+          except Exception as e:
+              print(f"  发件人搜索失败: {e}")
 
           conn.logout()
+          print("\n=== IMAP 测试完成 ===")
           SCRIPT
 
-      - name: Test SMTP connection
+      - name: Test SMTP
         run: |
-          python3 << 'SCRIPT'
+          python3 -c "
           import smtplib, ssl
-          print("Connecting to smtp.qq.com:465...")
-          ctx = ssl.create_default_context()
-          conn = smtplib.SMTP_SSL("smtp.qq.com", 465, context=ctx)
-          print("Connected! Logging in...")
-          conn.login("2355279146@qq.com", "mndmkfaqaeerdhjb")
-          print("SMTP Login OK!")
+          print('SMTP connecting...')
+          conn = smtplib.SMTP_SSL('smtp.qq.com', 465)
+          conn.login('2355279146@qq.com', 'mndmkfaqaeerdhjb')
+          print('SMTP OK!')
           conn.quit()
-          SCRIPT
+          " | tee -a output/email-test-result.txt
 
-      - name: Run diagnose command
-        run: python main.py diagnose
+      - name: Run diagnose
+        continue-on-error: true
+        run: python main.py diagnose 2>&1 | tee -a output/email-test-result.txt
 
-      - name: Fetch and list all attachments
+      - name: Commit results
         run: |
-          python3 << 'SCRIPT'
-          import sys
-          sys.path.insert(0, ".")
-          from src.config_loader import config
-          config.load()
-          from src.email_fetcher.fetcher import EmailFetcher
-
-          print("=== 抓取邮件附件 ===")
-          with EmailFetcher() as fetcher:
-              attachments = fetcher.fetch_attachments()
-
-          print(f"\n共 {len(attachments)} 个附件:")
-          for i, att in enumerate(attachments, 1):
-              date_str = att.email_date.strftime("%Y-%m-%d") if att.email_date else "?"
-              print(f"  {i:3}. [{date_str}] {att.email_subject[:40]:40} -> {att.filename}")
-          SCRIPT
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -f output/email-test-result.txt
+          git commit -m "ci: email test results [skip ci]" || echo "No changes"
+          git push
