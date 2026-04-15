@@ -1,4 +1,4 @@
-[2026-04-15 07:55:06] INFO     powerstat - 数据库初始化完成: /home/runner/work/PowerStat-Analytics/PowerStat-Analytics/output/data/powerstat.db
+[2026-04-15 08:12:55] INFO     powerstat - 数据库初始化完成: /home/runner/work/PowerStat-Analytics/PowerStat-Analytics/output/data/powerstat.db
             数据库统计            
 ┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┓
 ┃ 指标       ┃                值 ┃
