@@ -259,17 +259,12 @@ class EmailFetcher:
 
         self._conn.select("INBOX")
 
-        # 构建搜索条件（仅用 ASCII 安全的条件做服务器端过滤）
-        search_criteria = self._build_search_criteria()
-        log.info("IMAP 搜索条件: %s", search_criteria)
-
-        # 使用 charset=UTF-8 发送搜索以支持中文关键词
-        status, msg_ids = self._imap_search_utf8(search_criteria)
-        if status != "OK" or not msg_ids[0]:
+        # 对每个发件人单独搜索再合并（QQ邮箱不支持深层嵌套OR）
+        ids = self._search_all_senders()
+        if not ids:
             log.info("未找到匹配邮件")
             return []
 
-        ids = msg_ids[0].split()
         log.info("找到 %d 封候选邮件，开始过滤和下载附件...", len(ids))
 
         self.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -590,6 +585,54 @@ class EmailFetcher:
         # 使用更简单的方式：先拉取所有邮件，客户端过滤
         log.info("中文搜索关键词检测到，使用全量拉取+客户端过滤模式")
         return self._conn.search(None, "ALL")
+
+    def _search_all_senders(self) -> list[bytes]:
+        """对每个发件人单独执行 IMAP SEARCH，合并去重结果。
+
+        QQ邮箱的 IMAP 不能正确解析深层嵌套 OR 语法，
+        所以改为分次搜索再合并。
+        """
+        sender_kw = self.filter_cfg.get("sender_keywords", [])
+        ascii_emails = [kw for kw in sender_kw if kw.isascii() and "@" in kw]
+
+        # 基础日期条件
+        date_criteria = []
+        since = self.filter_cfg.get("since_date")
+        if since:
+            date_criteria.extend(["SINCE", since])
+        before = self.filter_cfg.get("before_date")
+        if before:
+            date_criteria.extend(["BEFORE", before])
+
+        all_ids = set()
+
+        if not ascii_emails:
+            # 无发件人过滤，搜索全部
+            criteria = date_criteria if date_criteria else ["ALL"]
+            log.info("IMAP 搜索条件: %s", criteria)
+            status, msg_ids = self._conn.search(None, *criteria)
+            if status == "OK" and msg_ids[0]:
+                all_ids.update(msg_ids[0].split())
+        else:
+            # 对每个邮箱地址单独搜索 FROM 和 TO
+            for addr in ascii_emails:
+                criteria = date_criteria + ["OR", "FROM", addr, "TO", addr]
+                log.info("IMAP 搜索 [%s]: %s", addr, criteria)
+                try:
+                    status, msg_ids = self._conn.search(None, *criteria)
+                    if status == "OK" and msg_ids[0]:
+                        found = msg_ids[0].split()
+                        log.info("  -> 找到 %d 封", len(found))
+                        all_ids.update(found)
+                    else:
+                        log.info("  -> 0 封")
+                except Exception as e:
+                    log.warning("  搜索 %s 失败: %s", addr, e)
+
+        # 排序（按邮件ID顺序）
+        sorted_ids = sorted(all_ids, key=lambda x: int(x))
+        log.info("IMAP 搜索合计: %d 封候选邮件（去重后）", len(sorted_ids))
+        return sorted_ids
 
     def _build_search_criteria(self) -> list[str]:
         """构建 IMAP SEARCH 命令参数。
