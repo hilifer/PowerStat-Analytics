@@ -1,4 +1,4 @@
-name: Email Fetch Test
+name: Email Fetch Pipeline
 
 on:
   push:
@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 jobs:
-  email-test:
+  email-fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       EMAIL_ACCOUNT: 2355279146@qq.com
       EMAIL_AUTH_CODE: mndmkfaqaeerdhjb
@@ -25,103 +25,52 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install IMAPClient openpyxl xlrd pdfplumber pandas PyYAML python-dotenv Flask click rich
+          pip install IMAPClient openpyxl xlrd pdfplumber pandas PyYAML python-dotenv Flask click rich Pillow
+          pip install rapidocr-onnxruntime || echo "rapidocr install failed, continuing"
 
       - name: Create .env
         run: |
           echo "EMAIL_ACCOUNT=$EMAIL_ACCOUNT" > .env
           echo "EMAIL_AUTH_CODE=$EMAIL_AUTH_CODE" >> .env
 
-      - name: Test IMAP and list emails
-        run: |
-          python3 << 'SCRIPT' | tee output/email-test-result.txt
-          import imaplib, email, email.header, os, ssl
-          os.makedirs("output", exist_ok=True)
-
-          def decode_hdr(value):
-              if not value: return ""
-              parts = email.header.decode_header(value)
-              r = []
-              for p, c in parts:
-                  if isinstance(p, bytes):
-                      r.append(p.decode(c or "utf-8", errors="replace"))
-                  else:
-                      r.append(p)
-              return " ".join(r)
-
-          print("=== IMAP 连接测试 ===")
-          print("Connecting to imap.qq.com:993...")
-          conn = imaplib.IMAP4_SSL("imap.qq.com", 993)
-          print("Connected!")
-          conn.login("2355279146@qq.com", "mndmkfaqaeerdhjb")
-          print("Login OK!")
-
-          conn.select("INBOX")
-          status, msgs = conn.search(None, "ALL")
-          ids = msgs[0].split()
-          print(f"\n收件箱共 {len(ids)} 封邮件\n")
-
-          print("最近 10 封邮件:")
-          for mid in ids[-10:]:
-              st, data = conn.fetch(mid, "(BODY[HEADER.FIELDS (SUBJECT FROM DATE)])")
-              if st == "OK":
-                  raw = data[0][1]
-                  msg = email.message_from_bytes(raw)
-                  subj = decode_hdr(msg.get("Subject", ""))
-                  sender = decode_hdr(msg.get("From", ""))
-                  date = msg.get("Date", "")
-                  print(f"  #{mid.decode():>4} | {date[:25]:25} | {sender[:30]:30} | {subj[:60]}")
-
-          # 搜索电费相关邮件
-          print("\n=== 电费相关邮件 ===")
-          for kw in ["电费", "电量", "抄表", "电表"]:
-              try:
-                  status, msgs = conn.search("UTF-8", "SUBJECT", kw.encode("utf-8"))
-                  kw_ids = msgs[0].split() if msgs[0] else []
-                  print(f"  主题含'{kw}': {len(kw_ids)} 封")
-              except:
-                  print(f"  主题含'{kw}': 搜索失败")
-
-          # 搜索发件人
-          try:
-              status, msgs = conn.search(None, "FROM", "2355279143@qq.com")
-              from_ids = msgs[0].split() if msgs[0] else []
-              print(f"  来自 2355279143: {len(from_ids)} 封")
-              if from_ids:
-                  print("  最近 5 封:")
-                  for mid in from_ids[-5:]:
-                      st, data = conn.fetch(mid, "(BODY[HEADER.FIELDS (SUBJECT FROM DATE)])")
-                      if st == "OK":
-                          msg = email.message_from_bytes(data[0][1])
-                          subj = decode_hdr(msg.get("Subject", ""))
-                          date = msg.get("Date", "")
-                          print(f"    #{mid.decode()} | {date[:25]} | {subj[:60]}")
-          except Exception as e:
-              print(f"  发件人搜索失败: {e}")
-
-          conn.logout()
-          print("\n=== IMAP 测试完成 ===")
-          SCRIPT
-
-      - name: Test SMTP
+      - name: Quick IMAP connectivity test
         run: |
           python3 -c "
-          import smtplib, ssl
-          print('SMTP connecting...')
-          conn = smtplib.SMTP_SSL('smtp.qq.com', 465)
+          import imaplib
+          conn = imaplib.IMAP4_SSL('imap.qq.com', 993)
           conn.login('2355279146@qq.com', 'mndmkfaqaeerdhjb')
-          print('SMTP OK!')
-          conn.quit()
-          " | tee -a output/email-test-result.txt
+          conn.select('INBOX')
+          st, msgs = conn.search(None, 'ALL')
+          ids = msgs[0].split()
+          print(f'IMAP OK - {len(ids)} emails in inbox')
+          conn.logout()
+          "
 
-      - name: Run diagnose
+      - name: Run diagnose (with updated sender filter)
         continue-on-error: true
-        run: python main.py diagnose 2>&1 | tee -a output/email-test-result.txt
+        run: python main.py diagnose 2>&1 | tee output/diagnose-result.txt
+
+      - name: Run full email fetch pipeline
+        continue-on-error: true
+        run: python main.py fetch 2>&1 | tee output/fetch-result.txt
+
+      - name: Show database info
+        continue-on-error: true
+        run: python main.py info 2>&1 | tee output/db-info.txt
+
+      - name: List downloaded attachments
+        continue-on-error: true
+        run: |
+          echo "=== Downloaded attachments ===" | tee output/attachments-list.txt
+          find output/ -type f ! -name "*.txt" 2>/dev/null | head -50 | tee -a output/attachments-list.txt
+          echo "" >> output/attachments-list.txt
+          echo "=== Database file ===" >> output/attachments-list.txt
+          ls -la output/data/ 2>/dev/null >> output/attachments-list.txt || echo "No data dir" >> output/attachments-list.txt
 
       - name: Commit results
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add -f output/email-test-result.txt
-          git commit -m "ci: email test results [skip ci]" || echo "No changes"
+          git add -f output/
+          git commit -m "ci: email fetch pipeline results [skip ci]" || echo "No changes"
           git push
