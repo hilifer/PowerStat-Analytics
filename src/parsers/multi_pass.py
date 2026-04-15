@@ -2052,9 +2052,12 @@ class MultiPassExtractor:
 
         def _pick_valid_user_id(info):
             """从候选列表中选第一个合格的 user_id。"""
+            proj = info.get("project_name") or ""
             for candidate in info.get("_user_id_candidates", []):
+                # 同项目的电表号允许作用户号
                 if candidate in all_meter_numbers:
-                    continue
+                    if not (proj and self.meters.get(candidate, {}).get("project_name") == proj):
+                        continue
                 # 不能和 asset_number 相同
                 if candidate == (info.get("asset_number") or ""):
                     continue
@@ -2077,10 +2080,15 @@ class MultiPassExtractor:
 
             # 规则1：user_id 不能是其他电表的 meter_number（自身和配对方除外）
             # 华尔特9个表中 用户号=上网表号 是合法的双重身份
+            # 沙井智荟项目中 用户号=同项目另一块电表号 也是合法的
             if uid and uid in all_meter_numbers and uid != mn:
                 # 如果 user_id 是配对方的电表号，允许（双重身份）
                 if uid in paired_with.get(mn, set()):
                     pass  # 合法：用户号即配对方电表号
+                # 如果 user_id 对应的电表在同一个项目，允许（同项目电表号可作用户号）
+                elif (info.get("project_name")
+                      and self.meters.get(uid, {}).get("project_name") == info["project_name"]):
+                    pass  # 合法：同项目电表号作用户号
                 else:
                     new_uid = _pick_valid_user_id(info)
                     if new_uid:
