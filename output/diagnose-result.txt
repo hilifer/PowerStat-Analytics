@@ -6,8 +6,8 @@
 主题过滤: ['电费', '电量', '抄表', '电表', '电力']
 
 连接邮箱...
-[2026-04-15 00:56:40] INFO     powerstat - 正在连接 IMAP 服务器 imap.qq.com:993 ...
-[2026-04-15 00:56:42] INFO     powerstat - IMAP 登录成功: 2355279146@qq.com
+[2026-04-15 00:59:18] INFO     powerstat - 正在连接 IMAP 服务器 imap.qq.com:993 ...
+[2026-04-15 00:59:19] INFO     powerstat - IMAP 登录成功: 2355279146@qq.com
 连接成功
 
 IMAP 搜索条件: ['OR', 'OR', 'FROM', '2355279143@qq.com', 'TO', 

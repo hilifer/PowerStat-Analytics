@@ -1,16 +1,16 @@
 启动完整处理流程...
-[2026-04-15 00:56:49] INFO     powerstat - 数据库初始化完成: /home/runner/work/PowerStat-Analytics/PowerStat-Analytics/output/data/powerstat.db
-[2026-04-15 00:56:49] INFO     powerstat - ============================================================
-[2026-04-15 00:56:49] INFO     powerstat - PowerStat-Analytics 管线启动
-[2026-04-15 00:56:49] INFO     powerstat - ============================================================
-[2026-04-15 00:56:49] INFO     powerstat - [阶段1] 抓取邮件附件...
-[2026-04-15 00:56:49] INFO     powerstat - 正在连接 IMAP 服务器 imap.qq.com:993 ...
-[2026-04-15 00:56:50] INFO     powerstat - IMAP 登录成功: 2355279146@qq.com
-[2026-04-15 00:56:50] INFO     powerstat - IMAP 搜索条件: ['OR', 'OR', 'FROM', '2355279143@qq.com', 'TO', '2355279143@qq.com', 'OR', 'FROM', '2691510463@qq.com', 'TO', '2691510463@qq.com']
-[2026-04-15 00:56:50] INFO     powerstat - 找到 2 封候选邮件，开始过滤和下载附件...
-[2026-04-15 00:56:54] INFO     powerstat - 跳过已处理邮件: 2月电费
-[2026-04-15 00:56:56] INFO     powerstat - 跳过已处理邮件: 2026年2月电费
-[2026-04-15 00:56:56] INFO     powerstat - 跳过 2 封已处理的重复邮件
-[2026-04-15 00:56:56] INFO     powerstat - 共获得 0 个附件（含解压）
-[2026-04-15 00:56:56] INFO     powerstat - 无附件需处理
+[2026-04-15 00:59:26] INFO     powerstat - 数据库初始化完成: /home/runner/work/PowerStat-Analytics/PowerStat-Analytics/output/data/powerstat.db
+[2026-04-15 00:59:26] INFO     powerstat - ============================================================
+[2026-04-15 00:59:26] INFO     powerstat - PowerStat-Analytics 管线启动
+[2026-04-15 00:59:26] INFO     powerstat - ============================================================
+[2026-04-15 00:59:26] INFO     powerstat - [阶段1] 抓取邮件附件...
+[2026-04-15 00:59:26] INFO     powerstat - 正在连接 IMAP 服务器 imap.qq.com:993 ...
+[2026-04-15 00:59:27] INFO     powerstat - IMAP 登录成功: 2355279146@qq.com
+[2026-04-15 00:59:27] INFO     powerstat - IMAP 搜索条件: ['OR', 'OR', 'FROM', '2355279143@qq.com', 'TO', '2355279143@qq.com', 'OR', 'FROM', '2691510463@qq.com', 'TO', '2691510463@qq.com']
+[2026-04-15 00:59:27] INFO     powerstat - 找到 2 封候选邮件，开始过滤和下载附件...
+[2026-04-15 00:59:32] INFO     powerstat - 跳过已处理邮件: 2月电费
+[2026-04-15 00:59:33] INFO     powerstat - 跳过已处理邮件: 2026年2月电费
+[2026-04-15 00:59:33] INFO     powerstat - 跳过 2 封已处理的重复邮件
+[2026-04-15 00:59:33] INFO     powerstat - 共获得 0 个附件（含解压）
+[2026-04-15 00:59:34] INFO     powerstat - 无附件需处理
 完成！
