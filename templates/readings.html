@@ -79,12 +79,9 @@
     </div>
     <div class="filter-group">
         <label>月份</label>
-        <select name="month" class="auto-submit">
-            <option value="">全部月份</option>
-            {% for m in months %}
-            <option value="{{ m }}" {% if sel_month == m %}selected{% endif %}>{{ m }}</option>
-            {% endfor %}
-        </select>
+        <input type="month" name="month" class="form-input auto-submit"
+               value="{{ sel_month or '' }}" placeholder="全部月份"
+               style="min-width:150px;">
     </div>
     <button type="submit" class="btn btn-secondary btn-sm">查询</button>
     <a href="{{ url_for('readings') }}" class="btn btn-outline btn-sm">重置</a>
@@ -408,12 +405,9 @@
     </div>
     <div class="filter-group">
         <label>月份</label>
-        <select id="billFilterMonth" onchange="filterBills()">
-            <option value="">全部月份</option>
-            {% for m in months %}
-            <option value="{{ m }}">{{ m }}</option>
-            {% endfor %}
-        </select>
+        <input type="month" id="billFilterMonth" class="form-input"
+               onchange="filterBills()" placeholder="全部月份"
+               style="min-width:150px;">
     </div>
     <button type="button" class="btn btn-secondary btn-sm" onclick="filterBills()">查询</button>
     <button type="button" class="btn btn-outline btn-sm" onclick="resetBillFilter()">重置</button>
