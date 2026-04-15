@@ -1182,8 +1182,32 @@ class MultiPassExtractor:
             log.debug(f"  [读数] 跳过 {filepath.name}/{sheet_name}: 缺少 {', '.join(missing)}")
             return
 
-        current_month = self._infer_month(filepath.name, sheet_name, source_info)
         data_start = header_idx + 1
+
+        # 优先从数据行的日期列提取月份（抄表数据最权威）
+        current_month = "unknown"
+        if date_col is not None:
+            for ri in range(data_start, min(data_start + 5, len(df))):
+                if ri >= len(df):
+                    break
+                dv = _cell_str(df.iloc[ri, date_col])
+                dm = _MONTH_RE.search(dv)
+                if dm:
+                    y, mo = int(dm.group(1)), int(dm.group(2))
+                    if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                        current_month = _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
+                        break
+                else:
+                    try:
+                        cell = df.iloc[ri, date_col]
+                        if hasattr(cell, 'year'):
+                            current_month = _apply_billing_offset(f"{cell.year}-{str(cell.month).zfill(2)}")
+                            break
+                    except Exception:
+                        pass
+        # 数据行没日期才用文件名/邮件日期兜底
+        if current_month == "unknown":
+            current_month = self._infer_month(filepath.name, sheet_name, source_info)
 
         for row_idx in range(data_start, len(df)):
             row = df.iloc[row_idx]
@@ -2452,30 +2476,18 @@ class MultiPassExtractor:
         return "未知"
 
     def _infer_month(self, filename: str, sheet_name: str, source_info: dict) -> str:
-        # 优先级1: 邮件主题（如"2026年2月电费"直接就是账期月份）
-        if source_info and source_info.get("email_subject"):
-            subj = source_info["email_subject"]
-            for m in _MONTH_RE.finditer(subj):
-                y, mo = int(m.group(1)), int(m.group(2))
-                if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                    month_str = f"{y}-{str(mo).zfill(2)}"
-                    # 主题含"电费/账单/费用"→已是账期，不偏移
-                    if any(kw in subj for kw in ("电费", "账单", "费用")):
-                        return month_str
-                    return _apply_billing_offset(month_str)
-
-        # 优先级2: 文件名 / 工作表名（可能是抄表日期，需偏移）
+        """从文件名/工作表名/邮件日期推断月份（仅在数据行无日期时作为兜底）。"""
         for text in [filename, sheet_name]:
+            # 标准格式：2026年1月 / 2026-01 / 2026/01
             for m in _MONTH_RE.finditer(text):
                 y, mo = int(m.group(1)), int(m.group(2))
                 if 2015 <= y <= 2035 and 1 <= mo <= 12:
                     return _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
+            # 紧凑格式：202601（YYYYMM，无分隔符）
             for m in _MONTH_COMPACT_RE.finditer(text):
                 y, mo = int(m.group(1)), int(m.group(2))
                 if 2015 <= y <= 2035:
                     return _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
-
-        # 优先级3: 邮件收信日期（兜底）
         if source_info and source_info.get("email_date"):
             d = source_info["email_date"]
             if hasattr(d, "strftime"):
