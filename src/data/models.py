@@ -589,19 +589,24 @@ class Database:
             return True
 
     def cleanup_incomplete_meters(self) -> int:
-        """删除数据不全的电表及其关联读数。
+        """删除真正无用的电表及其关联读数。
 
-        不全的定义：缺少 用户编号、项目名、电表类型（未知）任一关键字段。
-        已锁定的电表不删除（手动维护的数据视为有效）。
+        只删除同时满足以下条件的电表：
+        1. 未锁定
+        2. 缺少用户编号
+        3. 电表类型为未知或空
+        4. 没有任何关联的抄表读数
+        有读数的电表即使信息不全也保留（数据有价值）。
         """
         with self.connection() as conn:
+            # 只查找同时缺少用户编号和电表类型、且无读数的电表
             incomplete = conn.execute("""
-                SELECT id, meter_number, user_id, project_name, meter_type
-                FROM meters
-                WHERE is_locked = 0
-                  AND (user_id IS NULL OR user_id = ''
-                       OR project_name IS NULL OR project_name = ''
-                       OR meter_type IS NULL OR meter_type = '未知')
+                SELECT m.id, m.meter_number, m.user_id, m.project_name, m.meter_type,
+                       (SELECT COUNT(*) FROM monthly_readings r WHERE r.meter_id = m.id) as reading_count
+                FROM meters m
+                WHERE m.is_locked = 0
+                  AND (m.user_id IS NULL OR m.user_id = '')
+                  AND (m.meter_type IS NULL OR m.meter_type = '' OR m.meter_type = '未知')
             """).fetchall()
 
             if not incomplete:
@@ -610,6 +615,12 @@ class Database:
 
             count = 0
             for row in incomplete:
+                # 有读数的电表保留
+                if row["reading_count"] > 0:
+                    log.debug("  保留: %s (有 %d 条读数，虽然缺少用户编号和电表类型)",
+                              row["meter_number"], row["reading_count"])
+                    continue
+
                 meter_id = row["id"]
                 mn = row["meter_number"]
                 missing = []
@@ -622,10 +633,13 @@ class Database:
 
                 conn.execute("DELETE FROM monthly_readings WHERE meter_id = ?", (meter_id,))
                 conn.execute("DELETE FROM meters WHERE id = ?", (meter_id,))
-                log.info("  清理: %s (缺少: %s)", mn, ", ".join(missing))
+                log.info("  清理: %s (缺少: %s, 无读数)", mn, ", ".join(missing))
                 count += 1
 
-            log.info("清理完成：删除 %d 个数据不全的电表", count)
+            if count:
+                log.info("清理完成：删除 %d 个数据不全且无读数的电表", count)
+            else:
+                log.info("清理：无需删除任何电表")
             return count
 
     def update_meter(self, meter_number: str, **fields) -> bool:
