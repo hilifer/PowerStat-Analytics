@@ -543,10 +543,15 @@ class MultiPassExtractor:
                                     self.meters[nearest]["asset_number"] = val
                                     asset_count += 1
                     elif cat in ("meter", "gen_meter", "grid_meter"):
-                        mtype = {"gen_meter": "发电表", "grid_meter": "上网表"}.get(cat)
-                        val = clean_id(self._find_value_near(df, r, c, field_name=cat))
-                        if is_valid_meter_number(val):
-                            self._register_meter(val, filepath.name, sheet_name, mtype)
+                        # 纯中文标签（无数字）在数据行中可能是"用户类型"列的值，
+                        # 不应当作标签去找旁边的电表号（如把用户编号误注册为电表）
+                        if header_idx is not None and r > header_idx and not re.search(r'\d', cell):
+                            pass  # 跳过标签配对，内嵌格式检查仍会处理含数字的情况
+                        else:
+                            mtype = {"gen_meter": "发电表", "grid_meter": "上网表"}.get(cat)
+                            val = clean_id(self._find_value_near(df, r, c, field_name=cat))
+                            if is_valid_meter_number(val):
+                                self._register_meter(val, filepath.name, sheet_name, mtype)
 
                     # 内嵌格式："电表号：12345678" 或 "发电表号0950050038124235"
                     for pattern, mtype in [
