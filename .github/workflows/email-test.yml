@@ -159,6 +159,6 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add -f output/data/ output/*.txt output/imap-diagnostic.txt
+          git add -f output/*.txt output/imap-diagnostic.txt
           git commit -m "ci: fresh pipeline results [skip ci]" || echo "No changes"
           git push
