@@ -101,21 +101,31 @@ def generate_bill_excel(db, project_name: str = None, user_id: str = None,
         db: Database 实例
         project_name: 项目名筛选
         user_id: 用户编号筛选
-        month: 月份 (YYYY-MM)，不传则导出所有月份
-        selected_items: 可选，指定导出的 [{user_id, month}] 列表
+        month: 账期月份 (YYYY-MM)，不传则导出所有月份
+        selected_items: 可选，指定导出的 [{user_id, month}] 列表（账期月份）
 
     Returns:
         BytesIO 流，可直接发送给浏览器
     """
+    from src.config_loader import config as _cfg
+    bill_offset = int(_cfg.get("billing_month_offset", default=0))
+
+    # 将账期月份转换为抄表月份查询
+    reading_month = db.offset_month(month, -bill_offset) if month else None
+
     # 获取抄表数据
     raw = db.get_readings_grouped(
         project_name=project_name,
         user_id=user_id,
-        reading_month=month,
+        reading_month=reading_month,
     )
 
     if selected_items:
-        selected_keys = {(it["user_id"], it["month"]) for it in selected_items}
+        # selected_items 里的 month 是账期月份，转成抄表月份匹配
+        selected_keys = set()
+        for it in selected_items:
+            rm = db.offset_month(it["month"], -bill_offset)
+            selected_keys.add((it["user_id"], rm))
         raw = [r for r in raw if (r.get("user_id"), r.get("reading_month")) in selected_keys]
 
     if not raw:
