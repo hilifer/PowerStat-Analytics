@@ -1195,13 +1195,13 @@ class MultiPassExtractor:
                 if dm:
                     y, mo = int(dm.group(1)), int(dm.group(2))
                     if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                        current_month = _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
+                        current_month = f"{y}-{str(mo).zfill(2)}"
                         break
                 else:
                     try:
                         cell = df.iloc[ri, date_col]
                         if hasattr(cell, 'year'):
-                            current_month = _apply_billing_offset(f"{cell.year}-{str(cell.month).zfill(2)}")
+                            current_month = f"{cell.year}-{str(cell.month).zfill(2)}"
                             break
                     except Exception:
                         pass
@@ -1219,7 +1219,7 @@ class MultiPassExtractor:
             if mm and non_empty <= 3:
                 y, mo = int(mm.group(1)), int(mm.group(2))
                 if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                    current_month = _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
+                    current_month = f"{y}-{str(mo).zfill(2)}"
                 continue
 
             # 汇总行跳过
@@ -1279,11 +1279,11 @@ class MultiPassExtractor:
                 if dm:
                     y, mo = int(dm.group(1)), int(dm.group(2))
                     if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                        row_month = _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
+                        row_month = f"{y}-{str(mo).zfill(2)}"
                 elif hasattr(row.iloc[date_col], 'year'):
                     try:
                         d = row.iloc[date_col]
-                        row_month = _apply_billing_offset(f"{d.year}-{str(d.month).zfill(2)}")
+                        row_month = f"{d.year}-{str(d.month).zfill(2)}"
                     except Exception:
                         pass
             if not row_month or row_month == "unknown":
@@ -1603,7 +1603,7 @@ class MultiPassExtractor:
                 if m:
                     y, mo = int(m.group(1)), int(m.group(2))
                     if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                        month = _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
+                        month = f"{y}-{str(mo).zfill(2)}"
                         break
                 # 紧凑格式（YYYYMM）
                 if not month:
@@ -1611,7 +1611,7 @@ class MultiPassExtractor:
                     if m:
                         y, mo = int(m.group(1)), int(m.group(2))
                         if 2015 <= y <= 2035:
-                            month = _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
+                            month = f"{y}-{str(mo).zfill(2)}"
                             break
             if month:
                 break
@@ -2476,22 +2476,25 @@ class MultiPassExtractor:
         return "未知"
 
     def _infer_month(self, filename: str, sheet_name: str, source_info: dict) -> str:
-        """从文件名/工作表名/邮件日期推断月份（仅在数据行无日期时作为兜底）。"""
+        """从文件名/工作表名/邮件日期推断月份（仅在数据行无日期时作为兜底）。
+
+        返回原始月份，不做偏移。偏移在导出电费单时才应用。
+        """
         for text in [filename, sheet_name]:
             # 标准格式：2026年1月 / 2026-01 / 2026/01
             for m in _MONTH_RE.finditer(text):
                 y, mo = int(m.group(1)), int(m.group(2))
                 if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                    return _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
+                    return f"{y}-{str(mo).zfill(2)}"
             # 紧凑格式：202601（YYYYMM，无分隔符）
             for m in _MONTH_COMPACT_RE.finditer(text):
                 y, mo = int(m.group(1)), int(m.group(2))
                 if 2015 <= y <= 2035:
-                    return _apply_billing_offset(f"{y}-{str(mo).zfill(2)}")
+                    return f"{y}-{str(mo).zfill(2)}"
         if source_info and source_info.get("email_date"):
             d = source_info["email_date"]
             if hasattr(d, "strftime"):
-                return _apply_billing_offset(d.strftime("%Y-%m"))
+                return d.strftime("%Y-%m")
         return "unknown"
 
     def _extract_project_name(self, text: str) -> Optional[str]:
