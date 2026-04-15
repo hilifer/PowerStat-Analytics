@@ -617,9 +617,16 @@ class EmailFetcher:
                 email_addr = ascii_emails[0]
                 criteria.extend(["OR", "FROM", email_addr, "TO", email_addr])
             else:
-                # 多个邮箱：用第一个
-                email_addr = ascii_emails[0]
-                criteria.extend(["OR", "FROM", email_addr, "TO", email_addr])
+                # 多个邮箱：OR 嵌套匹配所有地址
+                # 每个邮箱生成 OR FROM addr TO addr，再用 OR 串联
+                parts = []
+                for addr in ascii_emails:
+                    parts.append(["OR", "FROM", addr, "TO", addr])
+                # 从后往前嵌套 OR
+                result = parts[-1]
+                for p in reversed(parts[:-1]):
+                    result = ["OR"] + p + result
+                criteria.extend(result)
 
         if not criteria:
             criteria.append("ALL")
