@@ -659,39 +659,37 @@ def _register_routes(app: Flask, db: Database):
         - 金额 = 自发用电量 × 优惠后电价
         """
         from collections import OrderedDict
+        from src.config_loader import config
 
         sel_project = request.args.get("project", "")
-        sel_month = request.args.get("month", "")
+        sel_month = request.args.get("month", "")  # 这里是账期月份（billing_month）
 
         projects = db.get_projects()
-        months = db.get_months()
+        months = db.get_billing_months()
+
+        # billing_month_offset: 抄表月 + offset = 账期月，所以抄表月 = 账期月 - offset
+        bill_offset = int(config.get("billing_month_offset", default=0))
 
         bill_groups = []  # [{user_id, project_name, month, gen, grid, prev_gen, prev_grid, prices}]
 
         if sel_project and sel_month:
-            # 计算上月
-            import re
-            prev_month = ""
-            m = re.match(r'(\d{4})-(\d{2})', sel_month)
-            if m:
-                y, mo = int(m.group(1)), int(m.group(2))
-                if mo == 1:
-                    prev_month = f"{y-1}-12"
-                else:
-                    prev_month = f"{y}-{str(mo-1).zfill(2)}"
+            # 将账期月份转换为抄表月份
+            reading_month = db.offset_month(sel_month, -bill_offset)
+            # 上一个抄表月（用于计算电表用量差值）
+            prev_reading_month = db.offset_month(reading_month, -1)
 
-            # 查询当月数据
+            # 查询当月数据（用抄表月份查询）
             raw = db.get_readings_grouped(
                 project_name=sel_project,
-                reading_month=sel_month,
+                reading_month=reading_month,
             )
 
             # 查询上月数据（用于计算电表用量）
             prev_raw = []
-            if prev_month:
+            if prev_reading_month:
                 prev_raw = db.get_readings_grouped(
                     project_name=sel_project,
-                    reading_month=prev_month,
+                    reading_month=prev_reading_month,
                 )
 
             # 上月数据按 meter_id 索引
@@ -700,6 +698,8 @@ def _register_routes(app: Flask, db: Database):
                 prev_by_meter[r["meter_id"]] = r
 
             # 分组: user_id -> {gen, grid, prev_gen, prev_grid}
+            # month/prev_month 用账期月份展示
+            prev_billing_month = db.offset_month(sel_month, -1)
             user_map = OrderedDict()
             for r in raw:
                 uid = r["user_id"] or "unknown"
@@ -708,7 +708,7 @@ def _register_routes(app: Flask, db: Database):
                         "user_id": uid,
                         "project_name": r["project_name"],
                         "month": sel_month,
-                        "prev_month": prev_month,
+                        "prev_month": prev_billing_month,
                         "gen": None,
                         "grid": None,
                         "prev_gen": None,
@@ -733,18 +733,22 @@ def _register_routes(app: Flask, db: Database):
     @app.route("/api/bill-calc/save-prices", methods=["POST"])
     def bill_calc_save_prices():
         """保存电费单页面的单价数据。"""
+        from src.config_loader import config as _cfg
         data = request.get_json()
         if not data:
             return jsonify({"ok": False, "error": "无数据"})
+        bill_offset = int(_cfg.get("billing_month_offset", default=0))
         items = data.get("items", [])
         for item in items:
             user_id = item.get("user_id")
-            month = item.get("month")
+            month = item.get("month")  # 前端传的是账期月份
             prices = item.get("prices", {})
             if user_id and month:
+                # 转换为抄表月份存储
+                reading_month = db.offset_month(month, -bill_offset)
                 db.upsert_price(
                     user_id=user_id,
-                    reading_month=month,
+                    reading_month=reading_month,
                     sharp_peak_price=prices.get("sharp_peak_price"),
                     peak_price=prices.get("peak_price"),
                     flat_price=prices.get("flat_price"),

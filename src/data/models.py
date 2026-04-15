@@ -248,9 +248,10 @@ class Database:
             log.info("迁移: 添加 price_records.is_locked 列")
             conn.execute("ALTER TABLE price_records ADD COLUMN is_locked INTEGER DEFAULT 0")
 
-        # 重建视图（确保包含新字段）
+        # 重建视图（确保包含新字段 + billing_month 偏移列）
         conn.execute("DROP VIEW IF EXISTS v_monthly_bill")
-        conn.execute("""
+        offset = int(config.get("billing_month_offset", default=0))
+        conn.execute(f"""
             CREATE VIEW v_monthly_bill AS
             SELECT
                 m.meter_number,
@@ -261,6 +262,14 @@ class Database:
                 m.discount,
                 m.project_name,
                 r.reading_month,
+                printf('%04d-%02d',
+                    (CAST(substr(r.reading_month, 1, 4) AS INTEGER) * 12
+                     + CAST(substr(r.reading_month, 6, 2) AS INTEGER) - 1
+                     + ({offset})) / 12,
+                    (CAST(substr(r.reading_month, 1, 4) AS INTEGER) * 12
+                     + CAST(substr(r.reading_month, 6, 2) AS INTEGER) - 1
+                     + ({offset})) % 12 + 1
+                ) AS billing_month,
                 r.sharp_peak,
                 r.peak,
                 r.flat,
@@ -946,6 +955,17 @@ class Database:
             rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
 
+    @staticmethod
+    def offset_month(month_str: str, offset: int) -> str:
+        """偏移月份，自动处理跨年。例如 offset=-1 时 '2026-01' → '2025-12'。"""
+        import re
+        m = re.match(r'(\d{4})-(\d{2})', month_str)
+        if not m:
+            return month_str
+        y, mo = int(m.group(1)), int(m.group(2))
+        total = y * 12 + (mo - 1) + offset
+        return f"{total // 12}-{str(total % 12 + 1).zfill(2)}"
+
     def get_months(self) -> list[str]:
         """获取所有抄表月份（降序）。"""
         with self.connection() as conn:
@@ -953,6 +973,12 @@ class Database:
                 "SELECT DISTINCT reading_month FROM monthly_readings ORDER BY reading_month DESC"
             ).fetchall()
             return [r["reading_month"] for r in rows]
+
+    def get_billing_months(self) -> list[str]:
+        """获取所有账期月份（降序）。将抄表月份按 billing_month_offset 偏移。"""
+        offset = int(config.get("billing_month_offset", default=0))
+        months = self.get_months()
+        return sorted(set(self.offset_month(m, offset) for m in months), reverse=True)
 
     def get_projects(self) -> list[str]:
         """获取所有项目名称。"""
