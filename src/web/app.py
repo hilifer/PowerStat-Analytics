@@ -1069,19 +1069,14 @@ def _register_routes(app: Flask, db: Database):
     # ---- 抄表数据查看/编辑 ----
     @app.route("/readings")
     def readings():
-        from src.config_loader import config as _cfg
         sel_project = request.args.get("project", "")
         sel_user_id = request.args.get("user_id", "")
-        sel_month = request.args.get("month", "")  # 账期月份
-
-        # 将账期月份转换为抄表月份查询
-        bill_offset = int(_cfg.get("billing_month_offset", default=0))
-        query_month = db.offset_month(sel_month, -bill_offset) if sel_month else ""
+        sel_month = request.args.get("month", "")  # 直接按读数月份查询
 
         raw = db.get_readings_grouped(
             project_name=sel_project or None,
             user_id=sel_user_id or None,
-            reading_month=query_month or None,
+            reading_month=sel_month or None,
         )
 
         # 收集所有出现的月份，计算上月列表，用于回填 prev/cur 表数
@@ -1162,7 +1157,7 @@ def _register_routes(app: Flask, db: Database):
                                grouped_data=grouped_data,
                                projects=db.get_projects(),
                                user_ids=db.get_user_ids(),
-                               months=db.get_billing_months(),
+                               months=db.get_months(),
                                sel_project=sel_project,
                                sel_user_id=sel_user_id,
                                sel_month=sel_month)
