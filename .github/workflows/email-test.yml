@@ -1,12 +1,17 @@
 name: Email Fetch Test
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - claude/electricity-bill-automation-AHVjJ
 
 jobs:
   email-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      EMAIL_ACCOUNT: 2355279146@qq.com
+      EMAIL_AUTH_CODE: mndmkfaqaeerdhjb
 
     steps:
       - uses: actions/checkout@v4
@@ -21,46 +26,82 @@ jobs:
 
       - name: Create .env
         run: |
-          echo "EMAIL_ACCOUNT=${{ secrets.EMAIL_ACCOUNT }}" > .env
-          echo "EMAIL_AUTH_CODE=${{ secrets.EMAIL_AUTH_CODE }}" >> .env
+          echo "EMAIL_ACCOUNT=$EMAIL_ACCOUNT" > .env
+          echo "EMAIL_AUTH_CODE=$EMAIL_AUTH_CODE" >> .env
 
-      - name: Test IMAP connection
+      - name: Test IMAP connection and list last 10 emails
         run: |
-          python3 -c "
-          import imaplib, ssl
-          print('Connecting to imap.qq.com:993...')
-          conn = imaplib.IMAP4_SSL('imap.qq.com', 993)
-          print('Connected! Logging in...')
-          conn.login('${{ secrets.EMAIL_ACCOUNT }}', '${{ secrets.EMAIL_AUTH_CODE }}')
-          print('Login OK!')
-          conn.select('INBOX')
-          status, msgs = conn.search(None, 'ALL')
-          ids = msgs[0].split()
-          print(f'Total emails in INBOX: {len(ids)}')
-          # Show last 10
-          for mid in ids[-10:]:
-              st, data = conn.fetch(mid, '(BODY[HEADER.FIELDS (SUBJECT FROM DATE)])')
-              if st == 'OK':
-                  header = data[0][1].decode(errors='replace')
-                  print(f'  #{mid.decode()}: {header.strip()[:120]}')
-          conn.logout()
-          "
+          python3 << 'SCRIPT'
+          import imaplib, email, email.header, ssl
 
-      - name: Run diagnose
+          def decode_header(value):
+              if not value:
+                  return ""
+              parts = email.header.decode_header(value)
+              result = []
+              for part, charset in parts:
+                  if isinstance(part, bytes):
+                      result.append(part.decode(charset or "utf-8", errors="replace"))
+                  else:
+                      result.append(part)
+              return " ".join(result)
+
+          print("Connecting to imap.qq.com:993...")
+          conn = imaplib.IMAP4_SSL("imap.qq.com", 993)
+          print("Connected! Logging in...")
+          conn.login("2355279146@qq.com", "mndmkfaqaeerdhjb")
+          print("Login OK!")
+
+          conn.select("INBOX")
+          status, msgs = conn.search(None, "ALL")
+          ids = msgs[0].split()
+          print(f"\n=== 收件箱共 {len(ids)} 封邮件 ===\n")
+
+          print("最近 10 封邮件:")
+          for mid in ids[-10:]:
+              st, data = conn.fetch(mid, "(BODY[HEADER.FIELDS (SUBJECT FROM DATE)])")
+              if st == "OK":
+                  raw = data[0][1]
+                  msg = email.message_from_bytes(raw)
+                  subj = decode_header(msg.get("Subject", ""))
+                  sender = decode_header(msg.get("From", ""))
+                  date = msg.get("Date", "")
+                  print(f"  #{mid.decode():>4} | {date[:20]:20} | {sender[:25]:25} | {subj[:50]}")
+
+          conn.logout()
+          SCRIPT
+
+      - name: Test SMTP connection
+        run: |
+          python3 << 'SCRIPT'
+          import smtplib, ssl
+          print("Connecting to smtp.qq.com:465...")
+          ctx = ssl.create_default_context()
+          conn = smtplib.SMTP_SSL("smtp.qq.com", 465, context=ctx)
+          print("Connected! Logging in...")
+          conn.login("2355279146@qq.com", "mndmkfaqaeerdhjb")
+          print("SMTP Login OK!")
+          conn.quit()
+          SCRIPT
+
+      - name: Run diagnose command
         run: python main.py diagnose
 
-      - name: Run fetch (dry run - just list new emails)
+      - name: Fetch and list all attachments
         run: |
-          python3 -c "
+          python3 << 'SCRIPT'
           import sys
-          sys.path.insert(0, '.')
+          sys.path.insert(0, ".")
           from src.config_loader import config
           config.load()
           from src.email_fetcher.fetcher import EmailFetcher
-          print('=== Fetching attachments ===')
+
+          print("=== 抓取邮件附件 ===")
           with EmailFetcher() as fetcher:
               attachments = fetcher.fetch_attachments()
-          print(f'Total attachments: {len(attachments)}')
-          for i, att in enumerate(attachments[:20], 1):
-              print(f'  {i}. [{att.email_date}] {att.email_subject} -> {att.filename}')
-          "
+
+          print(f"\n共 {len(attachments)} 个附件:")
+          for i, att in enumerate(attachments, 1):
+              date_str = att.email_date.strftime("%Y-%m-%d") if att.email_date else "?"
+              print(f"  {i:3}. [{date_str}] {att.email_subject[:40]:40} -> {att.filename}")
+          SCRIPT
