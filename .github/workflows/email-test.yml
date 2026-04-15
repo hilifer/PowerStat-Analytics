@@ -33,6 +33,63 @@ jobs:
           echo "EMAIL_ACCOUNT=$EMAIL_ACCOUNT" > .env
           echo "EMAIL_AUTH_CODE=$EMAIL_AUTH_CODE" >> .env
 
+      - name: IMAP mailbox diagnostic
+        continue-on-error: true
+        run: |
+          python3 << 'SCRIPT' | tee output/imap-diagnostic.txt
+          import imaplib, email
+          from email.header import decode_header
+
+          def decode_hdr(val):
+              if not val: return ""
+              parts = decode_header(val)
+              result = []
+              for b, enc in parts:
+                  if isinstance(b, bytes):
+                      result.append(b.decode(enc or "utf-8", errors="replace"))
+                  else:
+                      result.append(b)
+              return " ".join(result)
+
+          conn = imaplib.IMAP4_SSL("imap.qq.com", 993)
+          conn.login("2355279146@qq.com", "mndmkfaqaeerdhjb")
+
+          # 列出所有文件夹
+          status, folders = conn.list()
+          print("=== IMAP 文件夹 ===")
+          for f in folders:
+              print(f"  {f.decode('utf-8', errors='replace')}")
+
+          # 搜索 INBOX 中所有邮件
+          conn.select("INBOX")
+          status, all_ids = conn.search(None, "ALL")
+          all_list = all_ids[0].split() if all_ids[0] else []
+          print(f"\n=== INBOX 共 {len(all_list)} 封邮件 ===")
+
+          # 列出所有邮件的发件人/收件人/主题/日期
+          senders = ["2355279143", "2355279144", "2691510463"]
+          print(f"\n=== 所有邮件列表（最近50封）===")
+          for mid in all_list[-50:]:
+              status, data = conn.fetch(mid, "(BODY[HEADER.FIELDS (FROM TO SUBJECT DATE)])")
+              if status != "OK": continue
+              hdr = email.message_from_bytes(data[0][1])
+              frm = decode_hdr(hdr.get("From", ""))
+              to = decode_hdr(hdr.get("To", ""))
+              subj = decode_hdr(hdr.get("Subject", ""))
+              dt = hdr.get("Date", "")
+              match = "***" if any(s in f"{frm}{to}" for s in senders) else ""
+              print(f"  {match} [{dt[:25]}] From={frm[:40]} To={to[:40]} Subject={subj[:50]}")
+
+          # 按每个发件人分别搜索
+          print(f"\n=== 按发件人搜索 ===")
+          for addr in ["2355279143@qq.com", "2355279144@qq.com", "2691510463@qq.com"]:
+              status, ids = conn.search(None, "OR", "FROM", addr, "TO", addr)
+              count = len(ids[0].split()) if ids[0] else 0
+              print(f"  {addr}: {count} 封")
+
+          conn.logout()
+          SCRIPT
+
       - name: Clean old data (fresh run)
         run: |
           rm -rf output/data output/temp_attachments
@@ -102,6 +159,6 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add -f output/data/ output/*.txt
+          git add -f output/data/ output/*.txt output/imap-diagnostic.txt
           git commit -m "ci: fresh pipeline results [skip ci]" || echo "No changes"
           git push
