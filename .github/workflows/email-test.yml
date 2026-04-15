@@ -1,0 +1,66 @@
+name: Email Fetch Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  email-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install IMAPClient openpyxl xlrd pdfplumber pandas PyYAML python-dotenv Flask click rich
+
+      - name: Create .env
+        run: |
+          echo "EMAIL_ACCOUNT=${{ secrets.EMAIL_ACCOUNT }}" > .env
+          echo "EMAIL_AUTH_CODE=${{ secrets.EMAIL_AUTH_CODE }}" >> .env
+
+      - name: Test IMAP connection
+        run: |
+          python3 -c "
+          import imaplib, ssl
+          print('Connecting to imap.qq.com:993...')
+          conn = imaplib.IMAP4_SSL('imap.qq.com', 993)
+          print('Connected! Logging in...')
+          conn.login('${{ secrets.EMAIL_ACCOUNT }}', '${{ secrets.EMAIL_AUTH_CODE }}')
+          print('Login OK!')
+          conn.select('INBOX')
+          status, msgs = conn.search(None, 'ALL')
+          ids = msgs[0].split()
+          print(f'Total emails in INBOX: {len(ids)}')
+          # Show last 10
+          for mid in ids[-10:]:
+              st, data = conn.fetch(mid, '(BODY[HEADER.FIELDS (SUBJECT FROM DATE)])')
+              if st == 'OK':
+                  header = data[0][1].decode(errors='replace')
+                  print(f'  #{mid.decode()}: {header.strip()[:120]}')
+          conn.logout()
+          "
+
+      - name: Run diagnose
+        run: python main.py diagnose
+
+      - name: Run fetch (dry run - just list new emails)
+        run: |
+          python3 -c "
+          import sys
+          sys.path.insert(0, '.')
+          from src.config_loader import config
+          config.load()
+          from src.email_fetcher.fetcher import EmailFetcher
+          print('=== Fetching attachments ===')
+          with EmailFetcher() as fetcher:
+              attachments = fetcher.fetch_attachments()
+          print(f'Total attachments: {len(attachments)}')
+          for i, att in enumerate(attachments[:20], 1):
+              print(f'  {i}. [{att.email_date}] {att.email_subject} -> {att.filename}')
+          "
