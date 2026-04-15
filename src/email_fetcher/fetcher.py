@@ -312,13 +312,22 @@ class EmailFetcher:
                     safe_subject = safe_subject[:80]
                 email_dir_name = f"{date_prefix}_{safe_subject}"
                 email_dir = self.temp_dir / email_dir_name
-                # 如果同名目录已存在（不同邮件碰巧同名），加序号
-                counter = 1
-                orig_dir_name = email_dir_name
-                while email_dir.exists():
-                    email_dir_name = f"{orig_dir_name}_{counter}"
-                    email_dir = self.temp_dir / email_dir_name
-                    counter += 1
+                # 如果同名目录已存在且有文件，说明是之前已下载的邮件，复用该目录
+                if email_dir.exists() and any(email_dir.iterdir()):
+                    log.info("目录已存在且有文件，复用: %s", email_dir_name)
+                    # 补记处理记录，避免下次重复
+                    self._mark_email_processed(fingerprint, subject, mail_date)
+                    # 收集已有附件
+                    for f in email_dir.rglob("*"):
+                        if f.is_file():
+                            result.append(EmailAttachment(
+                                filename=f.name, filepath=str(f),
+                                content_type="", email_date=mail_date,
+                                email_subject=subject, email_sender=sender,
+                            ))
+                    total_attached += sum(1 for f in email_dir.rglob("*") if f.is_file())
+                    processed += 1
+                    continue
                 email_dir.mkdir(parents=True, exist_ok=True)
 
                 body_html = ""
