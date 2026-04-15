@@ -44,22 +44,15 @@ _MONTH_COMPACT_RE = re.compile(r'(\d{4})(0[1-9]|1[0-2])(?:\d{0,2})(?:\D|$)')
 _BILLING_MONTH_OFFSET = config.get("billing_month_offset", default=0)
 
 
-def _apply_billing_offset(month_str: str) -> str:
-    """将 YYYY-MM 格式的抄表月份按 billing_month_offset 偏移，得到实际账期月份。
+def _stat_date_to_data_month(y: int, mo: int) -> str:
+    """将抄表日期的年月转为实际数据月份（减1个月）。
 
-    例如 offset=-1 时，"2026-02" → "2026-01"（2月抄表对应1月账期）。
+    电力抄表惯例：每月1号抄表记录的是上个月的用电数据。
+    例如 2026-03-01 抄表 → 数据属于 2026-02（2月份用电）。
     """
-    if not _BILLING_MONTH_OFFSET or not month_str or month_str == "unknown":
-        return month_str
-    m = re.match(r'(\d{4})-(\d{2})', month_str)
-    if not m:
-        return month_str
-    y, mo = int(m.group(1)), int(m.group(2))
-    # 用总月数做偏移，自动处理跨年
-    total = y * 12 + (mo - 1) + _BILLING_MONTH_OFFSET
-    new_y = total // 12
-    new_mo = total % 12 + 1
-    return f"{new_y}-{str(new_mo).zfill(2)}"
+    if mo == 1:
+        return f"{y - 1}-12"
+    return f"{y}-{str(mo - 1).zfill(2)}"
 
 
 def _cell_str(val) -> str:
@@ -1200,13 +1193,13 @@ class MultiPassExtractor:
                 if dm:
                     y, mo = int(dm.group(1)), int(dm.group(2))
                     if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                        current_month = f"{y}-{str(mo).zfill(2)}"
+                        current_month = _stat_date_to_data_month(y, mo)
                         break
                 else:
                     try:
                         cell = df.iloc[ri, date_col]
                         if hasattr(cell, 'year'):
-                            current_month = f"{cell.year}-{str(cell.month).zfill(2)}"
+                            current_month = _stat_date_to_data_month(cell.year, cell.month)
                             break
                     except Exception:
                         pass
@@ -1284,11 +1277,11 @@ class MultiPassExtractor:
                 if dm:
                     y, mo = int(dm.group(1)), int(dm.group(2))
                     if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                        row_month = f"{y}-{str(mo).zfill(2)}"
+                        row_month = _stat_date_to_data_month(y, mo)
                 elif hasattr(row.iloc[date_col], 'year'):
                     try:
                         d = row.iloc[date_col]
-                        row_month = f"{d.year}-{str(d.month).zfill(2)}"
+                        row_month = _stat_date_to_data_month(d.year, d.month)
                     except Exception:
                         pass
             if not row_month or row_month == "unknown":

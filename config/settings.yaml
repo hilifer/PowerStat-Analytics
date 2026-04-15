@@ -268,9 +268,9 @@ reconciliation:
 
 # --- 账期偏移设置 ---
 # 抄表日期与实际账期的月份偏移量。
-# 例如：2月1号抄表对应1月份电费，则设置为 -1
-# 默认为 0（不偏移，抄表月份即账期月份）
-billing_month_offset: -1
+# 解析器已自动将抄表日期(stat_date)转为数据月份（减1个月），
+# 所以 reading_month 已直接等于账期月份，无需再偏移。
+billing_month_offset: 0
 
 # --- 数据存储设置 ---
 storage:
