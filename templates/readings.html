@@ -79,8 +79,9 @@
     </div>
     <div class="filter-group">
         <label>月份</label>
-        <input type="month" name="month" class="form-input auto-submit"
+        <input type="month" id="readingsFilterMonth" class="form-input"
                value="{{ sel_month or '' }}" placeholder="全部月份"
+               onchange="filterReadingsMonth()"
                style="min-width:150px;">
     </div>
     <button type="submit" class="btn btn-secondary btn-sm">查询</button>
@@ -945,6 +946,31 @@ function switchTab(tabName) {
         var saved = sessionStorage.getItem('readings_tab');
         if (saved && document.getElementById('tab-' + saved)) switchTab(saved);
     } catch(e) {}
+})();
+
+/* === 抄表记录月份筛选（客户端） === */
+function filterReadingsMonth() {
+    var month = document.getElementById('readingsFilterMonth').value;
+    document.querySelectorAll('#tab-readings .reading-group').forEach(function(card) {
+        var anyVisible = false;
+        card.querySelectorAll('.month-block').forEach(function(block) {
+            var blockMonth = block.getAttribute('data-month');
+            var monthMatch = !month || blockMonth === month;
+            block.style.display = monthMatch ? '' : 'none';
+            if (monthMatch) anyVisible = true;
+        });
+        card.style.display = anyVisible ? '' : 'none';
+    });
+    // 更新 URL 参数（不刷新页面）
+    var url = new URL(window.location);
+    if (month) { url.searchParams.set('month', month); }
+    else { url.searchParams.delete('month'); }
+    history.replaceState(null, '', url);
+}
+// 页面加载时应用初始月份筛选
+(function() {
+    var month = document.getElementById('readingsFilterMonth').value;
+    if (month) filterReadingsMonth();
 })();
 
 /* === 单月电费单导出 === */

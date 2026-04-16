@@ -1071,12 +1071,14 @@ def _register_routes(app: Flask, db: Database):
     def readings():
         sel_project = request.args.get("project", "")
         sel_user_id = request.args.get("user_id", "")
-        sel_month = request.args.get("month", "")  # 原始读数月份，直接查询
+        sel_month = request.args.get("month", "")  # 仅用于客户端过滤，不做服务端过滤
 
+        # 不按月份过滤——两个 Tab（抄表记录 / 电费单）共享 grouped_data，
+        # 月份筛选在前端各自独立进行。
         raw = db.get_readings_grouped(
             project_name=sel_project or None,
             user_id=sel_user_id or None,
-            reading_month=sel_month or None,
+            reading_month=None,
         )
 
         # 收集所有出现的月份，计算上月列表，用于回填 prev/cur 表数
