@@ -446,6 +446,9 @@
             <div style="display:flex; align-items:center; gap:0.5rem;">
                 <input type="checkbox" class="bill-check" data-user="{{ group.user_id }}" data-month="{{ month_data.month }}" data-project="{{ group.project_name or '' }}" onchange="updateBillSelection()">
                 <h3 style="margin:0; font-size:1rem;">{{ month_data.month }} 电费单</h3>
+                {% if first_r and first_r.stat_date %}
+                <span style="font-size:0.85rem; color:var(--text-secondary);">抄表日期: {{ first_r.stat_date }}</span>
+                {% endif %}
             </div>
             <div style="display:flex; gap:0.5rem; align-items:center;">
                 <button class="btn btn-sm btn-primary"
