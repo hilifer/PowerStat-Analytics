@@ -1071,7 +1071,7 @@ def _register_routes(app: Flask, db: Database):
     def readings():
         sel_project = request.args.get("project", "")
         sel_user_id = request.args.get("user_id", "")
-        sel_month = request.args.get("month", "")  # 直接按读数月份查询
+        sel_month = request.args.get("month", "")  # 原始读数月份，直接查询
 
         raw = db.get_readings_grouped(
             project_name=sel_project or None,

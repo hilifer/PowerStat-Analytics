@@ -1193,13 +1193,13 @@ class MultiPassExtractor:
                 if dm:
                     y, mo = int(dm.group(1)), int(dm.group(2))
                     if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                        current_month = _stat_date_to_data_month(y, mo)
+                        current_month = f"{y}-{str(mo).zfill(2)}"
                         break
                 else:
                     try:
                         cell = df.iloc[ri, date_col]
                         if hasattr(cell, 'year'):
-                            current_month = _stat_date_to_data_month(cell.year, cell.month)
+                            current_month = f"{cell.year}-{str(cell.month).zfill(2)}"
                             break
                     except Exception:
                         pass
@@ -1278,12 +1278,12 @@ class MultiPassExtractor:
                 if dm:
                     y, mo = int(dm.group(1)), int(dm.group(2))
                     if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                        row_month = _stat_date_to_data_month(y, mo)
+                        row_month = f"{y}-{str(mo).zfill(2)}"
                         row_stat_date = dv.strip()
                 elif hasattr(row.iloc[date_col], 'year'):
                     try:
                         d = row.iloc[date_col]
-                        row_month = _stat_date_to_data_month(d.year, d.month)
+                        row_month = f"{d.year}-{str(d.month).zfill(2)}"
                         row_stat_date = d.strftime("%Y-%m-%d") if hasattr(d, 'strftime') else str(d)[:10]
                     except Exception:
                         pass
