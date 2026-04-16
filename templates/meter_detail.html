@@ -420,12 +420,12 @@ function openSourcePreview(filename) {
     var title = document.getElementById('modal-title');
     var dlBtn = document.getElementById('modal-download');
 
-    title.textContent = filename;
+    title.textContent = filename.split('/').pop() || filename;
     body.innerHTML = '<div class="file-modal-loading">加载中…</div>';
     dlBtn.style.display = 'none';
     modal.style.display = 'flex';
 
-    fetch('/api/archive/preview/' + encodeURIComponent(filename))
+    fetch('/api/archive/preview?filename=' + encodeURIComponent(filename))
         .then(function(r) { return r.json(); })
         .then(function(d) {
             if (!d.found) {

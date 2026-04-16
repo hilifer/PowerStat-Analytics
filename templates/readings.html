@@ -197,7 +197,7 @@
                             <td style="font-size:0.7rem; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
                                 title="{{ r.source_file or '' }}">
                                 {% if r.source_file %}
-                                <a href="javascript:void(0)" class="source-link" onclick="showSourcePreview('{{ r.source_file }}')">{{ r.source_file|truncate(18) }}</a>
+                                <a href="javascript:void(0)" class="source-link" data-source-file="{{ r.source_file }}" onclick="showSourcePreview(this.dataset.sourceFile)">{{ r.source_file.split('/')[-1]|truncate(18) }}</a>
                                 {% else %}-{% endif %}
                             </td>
                             <td>
@@ -256,7 +256,7 @@
                             <td style="font-size:0.7rem; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
                                 title="{{ r.source_file or '' }}">
                                 {% if r.source_file %}
-                                <a href="javascript:void(0)" class="source-link" onclick="showSourcePreview('{{ r.source_file }}')">{{ r.source_file|truncate(18) }}</a>
+                                <a href="javascript:void(0)" class="source-link" data-source-file="{{ r.source_file }}" onclick="showSourcePreview(this.dataset.sourceFile)">{{ r.source_file.split('/')[-1]|truncate(18) }}</a>
                                 {% else %}-{% endif %}
                             </td>
                             <td>
@@ -285,7 +285,7 @@
                     </span>
                     <div style="display:flex; gap:0.5rem; align-items:center;">
                         {% if first_r and first_r.price_source %}
-                        <span class="price-source-tag" onclick="showSourcePreview('{{ first_r.price_source }}')" title="点击查看来源图片">
+                        <span class="price-source-tag" data-source-file="{{ first_r.price_source }}" onclick="showSourcePreview(this.dataset.sourceFile)" title="点击查看来源图片">
                             &#128065; {{ first_r.price_source|truncate(25) }}
                         </span>
                         {% endif %}
@@ -338,7 +338,7 @@
                     <div class="source-item">
                         <span class="tag tag-gen" style="font-size:0.7rem;">发电表</span>
                         <span class="source-file source-link" title="{{ month_data.gen.source_file }}"
-                              onclick="showSourcePreview('{{ month_data.gen.source_file }}')">{{ month_data.gen.source_file.split('/')[-1] }}</span>
+                              data-source-file="{{ month_data.gen.source_file }}" onclick="showSourcePreview(this.dataset.sourceFile)">{{ month_data.gen.source_file.split('/')[-1] }}</span>
                         {% if month_data.gen.source_sheet %}
                         <span class="source-sheet">/ {{ month_data.gen.source_sheet }}</span>
                         {% endif %}
@@ -348,7 +348,7 @@
                     <div class="source-item">
                         <span class="tag tag-grid" style="font-size:0.7rem;">上网表</span>
                         <span class="source-file source-link" title="{{ month_data.grid.source_file }}"
-                              onclick="showSourcePreview('{{ month_data.grid.source_file }}')">{{ month_data.grid.source_file.split('/')[-1] }}</span>
+                              data-source-file="{{ month_data.grid.source_file }}" onclick="showSourcePreview(this.dataset.sourceFile)">{{ month_data.grid.source_file.split('/')[-1] }}</span>
                         {% if month_data.grid.source_sheet %}
                         <span class="source-sheet">/ {{ month_data.grid.source_sheet }}</span>
                         {% endif %}
@@ -358,7 +358,7 @@
                     <div class="source-item">
                         <span class="tag" style="font-size:0.7rem; background:#e0e7ff; color:#3730a3;">单价</span>
                         <span class="source-file source-link" title="点击查看: {{ first_r.price_source }}"
-                              onclick="showSourcePreview('{{ first_r.price_source }}')">{{ first_r.price_source }}</span>
+                              data-source-file="{{ first_r.price_source }}" onclick="showSourcePreview(this.dataset.sourceFile)">{{ first_r.price_source }}</span>
                     </div>
                     {% endif %}
                     {% if not (month_data.gen and month_data.gen.source_file) and not (month_data.grid and month_data.grid.source_file) and not (first_r and first_r.price_source) %}
@@ -1428,7 +1428,7 @@ function showSourcePreview(filename) {
     var loading = document.getElementById('sourcePreviewLoading');
     var content = document.getElementById('sourcePreviewContent');
     var dlBtn = document.getElementById('sourcePreviewDownload');
-    document.getElementById('sourcePreviewTitle').textContent = filename;
+    document.getElementById('sourcePreviewTitle').textContent = filename.split('/').pop() || filename;
     loading.style.display = '';
     loading.textContent = '加载中...';
     content.style.display = 'none';
@@ -1436,7 +1436,7 @@ function showSourcePreview(filename) {
     dlBtn.style.display = 'none';
     modal.style.display = 'flex';
 
-    fetch('/api/archive/preview/' + encodeURIComponent(filename))
+    fetch('/api/archive/preview?filename=' + encodeURIComponent(filename))
         .then(function(r) {
             if (!r.ok) throw new Error('服务器返回 ' + r.status);
             return r.json();
@@ -1445,7 +1445,7 @@ function showSourcePreview(filename) {
             loading.style.display = 'none';
             if (!data.found) {
                 /* 精确文件名未找到时，尝试用 find-image API 做模糊搜索 */
-                return fetch('/api/files/find-image/' + encodeURIComponent(filename))
+                return fetch('/api/files/find-image/' + encodeURIComponent(filename.split('/').pop()))
                     .then(function(r2) { return r2.ok ? r2.json() : null; })
                     .then(function(d2) {
                         if (d2 && d2.found) {
@@ -1476,7 +1476,7 @@ function showSourcePreview(filename) {
         .catch(function(e) {
             loading.textContent = '加载失败: ' + e;
             /* 作为兜底，尝试直接显示 find-image 搜索到的图片 */
-            fetch('/api/files/find-image/' + encodeURIComponent(filename))
+            fetch('/api/files/find-image/' + encodeURIComponent(filename.split('/').pop()))
                 .then(function(r) { return r.ok ? r.json() : null; })
                 .then(function(d) {
                     if (d && d.found) {

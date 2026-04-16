@@ -1586,9 +1586,16 @@ def _register_routes(app: Flask, db: Database):
     def find_archive_image(filename):
         return find_image(filename)
 
-    @app.route("/api/archive/preview/<filename>")
-    def archive_file_preview(filename):
+    @app.route("/api/archive/preview/<path:filename>")
+    @app.route("/api/archive/preview", endpoint="archive_file_preview_query")
+    def archive_file_preview(filename=None):
         """预览文件：图片返回 URL，Excel/PDF 转 HTML 表格。搜索 temp 和 archive。"""
+        # 支持 query parameter（避免路径中含 / 和中文的编码问题）
+        if filename is None:
+            filename = request.args.get("filename", "").strip()
+        if not filename:
+            return jsonify({"found": False})
+
         temp_dir = Path(config.get("attachments", "temp_dir",
                                    default="output/temp_attachments"))
         archive_root = Path(config.get("storage", "archive_root",
@@ -1596,26 +1603,42 @@ def _register_routes(app: Flask, db: Database):
         IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
         EXCEL_EXTS = {".xlsx", ".xls", ".csv"}
 
-        # 查找文件（优先 temp，再 archive；精确匹配优先）
+        # 查找文件（优先 temp，再 archive）
         found = None
         found_root = None
         found_prefix = None
-        for scan_root, prefix in [(temp_dir, "temp"), (archive_root, "archive")]:
-            if not scan_root.exists():
-                continue
-            for f in scan_root.rglob("*"):
-                if f.is_file() and f.name == filename:
-                    found, found_root, found_prefix = f, scan_root, prefix
+
+        # 1) 如果 filename 含目录分隔符，先按相对路径精确匹配
+        if "/" in filename:
+            for scan_root, prefix in [(temp_dir, "temp"), (archive_root, "archive")]:
+                if not scan_root.exists():
+                    continue
+                candidate = scan_root / filename
+                if candidate.is_file():
+                    found, found_root, found_prefix = candidate, scan_root, prefix
                     break
-            if found:
-                break
+
+        # 2) 按文件名精确匹配
+        bare_name = Path(filename).name
+        if not found:
+            for scan_root, prefix in [(temp_dir, "temp"), (archive_root, "archive")]:
+                if not scan_root.exists():
+                    continue
+                for f in scan_root.rglob(bare_name):
+                    if f.is_file() and not f.name.startswith("~$"):
+                        found, found_root, found_prefix = f, scan_root, prefix
+                        break
+                if found:
+                    break
+
+        # 3) 模糊匹配（stem 包含）
         if not found:
             stem = Path(filename).stem
             for scan_root, prefix in [(temp_dir, "temp"), (archive_root, "archive")]:
                 if not scan_root.exists():
                     continue
                 for f in scan_root.rglob("*"):
-                    if f.is_file() and stem in f.stem:
+                    if f.is_file() and stem in f.stem and not f.name.startswith("~$"):
                         found, found_root, found_prefix = f, scan_root, prefix
                         break
                 if found:
