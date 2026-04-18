@@ -260,12 +260,39 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
 
     # ---- 标题行 ----
     title_text = f"{pname}光伏项目发电统计表（{year}年{int(mon)}月）"
+    stat_date = (gen or grid or {}).get("stat_date")
+    if stat_date:
+        title_text = f"{title_text}   抄表日期: {stat_date}"
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=total_cols)
     title_cell = ws.cell(row=row, column=1, value=title_text)
     title_cell.font = _title_font
     title_cell.alignment = Alignment(horizontal="center", vertical="center")
     for c in range(1, total_cols + 1):
         ws.cell(row=row, column=c).border = _border
+
+    # ---- 电表信息行（发电表/上网表 表号、资产号、倍率） ----
+    row += 1
+    meter_info_parts = []
+    if gen:
+        parts = [f"发电表 {gen.get('meter_number', '')}"]
+        if gen.get('asset_number'):
+            parts.append(f"资产号 {gen['asset_number']}")
+        parts.append(f"倍率 {gen_mult}")
+        meter_info_parts.append("  ".join(parts))
+    if grid:
+        parts = [f"上网表 {grid.get('meter_number', '')}"]
+        if grid.get('asset_number'):
+            parts.append(f"资产号 {grid['asset_number']}")
+        parts.append(f"倍率 {grid_mult}")
+        meter_info_parts.append("  ".join(parts))
+    if meter_info_parts:
+        info_text = "    ".join(meter_info_parts)
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=total_cols)
+        info_cell = ws.cell(row=row, column=1, value=info_text)
+        info_cell.font = _data_font
+        info_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        for c in range(1, total_cols + 1):
+            ws.cell(row=row, column=c).border = _border
 
     # ---- 分组表头行 ----
     row += 1
