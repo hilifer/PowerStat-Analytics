@@ -7,13 +7,9 @@
   (\HasNoChildren) "/" "Junk"
   (\HasNoChildren) "/" "&UXZO1mWHTvZZOQ-/QQ&kK5O9ouilgU-"
 
-=== INBOX 共 140 封邮件 ===
+=== INBOX 共 144 封邮件 ===
 
 === 所有邮件列表（最近50封）===
-   [Thu, 28 Nov 2019 09:54:47] From=" 呆料拍卖现货交易网 " <simon@icwant.com> To=" 2355279146 " <2355279146@qq.com> Subject=处理电子呆废料 找IC现货 紧缺料
-   [Tue, 21 Jan 2020 02:58:07] From=" 信用卡中心 " <brave@effort.cebbankuser.com> To=2355279146@qq.com Subject=【邀请函】祝贺啊，请您收下光大金卡申请名额(AD)
-   [Mon, 10 Feb 2020 02:21:10] From=" 信用卡中心 " <success@ecitic.zhxinuser.com> To=2355279146@qq.com Subject=恭祝您的初步预审通过，您的金卡申请资格已送达邮箱(AD)
-   [Tue, 24 Mar 2020 02:36:59] From=" 信用卡中心 " <renal@zx.usersend.net> To=2355279146@qq.com Subject=【重大喜讯】恭喜你初选通过，可进入快速申卡通道(AD)
    [Sat, 11 Apr 2020 04:44:32] From=" 拉卡拉pos机 " <decry@ransom.posletter.com> To=2355279146@qq.com Subject=亲，您是幸运用户，特邀您申领专属刷卡机，点击看详情(AD)
    [Sat, 11 Apr 2020 04:47:55] From=" 拉卡拉pos机 " <decry@ransom.posletter.com> To=2355279146@qq.com Subject=亲，您是幸运用户，特邀您申领专属刷卡机，点击看详情(AD)
    [Mon, 21 Jun 2021 04:36:50] From=" 信用卡推荐 " <emotion@bask.jhsent.com> To=2355279146@qq.com Subject=[提醒]交通超级金卡可免费使用，敬请知悉！(AD)
@@ -60,6 +56,10 @@
   *** [Tue, 14 Apr 2026 16:39:12] From=" UU也飞 " <2691510463@qq.com> To=" 2355279146 " <2355279146@qq.com> Subject=2月电费
   *** [Tue, 14 Apr 2026 17:02:51] From=" UU也飞 " <2691510463@qq.com> To=" 2355279146 " <2355279146@qq.com> Subject=2026年2月电费
    [Wed, 15 Apr 2026 18:03:03] From=百度智能云  <no-reply-acg@digital.baidu.com> To=2355279146@qq.com Subject=抢先锁席！Create2026百度AI开发者大会2大主论坛诚邀您亲临现场！
+   [Thu, 16 Apr 2026 19:30:13] From=GitHub <noreply@github.com> To=llgwj <2355279146@qq.com> Subject=[GitHub] Please reset your password
+   [Thu, 16 Apr 2026 19:31:13] From=GitHub <noreply@github.com> To=llgwj <2355279146@qq.com> Subject=[GitHub] Your password was reset
+   [Thu, 16 Apr 2026 19:31:31] From=GitHub <noreply@github.com> To=llgwj <2355279146@qq.com> Subject=[GitHub] Please review this sign in
+   [Thu, 16 Apr 2026 21:00:24] From=GitHub <noreply@github.com> To=llgwj <2355279146@qq.com> Subject=GitHub Copilot: What’s in your free plan 🤖
 
 === 按发件人搜索 ===
   2355279143@qq.com: 2 封
