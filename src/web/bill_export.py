@@ -94,15 +94,18 @@ def _calc_prev_month(month_str: str):
 
 
 def generate_bill_excel(db, project_name: str = None, user_id: str = None,
-                        month: str = None, selected_items: list = None) -> io.BytesIO:
+                        month: str = None, selected_items: list = None,
+                        month_is_reading: bool = False) -> io.BytesIO:
     """生成月度电费单 Excel 文件（发电统计表格式）。
 
     Args:
         db: Database 实例
         project_name: 项目名筛选
         user_id: 用户编号筛选
-        month: 账期月份 (YYYY-MM)，不传则导出所有月份
-        selected_items: 可选，指定导出的 [{user_id, month}] 列表（账期月份）
+        month: 月份 (YYYY-MM)，默认作为账期月份
+        selected_items: 可选，指定导出的 [{user_id, month}] 列表
+        month_is_reading: True 时，month/selected_items 中的月份视为抄表月份
+            （原始读数月份），不做 offset 转换；False 时视为账期月份。
 
     Returns:
         BytesIO 流，可直接发送给浏览器
@@ -110,8 +113,11 @@ def generate_bill_excel(db, project_name: str = None, user_id: str = None,
     from src.config_loader import config as _cfg
     bill_offset = int(_cfg.get("billing_month_offset", default=0))
 
-    # 将账期月份转换为抄表月份查询
-    reading_month = db.offset_month(month, -bill_offset) if month else None
+    # 将账期月份转换为抄表月份查询；若 month_is_reading，则直接用作抄表月份
+    if month_is_reading:
+        reading_month = month or None
+    else:
+        reading_month = db.offset_month(month, -bill_offset) if month else None
 
     # 获取抄表数据
     raw = db.get_readings_grouped(
@@ -121,10 +127,13 @@ def generate_bill_excel(db, project_name: str = None, user_id: str = None,
     )
 
     if selected_items:
-        # selected_items 里的 month 是账期月份，转成抄表月份匹配
+        # selected_items 里的 month 默认是账期月份；month_is_reading 时直接作为抄表月份
         selected_keys = set()
         for it in selected_items:
-            rm = db.offset_month(it["month"], -bill_offset)
+            if month_is_reading:
+                rm = it["month"]
+            else:
+                rm = db.offset_month(it["month"], -bill_offset)
             selected_keys.add((it["user_id"], rm))
         raw = [r for r in raw if (r.get("user_id"), r.get("reading_month")) in selected_keys]
 

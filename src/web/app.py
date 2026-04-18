@@ -1817,11 +1817,15 @@ def _register_routes(app: Flask, db: Database):
 
         GET: 按 project/user_id/month 筛选导出全部
         POST: 导出指定的 user_id+month 组合 (items JSON)
+
+        month_is_reading=1 时，month 参数视为抄表月份（读数月份），不做 offset 转换。
+        用于 readings.html 的电费单 Tab（显示原始抄表月份）。
         """
         import json
         from src.web.bill_export import generate_bill_excel
 
         selected_items = None
+        month_is_reading = False
         if request.method == "POST":
             items_json = request.form.get("items", "")
             if items_json:
@@ -1829,13 +1833,17 @@ def _register_routes(app: Flask, db: Database):
                     selected_items = json.loads(items_json)
                 except (json.JSONDecodeError, TypeError):
                     pass
+            month_is_reading = request.form.get("month_is_reading") in ("1", "true")
+        else:
+            month_is_reading = request.args.get("month_is_reading") in ("1", "true")
 
         project = request.args.get("project") or None
         user_id = request.args.get("user_id") or None
         month = request.args.get("month") or None
 
         buf = generate_bill_excel(db, project_name=project, user_id=user_id,
-                                  month=month, selected_items=selected_items)
+                                  month=month, selected_items=selected_items,
+                                  month_is_reading=month_is_reading)
 
         # 文件名
         parts = []

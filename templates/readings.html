@@ -973,12 +973,13 @@ function filterReadingsMonth() {
     if (month) filterReadingsMonth();
 })();
 
-/* === 单月电费单导出 === */
+/* === 单月电费单导出（此页面月份为原始抄表月份，传 month_is_reading=1） === */
 function exportMonthBill(userId, month, project) {
     var params = new URLSearchParams();
     if (project) params.set('project', project);
     if (userId) params.set('user_id', userId);
     if (month) params.set('month', month);
+    params.set('month_is_reading', '1');
     var url = "{{ url_for('bills_export_excel') }}";
     var qs = params.toString();
     if (qs) url += '?' + qs;
@@ -1081,6 +1082,13 @@ function exportSelectedBills() {
     input.name = 'items';
     input.value = JSON.stringify(items);
     form.appendChild(input);
+
+    // 此页面的 month 是原始抄表月份，告诉后端不做 offset 转换
+    var flag = document.createElement('input');
+    flag.type = 'hidden';
+    flag.name = 'month_is_reading';
+    flag.value = '1';
+    form.appendChild(flag);
 
     document.body.appendChild(form);
     form.submit();
