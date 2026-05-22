@@ -74,9 +74,9 @@
                     <td style="text-align:center;">{{ grid_meter.multiplier }}</td>
                 </tr>
                 <tr>
-                    <td style="font-weight:600;">折扣</td>
-                    <td style="text-align:center;">{{ gen_meter.discount or 1.0 }}{% if gen_meter.discount and gen_meter.discount != 1.0 %} ({{ "%.1f"|format(gen_meter.discount * 10) }}折){% endif %}</td>
-                    <td style="text-align:center;">{{ grid_meter.discount or 1.0 }}{% if grid_meter.discount and grid_meter.discount != 1.0 %} ({{ "%.1f"|format(grid_meter.discount * 10) }}折){% endif %}</td>
+                    <td style="font-weight:600;">计价模式</td>
+                    <td style="text-align:center;">{% set pm = gen_meter.pricing_mode or 'discount' %}{% if pm == 'fixed_discount' %}优惠固定价 -{{ '%.4f'|format(gen_meter.pricing_param) }}/kWh{% elif pm == 'fixed_price' %}固定价 {{ '%.8f'|format(gen_meter.pricing_param) }}/kWh{% elif gen_meter.discount and gen_meter.discount != 1.0 %}折扣 {{ gen_meter.discount }} ({{ '%.1f'|format(gen_meter.discount * 10) }}折){% else %}折扣 1.0{% endif %}</td>
+                    <td style="text-align:center;">{% set pm = grid_meter.pricing_mode or 'discount' %}{% if pm == 'fixed_discount' %}优惠固定价 -{{ '%.4f'|format(grid_meter.pricing_param) }}/kWh{% elif pm == 'fixed_price' %}固定价 {{ '%.8f'|format(grid_meter.pricing_param) }}/kWh{% elif grid_meter.discount and grid_meter.discount != 1.0 %}折扣 {{ grid_meter.discount }} ({{ '%.1f'|format(grid_meter.discount * 10) }}折){% else %}折扣 1.0{% endif %}</td>
                 </tr>
                 <tr>
                     <td style="font-weight:600;">项目</td>
@@ -133,8 +133,8 @@
             <span class="kv-value">{{ meter.multiplier }}</span>
         </div>
         <div class="kv-item">
-            <span class="kv-label">折扣</span>
-            <span class="kv-value">{{ meter.discount or 1.0 }}{% if meter.discount and meter.discount != 1.0 %} ({{ "%.1f"|format(meter.discount * 10) }}折){% endif %}</span>
+            <span class="kv-label">计价模式</span>
+            <span class="kv-value">{% set pm = meter.pricing_mode or 'discount' %}{% if pm == 'fixed_discount' %}优惠固定价 -{{ '%.4f'|format(meter.pricing_param) }}/kWh{% elif pm == 'fixed_price' %}固定价 {{ '%.8f'|format(meter.pricing_param) }}/kWh{% elif meter.discount and meter.discount != 1.0 %}折扣 {{ meter.discount }} ({{ '%.1f'|format(meter.discount * 10) }}折){% else %}折扣 1.0{% endif %}</span>
         </div>
         <div class="kv-item">
             <span class="kv-label">项目</span>

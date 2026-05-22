@@ -68,6 +68,10 @@ _COLUMNS = [
     (13, "原电价",     14),
     (14, "优惠后电价", 14),
     (15, "金额",       14),
+    # 上网电量/金额
+    (16, "原电价",     14),
+    (17, "优惠电价",   14),
+    (18, "上网金额",   14),
 ]
 
 
@@ -219,11 +223,20 @@ def generate_bill_excel(db, project_name: str = None, user_id: str = None,
     return buf
 
 
+def _prev_month_key(month_key: str) -> str:
+    """YYYY-MM → 上个月 YYYY-MM"""
+    y, m = month_key.split("-")
+    ny = str(int(y) - 1) if m == "01" else y
+    nm = "12" if m == "01" else f"{int(m)-1:02d}"
+    return f"{ny}-{nm}"
+
+
 def _build_month_sheet(wb: Workbook, month_key: str,
                        user_map: dict, project_name: str = None):
     """为单月构建一个 Sheet。"""
-    year, mon = month_key.split("-")
-    sheet_name = f"{mon}月电费单"
+    display_key = _prev_month_key(month_key)
+    year, mon = display_key.split("-")
+    sheet_name = f"{int(mon)}月电费单"
     if sheet_name in wb.sheetnames:
         sheet_name = f"{month_key}电费单"
     ws = wb.create_sheet(title=sheet_name)
@@ -235,7 +248,8 @@ def _build_month_sheet(wb: Workbook, month_key: str,
 
 def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
     """写入单个用户的发电统计表。"""
-    year, mon = month_key.split("-")
+    display_key = _prev_month_key(month_key)
+    year, mon = display_key.split("-")
     gen = udata.get("gen")
     grid = udata.get("grid")
     prev_gen = udata.get("prev_gen")
@@ -246,7 +260,11 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
 
     gen_mult = gen["multiplier"] if gen else 1.0
     grid_mult = grid["multiplier"] if grid else 1.0
-    discount = (gen.get("discount") or 1.0) if gen else 1.0
+    pricing_mode = (gen.get("pricing_mode") or "discount") if gen else "discount"
+    if pricing_mode == "discount":
+        pricing_param = gen.get("pricing_param") or gen.get("discount") or 1.0
+    else:
+        pricing_param = gen.get("pricing_param") if gen and gen.get("pricing_param") is not None else 0
     pname = project_name or (gen or grid).get("project_name") or ""
     uid = udata["user_id"]
 
@@ -286,6 +304,12 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
         parts.append(f"倍率 {grid_mult}")
         meter_info_parts.append("  ".join(parts))
     if meter_info_parts:
+        if pricing_mode == "fixed_discount":
+            meter_info_parts.append(f"[优惠固定价 -{pricing_param:.4f}/kWh]")
+        elif pricing_mode == "fixed_price":
+            meter_info_parts.append(f"[固定价 {pricing_param:.8f}/kWh]")
+        elif pricing_param != 1.0:
+            meter_info_parts.append(f"[折扣 {pricing_param}]")
         info_text = "    ".join(meter_info_parts)
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=total_cols)
         info_cell = ws.cell(row=row, column=1, value=info_text)
@@ -316,6 +340,12 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
     for c in range(13, 16):
         ws.cell(row=row, column=c).border = _border
         ws.cell(row=row, column=c).fill = _self_fill
+    # 上网电量/金额 列 16-18
+    ws.merge_cells(start_row=row, start_column=16, end_row=row, end_column=18)
+    _apply_cell(ws.cell(row=row, column=16), "上网电量/金额", _header_font, _rev_fill)
+    for c in range(17, 19):
+        ws.cell(row=row, column=c).border = _border
+        ws.cell(row=row, column=c).fill = _rev_fill
 
     # ---- 列标题行 ----
     row += 1
@@ -330,6 +360,8 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
             _apply_cell(cell, header, _header_font, _rev_fill)
         elif 12 <= col_idx <= 15:
             _apply_cell(cell, header, _header_font, _self_fill)
+        elif 16 <= col_idx <= 18:
+            _apply_cell(cell, header, _header_font, _rev_fill)
         else:
             _apply_cell(cell, header, _header_font, _header_fill)
         ws.column_dimensions[get_column_letter(col_idx)].width = width
@@ -347,6 +379,7 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
     grid_amount_total = 0.0
     self_total = 0.0
     amount_total = 0.0
+    grid_revenue_total = 0.0
 
     for tier_label, fwd_field, rev_field, price_field in _TIERS:
         # 正向（发电表）
@@ -364,8 +397,32 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
         # 自发用电
         self_use = (g_amount - r_amount) if g_amount is not None and r_amount is not None else None
         price = gen.get(price_field) if gen else None
-        d_price = (price * discount) if price is not None else None
+        if pricing_mode == "fixed_discount":
+            d_price = (price - pricing_param) if price is not None else None
+        elif pricing_mode == "fixed_price":
+            d_price = pricing_param
+        else:
+            d_price = (price * pricing_param) if price is not None else None
         tier_amount = (self_use * d_price) if self_use is not None and d_price is not None else None
+        # 上网电价：基于上网表的原电价，按价格类型计算
+        grid_price_field = f"grid_{price_field}"
+        grid_tier_price = grid.get(grid_price_field) if grid else None
+        if grid_tier_price is None:
+            grid_tier_price = grid.get(price_field) if grid else None
+        grid_avg_price = grid.get("grid_average_price") if grid else None
+        if grid_avg_price is None:
+            grid_avg_price = grid.get("average_price") if grid else None
+        grid_pricing_mode = grid.get("pricing_mode") if grid else None
+        grid_pricing_param = grid.get("pricing_param") if grid else None
+        if grid_pricing_mode == "average":
+            grid_price = grid_avg_price
+        elif grid_pricing_mode == "fixed_price":
+            grid_price = grid_pricing_param
+        elif grid_pricing_mode == "fixed_discount" and grid_tier_price is not None:
+            grid_price = (grid_tier_price - grid_pricing_param) if grid_pricing_param is not None else grid_tier_price
+        else:
+            grid_price = grid_tier_price
+        grid_revenue = (r_amount * grid_price) if r_amount is not None and grid_price is not None else None
 
         # 累加
         if gp is not None:
@@ -388,6 +445,8 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
             self_total += self_use
         if tier_amount is not None:
             amount_total += tier_amount
+        if grid_revenue is not None:
+            grid_revenue_total += grid_revenue
 
         # 写入行
         _apply_cell(ws.cell(row=row, column=1), tier_label, _data_font, None, _left)
@@ -408,22 +467,38 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
         _apply_cell(ws.cell(row=row, column=13), price, _data_font, None, _right, "0.00000000")
         _apply_cell(ws.cell(row=row, column=14), d_price, _data_font, None, _right, "0.00000000")
         _apply_cell(ws.cell(row=row, column=15), tier_amount, _data_font, None, _right, "#,##0.00")
+        # 上网数据
+        _apply_cell(ws.cell(row=row, column=16), grid_tier_price, _data_font, None, _right, "0.00000000")
+        _apply_cell(ws.cell(row=row, column=17), grid_price, _data_font, None, _right, "0.00000000")
+        _apply_cell(ws.cell(row=row, column=18), grid_revenue, _data_font, None, _right, "#,##0.00")
 
         row += 1
 
-    # ---- 合计行 ----
+    # ---- 合计行（正向直读总表数，反向直读反向有功总） ----
+    gen_cur_total_val = gen.get("cur_total") if gen else None
+    gen_prev_total_val = prev_gen.get("cur_total") if prev_gen else None
+    gen_diff_total_val = (gen_cur_total_val - gen_prev_total_val) if gen_cur_total_val is not None and gen_prev_total_val is not None else None
+    gen_amount_total_val = (gen_diff_total_val * gen_mult) if gen_diff_total_val is not None else None
+    grid_rev_total_val = grid.get("rev_total") if grid else None
+    grid_prev_total_val = prev_grid.get("rev_total") if prev_grid else None
+    grid_diff_total_val = (grid_rev_total_val - grid_prev_total_val) if grid_rev_total_val is not None and grid_prev_total_val is not None else None
+    grid_amount_total_val = (grid_diff_total_val * grid_mult) if grid_diff_total_val is not None else None
+    self_total_val = (gen_amount_total_val - grid_amount_total_val) if gen_amount_total_val is not None and grid_amount_total_val is not None else None
     _apply_cell(ws.cell(row=row, column=1), "正有功总", _total_font, _total_fill, _left)
-    _apply_cell(ws.cell(row=row, column=2), gen_prev_total, _total_font, _total_fill, _right, "#,##0.00")
-    _apply_cell(ws.cell(row=row, column=3), gen_cur_total, _total_font, _total_fill, _right, "#,##0.00")
-    _apply_cell(ws.cell(row=row, column=4), gen_diff_total, _total_font, _total_fill, _right, "#,##0.00")
+    _apply_cell(ws.cell(row=row, column=2), gen_prev_total_val, _total_font, _total_fill, _right, "#,##0.00")
+    _apply_cell(ws.cell(row=row, column=3), gen_cur_total_val, _total_font, _total_fill, _right, "#,##0.00")
+    _apply_cell(ws.cell(row=row, column=4), gen_diff_total_val, _total_font, _total_fill, _right, "#,##0.00")
     _apply_cell(ws.cell(row=row, column=5), gen_mult, _total_font, _total_fill, _right, "#,##0.00")
-    _apply_cell(ws.cell(row=row, column=6), gen_amount_total, _total_font, _total_fill, _right, "#,##0.00")
-    _apply_cell(ws.cell(row=row, column=7), grid_prev_total, _total_font, _total_fill, _right, "#,##0.00")
-    _apply_cell(ws.cell(row=row, column=8), grid_cur_total, _total_font, _total_fill, _right, "#,##0.00")
-    _apply_cell(ws.cell(row=row, column=9), grid_diff_total, _total_font, _total_fill, _right, "#,##0.00")
+    _apply_cell(ws.cell(row=row, column=6), gen_amount_total_val, _total_font, _total_fill, _right, "#,##0.00")
+    _apply_cell(ws.cell(row=row, column=7), grid_prev_total_val, _total_font, _total_fill, _right, "#,##0.00")
+    _apply_cell(ws.cell(row=row, column=8), grid_rev_total_val, _total_font, _total_fill, _right, "#,##0.00")
+    _apply_cell(ws.cell(row=row, column=9), grid_diff_total_val, _total_font, _total_fill, _right, "#,##0.00")
     _apply_cell(ws.cell(row=row, column=10), grid_mult, _total_font, _total_fill, _right, "#,##0.00")
-    _apply_cell(ws.cell(row=row, column=11), grid_amount_total, _total_font, _total_fill, _right, "#,##0.00")
-    _apply_cell(ws.cell(row=row, column=12), self_total, _total_font, _total_fill, _right, "#,##0.00")
+    _apply_cell(ws.cell(row=row, column=11), grid_amount_total_val, _total_font, _total_fill, _right, "#,##0.00")
+    _apply_cell(ws.cell(row=row, column=12), self_total_val, _total_font, _total_fill, _right, "#,##0.00")
     _apply_cell(ws.cell(row=row, column=13), None, _total_font, _total_fill, _right)
     _apply_cell(ws.cell(row=row, column=14), None, _total_font, _total_fill, _right)
     _apply_cell(ws.cell(row=row, column=15), amount_total, _total_font, _total_fill, _right, "#,##0.00")
+    _apply_cell(ws.cell(row=row, column=16), None, _total_font, _total_fill, _right)
+    _apply_cell(ws.cell(row=row, column=17), None, _total_font, _total_fill, _right)
+    _apply_cell(ws.cell(row=row, column=18), grid_revenue_total, _total_font, _total_fill, _right, "#,##0.00")

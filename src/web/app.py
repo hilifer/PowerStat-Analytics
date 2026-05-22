@@ -131,7 +131,7 @@ def _infer_project(db: Database, filename: str, email_subject: str = "") -> str:
     import re
     # 先尝试匹配数据库中已有的项目名
     try:
-        projects = db.get_projects()
+        projects = db.get_project_names()
         for proj in projects:
             if proj and (proj in (filename or "") or proj in (email_subject or "")):
                 return proj
@@ -552,7 +552,7 @@ def _register_routes(app: Flask, db: Database):
             else:
                 ungrouped.append(m)
 
-        projects = db.get_projects()
+        projects = db.get_project_names()
         user_ids = db.get_user_ids(project_name=project)
         return render_template("meters.html",
                                meters=meters, meter_groups=meter_groups,
@@ -664,7 +664,7 @@ def _register_routes(app: Flask, db: Database):
         sel_project = request.args.get("project", "")
         sel_month = request.args.get("month", "")  # 这里是账期月份（billing_month）
 
-        projects = db.get_projects()
+        projects = db.get_project_names()
         months = db.get_billing_months()
 
         # billing_month_offset: 抄表月 + offset = 账期月，所以抄表月 = 账期月 - offset
@@ -754,6 +754,11 @@ def _register_routes(app: Flask, db: Database):
                     flat_price=prices.get("flat_price"),
                     valley_price=prices.get("valley_price"),
                     average_price=prices.get("average_price"),
+                    grid_sharp_peak_price=prices.get("grid_sharp_peak_price"),
+                    grid_peak_price=prices.get("grid_peak_price"),
+                    grid_flat_price=prices.get("grid_flat_price"),
+                    grid_valley_price=prices.get("grid_valley_price"),
+                    grid_average_price=prices.get("grid_average_price"),
                 )
         return jsonify({"ok": True})
 
@@ -804,6 +809,7 @@ def _register_routes(app: Flask, db: Database):
                 with EmailFetcher() as fetcher:
                     attachments = fetcher.fetch_attachments()
                 _log(f"邮箱中共 {len(attachments)} 个附件")
+                new_attachment_files = []  # 新附件文件路径（增量模式用）
 
                 for i, att in enumerate(attachments, 1):
                     date_str = att.email_date.strftime("%Y-%m-%d %H:%M") if att.email_date else ""
@@ -813,41 +819,48 @@ def _register_routes(app: Flask, db: Database):
                         continue
 
                     _log(f"  新附件 [{new_email_count + 1}] {att.filename}")
+                    new_attachment_files.append(att.filepath)
 
                     _mark_processed(db, fp, att.filename, att.email_subject, date_str)
                     new_email_count += 1
 
             except Exception as e:
                 _log(f"邮箱连接失败（继续处理已有文件）: {e}")
-                log.error("邮箱连接失败: %s", e)
 
             if new_email_count > 0:
                 _log(f"已下载 {new_email_count} 个新附件")
             else:
                 _log("没有新邮件附件")
 
-            # ---- 步骤 3：扫描所有原始文件（邮件附件 + 归档） ----
-            temp_dir = Path(config.get("attachments", "temp_dir",
-                                       default="output/temp_attachments"))
-            archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
-            IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
-            EXCEL_EXTS = {".xlsx", ".xls", ".csv"}
-            ALL_EXTS = IMAGE_EXTS | EXCEL_EXTS | {".pdf", ".html", ".htm", ".txt", ".zip"}
-            SKIP_PREFIXES = ("~$",)  # 跳过 Office 临时文件
-
+            # ---- 步骤 3：扫描原始文件 ----
             source_files = []
-            # 优先扫描邮件附件原始目录
-            for scan_root in [temp_dir, archive_root]:
-                if scan_root.exists():
-                    for f in sorted(scan_root.rglob("*")):
-                        if f.is_file() and f.suffix.lower() in ALL_EXTS and not f.name.startswith(SKIP_PREFIXES):
-                            rel = f.relative_to(scan_root)
-                            # 从目录名推断月份
-                            month_dir = rel.parts[0] if rel.parts else f.parent.name
-                            source_info = {"filename": f.name, "archive_month": month_dir}
-                            source_files.append((str(f), source_info))
+            if clear_first:
+                # 全量模式：扫描所有文件
+                temp_dir = Path(config.get("attachments", "temp_dir",
+                                           default="output/temp_attachments"))
+                archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
+                IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
+                EXCEL_EXTS = {".xlsx", ".xls", ".csv"}
+                ALL_EXTS = IMAGE_EXTS | EXCEL_EXTS | {".pdf", ".html", ".htm", ".txt", ".zip"}
+                SKIP_PREFIXES = ("~$",)
+                for scan_root in [temp_dir, archive_root]:
+                    if scan_root.exists():
+                        for f in sorted(scan_root.rglob("*")):
+                            if f.is_file() and f.suffix.lower() in ALL_EXTS and not f.name.startswith(SKIP_PREFIXES):
+                                rel = f.relative_to(scan_root)
+                                month_dir = rel.parts[0] if rel.parts else f.parent.name
+                                source_info = {"filename": f.name, "archive_month": month_dir}
+                                source_files.append((str(f), source_info))
+            else:
+                # 增量模式：只处理新下载的附件
+                for fp in new_attachment_files:
+                    fpath = Path(fp)
+                    if fpath.exists():
+                        month_dir = fpath.parent.name
+                        source_info = {"filename": fpath.name, "archive_month": month_dir}
+                        source_files.append((str(fpath), source_info))
 
-            _log(f"共 {len(source_files)} 个文件（邮件附件 + 归档），开始扫描…")
+            _log(f"共 {len(source_files)} 个文件，开始扫描…")
 
             if not source_files:
                 _log("没有文件可处理，完成")
@@ -1071,18 +1084,34 @@ def _register_routes(app: Flask, db: Database):
     def readings():
         sel_project = request.args.get("project", "")
         sel_user_id = request.args.get("user_id", "")
-        sel_month = request.args.get("month", "")  # 仅用于客户端过滤，不做服务端过滤
+        sel_month = request.args.get("month", "")         # 服务端过滤
+        page = int(request.args.get("page", 1))
+        per_page = int(request.args.get("per_page", 10))
 
-        # 不按月份过滤——两个 Tab（抄表记录 / 电费单）共享 grouped_data，
-        # 月份筛选在前端各自独立进行。
+        import re
+
+        # 先统计 (用户, 月份) 组合总数（SQL COUNT）
+        total_items = db.count_user_months(
+            project_name=sel_project or None,
+            user_id=sel_user_id or None,
+            reading_month=sel_month or None,
+        )
+        total_pages = max(1, (total_items + per_page - 1) // per_page)
+        if page < 1:
+            page = 1
+        if page > total_pages:
+            page = total_pages
+
+        # 查当前页数据（SQL 层按 (user_id, reading_month) 对分页）
         raw = db.get_readings_grouped(
             project_name=sel_project or None,
             user_id=sel_user_id or None,
-            reading_month=None,
+            reading_month=sel_month or None,
+            limit=per_page,
+            offset=(page - 1) * per_page,
         )
 
         # 收集所有出现的月份，计算上月列表，用于回填 prev/cur 表数
-        import re
         months_in_data = set()
         for r in raw:
             months_in_data.add(r["reading_month"])
@@ -1120,7 +1149,7 @@ def _register_routes(app: Flask, db: Database):
 
         # 构建 按用户→按月→发电表/上网表 的分组结构
         from collections import OrderedDict
-        user_groups = OrderedDict()  # user_id -> {project_name, months: {month -> {gen, grid}}}
+        user_groups = OrderedDict()
         for r in raw:
             uid = r["user_id"] or "unknown"
             if uid not in user_groups:
@@ -1135,18 +1164,6 @@ def _register_routes(app: Flask, db: Database):
             elif r["meter_type"] == "上网表":
                 md[month]["grid"] = r
 
-        # 为每个月附加上月数据引用（用于电费单计算）
-        for uid, gdata in user_groups.items():
-            for month, mdata in gdata["months_dict"].items():
-                pm = _calc_prev_month(month)
-                if pm:
-                    if mdata["gen"]:
-                        mid = mdata["gen"]["meter_id"]
-                        mdata["prev_gen"] = prev_by_meter.get(mid, {}).get(pm)
-                    if mdata["grid"]:
-                        mid = mdata["grid"]["meter_id"]
-                        mdata["prev_grid"] = prev_by_meter.get(mid, {}).get(pm)
-
         grouped_data = []
         for uid, gdata in user_groups.items():
             grouped_data.append({
@@ -1155,14 +1172,36 @@ def _register_routes(app: Flask, db: Database):
                 "months": list(gdata["months_dict"].values()),
             })
 
+        # 附加上月数据（用于电费单计算）
+        for g in grouped_data:
+            for mdata in g["months"]:
+                pm = _calc_prev_month(mdata["month"])
+                if pm:
+                    if mdata["gen"]:
+                        mid = mdata["gen"]["meter_id"]
+                        mdata["prev_gen"] = prev_by_meter.get(mid, {}).get(pm)
+                    if mdata["grid"]:
+                        mid = mdata["grid"]["meter_id"]
+                        mdata["prev_grid"] = prev_by_meter.get(mid, {}).get(pm)
+
+        # 分页链接的基础 URL（不含 page 参数）
+        pagination_base = url_for("readings",
+                                  project=sel_project or None,
+                                  user_id=sel_user_id or None,
+                                  month=sel_month or None,
+                                  per_page=per_page if per_page != 10 else None)
+
         return render_template("readings.html",
                                grouped_data=grouped_data,
-                               projects=db.get_projects(),
-                               user_ids=db.get_user_ids(),
+                               projects=db.get_project_names(),
+                               user_ids=db.get_user_ids(project_name=sel_project or None),
                                months=db.get_months(),
                                sel_project=sel_project,
                                sel_user_id=sel_user_id,
-                               sel_month=sel_month)
+                               sel_month=sel_month,
+                               page=page, total_pages=total_pages,
+                               per_page=per_page, total_items=total_items,
+                               pagination_base=pagination_base)
 
     # ---- 手动创建抄表记录 ----
     @app.route("/readings/create", methods=["GET", "POST"])
@@ -1425,6 +1464,11 @@ def _register_routes(app: Flask, db: Database):
                 flat_price=prices.get("flat_price"),
                 valley_price=prices.get("valley_price"),
                 average_price=prices.get("average_price"),
+                grid_sharp_peak_price=prices.get("grid_sharp_peak_price"),
+                grid_peak_price=prices.get("grid_peak_price"),
+                grid_flat_price=prices.get("grid_flat_price"),
+                grid_valley_price=prices.get("grid_valley_price"),
+                grid_average_price=prices.get("grid_average_price"),
             )
             return jsonify({"ok": True})
         except Exception as e:
@@ -1845,18 +1889,30 @@ def _register_routes(app: Flask, db: Database):
                                   month=month, selected_items=selected_items,
                                   month_is_reading=month_is_reading)
 
-        # 文件名
+        # 文件名: 显示月份为账期月份（抄表月份 - 1）
         parts = []
         if project:
             parts.append(project)
         if month:
-            parts.append(month)
+            y, m = month.split("-")
+            ny = str(int(y) - 1) if m == "01" else y
+            nm = "12" if m == "01" else f"{int(m)-1:02d}"
+            parts.append(f"{ny}-{nm}")
         elif selected_items:
             months = sorted(set(it["month"] for it in selected_items))
             if len(months) == 1:
-                parts.append(months[0])
+                y, m = months[0].split("-")
+                ny = str(int(y) - 1) if m == "01" else y
+                nm = "12" if m == "01" else f"{int(m)-1:02d}"
+                parts.append(f"{ny}-{nm}")
             elif len(months) <= 3:
-                parts.append("_".join(months))
+                display = []
+                for mk in months:
+                    y, m = mk.split("-")
+                    ny = str(int(y) - 1) if m == "01" else y
+                    nm = "12" if m == "01" else f"{int(m)-1:02d}"
+                    display.append(f"{ny}-{nm}")
+                parts.append("_".join(display))
         parts.append("电费单")
         filename = "_".join(parts) + ".xlsx"
 
@@ -1879,6 +1935,9 @@ def _register_routes(app: Flask, db: Database):
             try:
                 multiplier = float(data.get("multiplier") or 1.0)
                 discount = float(data.get("discount") or 1.0)
+                pricing_mode = data.get("pricing_mode", "discount").strip()
+                raw_param = data.get("pricing_param", "").strip()
+                pricing_param = float(raw_param) if raw_param else None
                 meter_id = db.create_meter(
                     meter_number=meter_number,
                     user_id=data.get("user_id", "").strip() or None,
@@ -1886,6 +1945,8 @@ def _register_routes(app: Flask, db: Database):
                     asset_number=data.get("asset_number", "").strip() or None,
                     multiplier=multiplier,
                     discount=discount,
+                    pricing_mode=pricing_mode,
+                    pricing_param=pricing_param,
                     project_name=data.get("project_name", "").strip() or None,
                 )
                 flash(f"电表 {meter_number} 创建成功", "success")
@@ -1897,7 +1958,7 @@ def _register_routes(app: Flask, db: Database):
                 flash(f"创建失败: {e}", "danger")
                 return redirect(url_for("meter_create"))
 
-        projects = db.get_projects()
+        projects = db.get_project_names()
         return render_template("meter_create.html", projects=projects)
 
     # ---- 电表编辑页面 ----
@@ -1908,7 +1969,7 @@ def _register_routes(app: Flask, db: Database):
             if not meter:
                 abort(404)
             meter = dict(meter)
-        projects = db.get_projects()
+        projects = db.get_project_names()
         return render_template("meter_edit.html", meter=meter, projects=projects)
 
     # ---- 电表更新 API ----
@@ -1937,8 +1998,13 @@ def _register_routes(app: Flask, db: Database):
                     pass
             elif k == "is_locked":
                 fields[k] = int(v)
-            elif k in ("user_id", "meter_type", "asset_number", "project_name"):
+            elif k in ("user_id", "meter_type", "asset_number", "project_name", "pricing_mode"):
                 fields[k] = str(v).strip() if v else None
+            elif k == "pricing_param":
+                try:
+                    fields[k] = float(v) if v != "" else None
+                except (ValueError, TypeError):
+                    fields[k] = None
 
         ok = db.update_meter(meter_number, **fields)
         if ok:
@@ -2175,3 +2241,55 @@ def _register_routes(app: Flask, db: Database):
         if not str(target).startswith(str(safe_dir)) or not target.exists():
             abort(404)
         return send_from_directory(str(safe_dir), filename, as_attachment=True)
+
+    # ---- 项目管理 ----
+    @app.route("/projects")
+    def projects_list():
+        all_projects = db.get_projects()
+        return render_template("projects.html", projects=all_projects)
+
+    @app.route("/projects/create", methods=["GET", "POST"])
+    def project_create():
+        if request.method == "POST":
+            name = request.form.get("name", "").strip()
+            try:
+                db.create_project(name)
+                flash(f"项目 '{name}' 创建成功", "success")
+                return redirect(url_for("projects_list"))
+            except ValueError as e:
+                flash(str(e), "danger")
+                return redirect(url_for("project_create"))
+        return render_template("project_create.html")
+
+    @app.route("/projects/<int:project_id>/edit", methods=["GET", "POST"])
+    def project_edit(project_id):
+        project = db.get_project(project_id)
+        if not project:
+            abort(404)
+        if request.method == "POST":
+            new_name = request.form.get("name", "").strip()
+            try:
+                db.update_project(project_id, name=new_name)
+                flash("项目已更新", "success")
+                return redirect(url_for("projects_list"))
+            except ValueError as e:
+                flash(str(e), "danger")
+                return redirect(url_for("project_edit", project_id=project_id))
+        return render_template("project_edit.html", project=project)
+
+    @app.route("/projects/<int:project_id>/delete", methods=["POST"])
+    def project_delete(project_id):
+        try:
+            db.delete_project(project_id)
+            flash("项目已删除", "success")
+        except ValueError as e:
+            flash(str(e), "danger")
+        return redirect(url_for("projects_list"))
+
+    @app.route("/api/projects/<int:project_id>", methods=["DELETE"])
+    def project_delete_api(project_id):
+        try:
+            db.delete_project(project_id)
+            return jsonify({"success": True, "message": "项目已删除"})
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400

@@ -74,7 +74,7 @@
                     <th>资产编号</th>
                     <th>类型</th>
                     <th class="num">倍率</th>
-                    <th class="num">折扣</th>
+                    <th>计价模式</th>
                     <th>配对电表</th>
                     <th>操作</th>
                 </tr>
@@ -97,7 +97,18 @@
                         {% endif %}
                     </td>
                     <td class="num">{{ m.multiplier }}</td>
-                    <td class="num">{{ m.discount or 1.0 }}{% if m.discount and m.discount != 1.0 %} ({{ "%.1f"|format(m.discount * 10) }}折){% endif %}</td>
+                    <td style="font-size:0.8rem;">
+                        {% set pm = m.pricing_mode or 'discount' %}
+                        {% if pm == 'fixed_discount' %}
+                        优惠固定价 -{{ '%.4f'|format(m.pricing_param) }}/kWh
+                        {% elif pm == 'fixed_price' %}
+                        固定价 {{ '%.8f'|format(m.pricing_param) }}/kWh
+                        {% elif m.discount and m.discount != 1.0 %}
+                        折扣 {{ '%.2f'|format(m.discount) }} ({{ '%.1f'|format(m.discount * 10) }}折)
+                        {% else %}
+                        折扣 1.0 (10折)
+                        {% endif %}
+                    </td>
                     <td style="font-size:0.8rem;">
                         {% if m.paired_meter_id %}
                             {% set partner = meters|selectattr('id', 'equalto', m.paired_meter_id)|first %}

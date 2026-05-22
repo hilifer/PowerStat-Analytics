@@ -92,7 +92,7 @@ def info():
     console.print(table)
 
     # 展示项目列表
-    projects = db.get_projects()
+    projects = db.get_project_names()
     if projects:
         console.print("\n[bold]项目列表:[/]")
         for p in projects:

@@ -2,6 +2,7 @@
 {% block title %}抄表日期 - PowerStat{% endblock %}
 
 {% block content %}
+{% macro prev_month(date_str) %}{% if date_str %}{% set p = date_str.split('-') %}{% set y = p[0]|int %}{% set m = p[1]|int %}{% set ny = y-1 if m == 1 else y %}{% set nm = 12 if m == 1 else m-1 %}{{ '%04d-%02d'|format(ny, nm) }}{% if p|length > 2 %}-{{ p[2] }}{% endif %}{% endif %}{% endmacro %}
 <div class="breadcrumb">
     <a href="{{ url_for('index') }}">首页</a>
     <span class="sep">/</span>
@@ -79,9 +80,8 @@
     </div>
     <div class="filter-group">
         <label>月份</label>
-        <input type="month" id="readingsFilterMonth" class="form-input"
+        <input type="month" name="month" id="readingsFilterMonth" class="form-input"
                value="{{ sel_month or '' }}" placeholder="全部月份"
-               onchange="filterReadingsMonth()"
                style="min-width:150px;">
     </div>
     <button type="submit" class="btn btn-secondary btn-sm">查询</button>
@@ -110,7 +110,6 @@
         {# ---- 月份标题栏 ---- #}
         <div class="month-header">
             <div style="display:flex; align-items:center; gap:0.5rem;">
-                <h3 style="margin:0; font-size:1rem;">{{ month_data.month }}</h3>
                 {% if first_r and first_r.stat_date %}
                 <span style="font-size:0.85rem; color:var(--text-secondary);">抄表日期: {{ first_r.stat_date }}</span>
                 {% endif %}
@@ -379,40 +378,62 @@
 </div>
 {% endif %}
 
+<div class="pagination-bar">
+    <div class="pagination">
+        {% set sep = '&' if '?' in pagination_base else '?' %}
+        {% if page > 1 %}
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page=1">&#171;</a>
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page={{ page - 1 }}">&#8249;</a>
+        {% else %}
+        <button class="btn btn-sm btn-outline" disabled>&#171;</button>
+        <button class="btn btn-sm btn-outline" disabled>&#8249;</button>
+        {% endif %}
+        <span class="pagination-info">第 {{ page }} / {{ total_pages }} 页（共 {{ total_items }} 组）</span>
+        {% if page < total_pages %}
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page={{ page + 1 }}">&#8250;</a>
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page={{ total_pages }}">&#187;</a>
+        {% else %}
+        <button class="btn btn-sm btn-outline" disabled>&#8250;</button>
+        <button class="btn btn-sm btn-outline" disabled>&#187;</button>
+        {% endif %}
+    </div>
+</div>
+
 </div>{# end tab-readings #}
 
 <!-- ========== Tab 2: 电费单 ========== -->
 <div id="tab-bills" class="tab-content">
 
-<!-- 电费单筛选栏 -->
-<div class="filter-bar" style="margin-bottom:1rem;">
+<!-- 电费单筛选栏（与服务端过滤参数一致） -->
+<form method="GET" action="{{ url_for('readings') }}" class="filter-bar" style="margin-bottom:1rem;">
     <div class="filter-group">
         <label>项目</label>
-        <select id="billFilterProject" onchange="filterBills()">
+        <select name="project" onchange="this.form.submit()">
             <option value="">全部项目</option>
             {% for p in projects %}
-            <option value="{{ p }}">{{ p }}</option>
+            <option value="{{ p }}" {% if sel_project == p %}selected{% endif %}>{{ p }}</option>
             {% endfor %}
         </select>
     </div>
     <div class="filter-group">
         <label>用户编号</label>
-        <select id="billFilterUser" onchange="filterBills()">
+        <select name="user_id" onchange="this.form.submit()">
             <option value="">全部用户</option>
             {% for u in user_ids %}
-            <option value="{{ u }}">{{ u }}</option>
+            <option value="{{ u }}" {% if sel_user_id == u %}selected{% endif %}>{{ u }}</option>
             {% endfor %}
         </select>
     </div>
     <div class="filter-group">
         <label>月份</label>
-        <input type="month" id="billFilterMonth" class="form-input"
-               onchange="filterBills()" placeholder="全部月份"
+        <input type="month" name="month" class="form-input"
+               value="{{ sel_month or '' }}" placeholder="全部月份"
+               onchange="this.form.submit()"
                style="min-width:150px;">
     </div>
-    <button type="button" class="btn btn-secondary btn-sm" onclick="filterBills()">查询</button>
-    <button type="button" class="btn btn-outline btn-sm" onclick="resetBillFilter()">重置</button>
-</div>
+    <button type="submit" class="btn btn-secondary btn-sm">查询</button>
+    <a href="{{ url_for('readings') }}" class="btn btn-outline btn-sm">重置</a>
+</form>
 
 <!-- 批量操作栏 -->
 <div class="bill-batch-bar" style="display:flex; align-items:center; gap:1rem; margin-bottom:0.75rem; flex-wrap:wrap;">
@@ -446,7 +467,7 @@
         <div class="month-header">
             <div style="display:flex; align-items:center; gap:0.5rem;">
                 <input type="checkbox" class="bill-check" data-user="{{ group.user_id }}" data-month="{{ month_data.month }}" data-project="{{ group.project_name or '' }}" onchange="updateBillSelection()">
-                <h3 style="margin:0; font-size:1rem;">{{ month_data.month }} 电费单</h3>
+                <h3 style="margin:0; font-size:1rem;">{{ prev_month(month_data.month) }} 电费单</h3>
                 {% if first_r and first_r.stat_date %}
                 <span style="font-size:0.85rem; color:var(--text-secondary);">抄表日期: {{ first_r.stat_date }}</span>
                 {% endif %}
@@ -488,6 +509,7 @@
                                 <th colspan="5" style="text-align:center; background:#f0fdf4;">正向数据（发电量）</th>
                                 <th colspan="5" style="text-align:center; background:#eff6ff;">反向数据（上网电量）</th>
                                 <th colspan="4" style="text-align:center; background:#fef9f0;">自发用电量/金额</th>
+                                <th colspan="3" style="text-align:center; background:#f0fdf4;">上网电量/金额</th>
                             </tr>
                             <tr>
                                 <th class="num" style="background:#f0fdf4;">上月表数</th>
@@ -504,6 +526,9 @@
                                 <th class="num" style="background:#fef9f0;">原电价</th>
                                 <th class="num" style="background:#fef9f0;">优惠后电价</th>
                                 <th class="num" style="background:#fef9f0;">金额</th>
+                                <th class="num" style="background:#f0fdf4;">原电价</th>
+                                <th class="num" style="background:#f0fdf4;">优惠电价</th>
+                                <th class="num" style="background:#f0fdf4;">上网金额</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -517,7 +542,7 @@
                         {% set ns = namespace(
                             gen_prev_total=0, gen_cur_total=0, gen_diff_total=0, gen_amount_total=0,
                             grid_prev_total=0, grid_cur_total=0, grid_diff_total=0, grid_amount_total=0,
-                            self_total=0, amount_total=0
+                            self_total=0, amount_total=0, grid_revenue_total=0
                         ) %}
 
                         {% for tier_label, fwd_field, rev_field, price_field in tiers %}
@@ -538,6 +563,20 @@
                         {% set price = gen[price_field] if gen and gen[price_field] is not none else none %}
                         {% set discounted_price = (price * discount) if price is not none else none %}
                         {% set tier_amount = (self_use * discounted_price) if self_use is not none and discounted_price is not none else none %}
+                        {# 上网电价：基于上网表的原电价，按价格类型计算 #}
+                        {% set grid_price_field = "grid_" ~ price_field %}
+                        {% set grid_tier_price = grid[grid_price_field] if grid and grid[grid_price_field] is not none else grid[price_field] if grid and grid[price_field] is not none else none %}
+                        {% set grid_avg_price = grid.grid_average_price if grid and grid.grid_average_price is not none else grid.average_price if grid and grid.average_price is not none else none %}
+                        {% if grid and grid.pricing_mode == "average" %}
+                            {% set grid_price = grid_avg_price %}
+                        {% elif grid and grid.pricing_mode == "fixed_price" %}
+                            {% set grid_price = grid.pricing_param %}
+                        {% elif grid and grid.pricing_mode == "fixed_discount" and grid_tier_price is not none %}
+                            {% set grid_price = grid_tier_price - grid.pricing_param if grid.pricing_param is not none else grid_tier_price %}
+                        {% else %}
+                            {% set grid_price = grid_tier_price %}
+                        {% endif %}
+                        {% set grid_revenue = (grid_amount * grid_price) if grid_amount is not none and grid_price is not none else none %}
 
                         {# 累加总计 #}
                         {% if gen_prev is not none %}{% set ns.gen_prev_total = ns.gen_prev_total + gen_prev %}{% endif %}
@@ -550,6 +589,7 @@
                         {% if grid_amount is not none %}{% set ns.grid_amount_total = ns.grid_amount_total + grid_amount %}{% endif %}
                         {% if self_use is not none %}{% set ns.self_total = ns.self_total + self_use %}{% endif %}
                         {% if tier_amount is not none %}{% set ns.amount_total = ns.amount_total + tier_amount %}{% endif %}
+                        {% if grid_revenue is not none %}{% set ns.grid_revenue_total = ns.grid_revenue_total + grid_revenue %}{% endif %}
 
                         <tr>
                             <td style="font-weight:600; white-space:nowrap;">{{ tier_label }}</td>
@@ -570,26 +610,42 @@
                             <td class="num self-cell">{{ "%.8f"|format(price) if price is not none else '-' }}</td>
                             <td class="num self-cell">{{ "%.8f"|format(discounted_price) if discounted_price is not none else '-' }}</td>
                             <td class="num self-cell"><strong>{{ "%.2f"|format(tier_amount) if tier_amount is not none else '-' }}</strong></td>
+                            <td class="num rev-cell">{{ "%.8f"|format(grid_tier_price) if grid_tier_price is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.8f"|format(grid_price) if grid_price is not none else '-' }}</td>
+                            <td class="num rev-cell"><strong>{{ "%.2f"|format(grid_revenue) if grid_revenue is not none else '-' }}</strong></td>
                         </tr>
                         {% endfor %}
 
-                        {# 合计行 #}
+                        {# 合计行：正向直读总表数，反向直读反向有功总 #}
+                        {% set gen_cur_total = gen.cur_total if gen and gen.cur_total is not none else none %}
+                        {% set gen_prev_total = prev_gen.cur_total if prev_gen and prev_gen.cur_total is not none else none %}
+                        {% set gen_diff_total = (gen_cur_total - gen_prev_total) if gen_cur_total is not none and gen_prev_total is not none else none %}
+                        {% set gen_amount_total = (gen_diff_total * gen_mult) if gen_diff_total is not none else none %}
+                        {% set grid_rev_total = grid.rev_total if grid and grid.rev_total is not none else none %}
+                        {% set grid_prev_total = prev_grid.rev_total if prev_grid and prev_grid.rev_total is not none else none %}
+                        {% set grid_diff_total = (grid_rev_total - grid_prev_total) if grid_rev_total is not none and grid_prev_total is not none else none %}
+                        {% set grid_amount_total = (grid_diff_total * grid_mult) if grid_diff_total is not none else none %}
+                        {# 实际用电数 = 总发电量 - 总上网电量 #}
+                        {% set self_total = (gen_amount_total - grid_amount_total) if gen_amount_total is not none and grid_amount_total is not none else none %}
                         <tr class="total-row">
                             <td style="font-weight:700;">正有功总</td>
-                            <td class="num fwd-cell">{{ "%.2f"|format(ns.gen_prev_total) }}</td>
-                            <td class="num fwd-cell">{{ "%.2f"|format(ns.gen_cur_total) }}</td>
-                            <td class="num fwd-cell">{{ "%.2f"|format(ns.gen_diff_total) }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_prev_total) if gen_prev_total is not none else '-' }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_cur_total) if gen_cur_total is not none else '-' }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_diff_total) if gen_diff_total is not none else '-' }}</td>
                             <td class="num fwd-cell">{{ "%.2f"|format(gen_mult) }}</td>
-                            <td class="num fwd-cell"><strong>{{ "%.2f"|format(ns.gen_amount_total) }}</strong></td>
-                            <td class="num rev-cell">{{ "%.2f"|format(ns.grid_prev_total) }}</td>
-                            <td class="num rev-cell">{{ "%.2f"|format(ns.grid_cur_total) }}</td>
-                            <td class="num rev-cell">{{ "%.2f"|format(ns.grid_diff_total) }}</td>
+                            <td class="num fwd-cell"><strong>{{ "%.2f"|format(gen_amount_total) if gen_amount_total is not none else '-' }}</strong></td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_prev_total) if grid_prev_total is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_rev_total) if grid_rev_total is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_diff_total) if grid_diff_total is not none else '-' }}</td>
                             <td class="num rev-cell">{{ "%.2f"|format(grid_mult) }}</td>
-                            <td class="num rev-cell"><strong>{{ "%.2f"|format(ns.grid_amount_total) }}</strong></td>
-                            <td class="num self-cell"><strong>{{ "%.2f"|format(ns.self_total) }}</strong></td>
+                            <td class="num rev-cell"><strong>{{ "%.2f"|format(grid_amount_total) if grid_amount_total is not none else '-' }}</strong></td>
+                            <td class="num self-cell"><strong>{{ "%.2f"|format(self_total) if self_total is not none else '-' }}</strong></td>
                             <td class="num self-cell"></td>
                             <td class="num self-cell"></td>
                             <td class="num self-cell"><strong>{{ "%.2f"|format(ns.amount_total) }}</strong></td>
+                            <td class="num rev-cell"></td>
+                            <td class="num rev-cell"></td>
+                            <td class="num rev-cell"><strong>{{ "%.2f"|format(ns.grid_revenue_total) }}</strong></td>
                         </tr>
                         </tbody>
                     </table>
@@ -626,6 +682,27 @@
     <p style="font-size:0.9rem;">请先在「抄表记录」中录入数据</p>
 </div>
 {% endif %}
+
+<div class="pagination-bar">
+    <div class="pagination">
+        {% set sep = '&' if '?' in pagination_base else '?' %}
+        {% if page > 1 %}
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page=1">&#171;</a>
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page={{ page - 1 }}">&#8249;</a>
+        {% else %}
+        <button class="btn btn-sm btn-outline" disabled>&#171;</button>
+        <button class="btn btn-sm btn-outline" disabled>&#8249;</button>
+        {% endif %}
+        <span class="pagination-info">第 {{ page }} / {{ total_pages }} 页（共 {{ total_items }} 组）</span>
+        {% if page < total_pages %}
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page={{ page + 1 }}">&#8250;</a>
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page={{ total_pages }}">&#187;</a>
+        {% else %}
+        <button class="btn btn-sm btn-outline" disabled>&#8250;</button>
+        <button class="btn btn-sm btn-outline" disabled>&#187;</button>
+        {% endif %}
+    </div>
+</div>
 
 </div>{# end tab-bills #}
 

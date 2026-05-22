@@ -1321,6 +1321,7 @@ class MultiPassExtractor:
                         src = self._rel_source(filepath)
                         self._upsert_reading(fwd_target, row_month, fwd_readings,
                                              fwd_total, src, sheet_name,
+                                             cur_total=fwd_total,
                                              stat_date=row_stat_date)
 
             # 反向读数 — 存入当前行电表的 rev_* 字段
