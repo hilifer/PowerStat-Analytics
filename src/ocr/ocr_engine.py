@@ -29,11 +29,11 @@ class OCRResult:
         self.flat_price: Optional[float] = None
         self.valley_price: Optional[float] = None
         self.average_price: Optional[float] = None
+        self.settlement_price: Optional[float] = None
         self.reading_month: Optional[str] = None
         self.raw_text: str = ""
         self.source_file: str = ""
         self.confidence: float = 0.0
-        # 从图片中提取的电表记录（电费单等）
         self.meter_records: list[dict] = []
 
     def has_price_data(self) -> bool:
@@ -43,7 +43,8 @@ class OCRResult:
         ])
 
     def has_any_data(self) -> bool:
-        return self.has_price_data() or bool(self.user_id) or bool(self.meter_records)
+        return self.has_price_data() or bool(self.user_id) or bool(self.meter_records) \
+            or self.settlement_price is not None
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +54,7 @@ class OCRResult:
             "flat_price": self.flat_price,
             "valley_price": self.valley_price,
             "average_price": self.average_price,
+            "settlement_price": self.settlement_price,
             "reading_month": self.reading_month,
             "source_file": self.source_file,
             "meter_records": self.meter_records,
@@ -194,9 +196,12 @@ class OCREngine:
                 raw_text, filepath, source_info, result
             )
 
+            # 提取电费结算价格
+            result.settlement_price = self._extract_settlement_price(raw_text)
+
             if result.user_id or result.has_price_data():
                 log.info("  OCR 提取 [%s]: 用户=%s, 月份=%s, "
-                         "尖峰=%.4f, 峰=%.4f, 平=%.4f, 谷=%.4f, 均价=%.4f, 电表记录=%d",
+                         "尖峰=%.4f, 峰=%.4f, 平=%.4f, 谷=%.4f, 均价=%.4f, 结算价=%s, 电表记录=%d",
                          filepath.name, result.user_id or "未识别",
                          result.reading_month or "未知",
                          result.sharp_peak_price or 0,
@@ -204,6 +209,7 @@ class OCREngine:
                          result.flat_price or 0,
                          result.valley_price or 0,
                          result.average_price or 0,
+                         f"{result.settlement_price:.8f}" if result.settlement_price is not None else "-",
                          len(result.meter_records))
             else:
                 log.warning("  OCR [%s]: 未提取到用户编号或单价，原文前300字: %s",
@@ -1224,3 +1230,118 @@ class OCREngine:
                 return d.strftime("%Y-%m")
 
         return None
+
+    def _extract_settlement_price(self, text: str) -> Optional[float]:
+        """从电费结算单文本中提取上网原电价（最后一个价格值）。
+
+        策略：找含"电价"的行 → 取行内最后一个 d+.d{4,12} 数字
+        无"电价"行时回退全文最后一个匹配数值。
+        """
+        if not text:
+            return None
+
+        lines = text.split("\n")
+        price_pattern = re.compile(r'\d+\.\d{4,12}')
+        last_price = None
+
+        # 策略1：找含"电价"的行
+        for line in lines:
+            if "电价" in line:
+                matches = price_pattern.findall(line)
+                if matches:
+                    last_price = float(matches[-1])
+
+        if last_price is not None and self._is_valid_price(last_price):
+            return last_price
+
+        # 策略2：回退全文最后一个价格数值
+        all_matches = price_pattern.findall(text)
+        if all_matches:
+            val = float(all_matches[-1])
+            if self._is_valid_price(val):
+                return val
+
+        return None
+
+    def extract_from_pdf(self, filepath: str, source_info: dict = None) -> OCRResult:
+        """从 PDF 文件提取文本和价格。
+
+        优先用 pdfplumber 提取文本（可编辑 PDF），
+        若无效则用 pypdfium2 渲染为图片再用 pytesseract OCR。"""
+        result = OCRResult()
+        result.source_file = Path(filepath).name
+
+        if not os.path.isfile(filepath):
+            log.error("PDF 文件不存在: %s", filepath)
+            return result
+
+        # 先用 pdfplumber 尝试提取可编辑 PDF 文本
+        try:
+            import pdfplumber
+            text_parts = []
+            with pdfplumber.open(filepath) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text() or ""
+                    text_parts.append(page_text)
+            raw_text = "\n".join(text_parts)
+            log.info("pdfplumber 文本 [%s]: %s", filepath, raw_text[:200])
+        except Exception as e:
+            log.warning("pdfplumber 失败 [%s]: %s", filepath, e)
+            raw_text = ""
+
+        # 无有效文本 → 用 pypdfium2 渲染为图片，再用 pytesseract（--psm 6 表格模式）
+        if not raw_text.strip() or len(raw_text.strip()) < 20:
+            log.info("PDF 无有效文本，转为图片 OCR: %s", filepath)
+            try:
+                import pytesseract
+                from PIL import Image
+                import pypdfium2
+                import tempfile
+                pdf = pypdfium2.PdfDocument(filepath)
+                ocr_texts = []
+                for i in range(len(pdf)):
+                    page_img = pdf[i].render().to_pil()
+                    # 写入临时 PNG → pytesseract（无 _engine 时走此路）
+                    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    page_img.save(tmp.name)
+                    img = Image.open(tmp.name)
+                    page_text = pytesseract.image_to_string(
+                        img, lang="chi_sim+eng",
+                        config="--oem 3 --psm 6"
+                    )
+                    os.unlink(tmp.name)
+                    ocr_texts.append(page_text)
+                raw_text = "\n".join(ocr_texts)
+                log.info("PDF 图片 OCR [%s]: %s", filepath, raw_text[:500])
+            except Exception as e2:
+                log.error("PDF 图片 OCR 失败 [%s]: %s", filepath, e2)
+
+        result.raw_text = raw_text
+        result.user_id = self._extract_user_id(raw_text)
+        if not result.user_id:
+            result.user_id = self._extract_user_id_from_filename(
+                Path(filepath).name
+            )
+        prices = self._extract_prices(raw_text)
+        result.sharp_peak_price = prices.get("sharp_peak_price")
+        result.peak_price = prices.get("peak_price")
+        result.flat_price = prices.get("flat_price")
+        result.valley_price = prices.get("valley_price")
+        result.average_price = prices.get("average_price")
+        result.reading_month = self._infer_month(
+            raw_text, source_info, Path(filepath).name
+        )
+        result.settlement_price = self._extract_settlement_price(raw_text)
+        if result.user_id or result.has_price_data():
+            log.info("  PDF 提取 [%s]: 用户=%s, 月份=%s, "
+                     "尖峰=%.4f, 峰=%.4f, 平=%.4f, 谷=%.4f, 均价=%.4f, 结算价=%s",
+                     filepath, result.user_id or "未识别",
+                     result.reading_month or "未知",
+                     result.sharp_peak_price or 0,
+                     result.peak_price or 0,
+                     result.flat_price or 0,
+                     result.valley_price or 0,
+                     result.average_price or 0,
+                     f"{result.settlement_price:.8f}" if result.settlement_price is not None else "-")
+
+        return result

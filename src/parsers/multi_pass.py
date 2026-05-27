@@ -1150,8 +1150,8 @@ class MultiPassExtractor:
         rev_total_col = next((c for c, h in headers.items()
                               if self._matches_any(h, self._rev_total_aliases)), None)
 
-        # === 排除含倍率/金额/电价的表（统计表/计算表，不是原始抄表数据） ===
-        _exclude_keywords = ("倍率", "CT倍率", "变比", "金额", "电价", "单价",
+        # === 排除含金额/电价等非原始抄表数据的表（剔除统计表/计算表） ===
+        _exclude_keywords = ("金额", "电价", "单价",
                              "上网电价", "上网金额", "发电量", "上网电量")
         for c, hdr in headers.items():
             if any(kw in hdr for kw in _exclude_keywords):
@@ -1946,7 +1946,7 @@ class MultiPassExtractor:
                 "asset_number": info.get("asset_number"),
                 "user_id": uid,
                 "meter_type": info.get("meter_type", "未知"),
-                "multiplier": info.get("multiplier"),
+                "multiplier": info.get("multiplier") if info.get("multiplier") is not None else 1.0,
                 "discount": info.get("discount"),
                 "project_name": info.get("project_name"),
                 "paired_meter": pair_map.get(mn),
@@ -1985,7 +1985,7 @@ class MultiPassExtractor:
                     "asset_number": info.get("asset_number"),
                     "user_id": info.get("user_id"),
                     "meter_type": info.get("meter_type", "未知"),
-                    "multiplier": info.get("multiplier"),
+                    "multiplier": info.get("multiplier") if info.get("multiplier") is not None else 1.0,
                     "discount": info.get("discount"),
                     "project_name": info.get("project_name"),
                     "paired_meter": pair_map.get(mn),

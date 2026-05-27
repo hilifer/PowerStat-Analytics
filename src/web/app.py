@@ -1074,6 +1074,275 @@ def _register_routes(app: Flask, db: Database):
         """单价提取全量更新：清空 price_records 后重新提取。"""
         return _start_bill_update(clear_first=True, task_type="prices")
 
+    def _do_settlement_update(clear_first: bool):
+        """电费结算单：从结算单文件提取上网原电价 (grid_average_price)。
+
+        从邮件附件中提取三类核心数据：
+          1. 电厂（交易对象）编号 → user_id
+          2. 购电月份 → reading_month（文件月份+1）
+          3. 电价 → settlement_price（电价栏最后值）
+
+        clear_first: True = 全量（清空现有值重新提取），False = 增量（只补空）
+        """
+        status = app.config["BILL_REFRESH_STATUS"]
+
+        def _log(msg):
+            ts = datetime.now().strftime("%H:%M:%S")
+            status["logs"].append(f"[{ts}] {msg}")
+            status["progress"] = msg
+
+        mode_label = "全量" if clear_first else "增量"
+        _log(f"[电费结算单] {mode_label}提取开始…")
+
+        try:
+            from src.email_fetcher.fetcher import EmailFetcher
+            from src.pipeline import SmartDispatcher, Pipeline
+            import re, os
+            from pathlib import Path
+
+            dispatcher = SmartDispatcher()
+
+            # 获取所有已知 user_id
+            known_users = {}
+            for m in db.get_meters():
+                uid = m.get("user_id")
+                pname = m.get("project_name")
+                if uid:
+                    known_users[uid] = pname or ""
+
+            IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
+            _SETTLEMENT = ["电费结算单", "电量结算单", "结算单"]
+
+            # ---- 步骤 1：全量模式清空 ----
+            total_processed = 0
+            skipped = 0
+            scanned = 0
+
+            if clear_first:
+                with db.connection() as conn:
+                    n = conn.execute(
+                        "UPDATE price_records SET grid_average_price = NULL, source_file = NULL "
+                        "WHERE grid_average_price IS NOT NULL"
+                    ).rowcount
+                    _log(f"已清空 {n} 条上网电价记录")
+
+            # ---- 步骤 2：下载新邮件附件（增量模式用） ----
+            new_attachment_files = []
+            try:
+                with EmailFetcher() as fetcher:
+                    attachments = fetcher.fetch_attachments()
+                _log(f"邮箱中共 {len(attachments)} 个附件")
+
+                for i, att in enumerate(attachments, 1):
+                    date_str = att.email_date.strftime("%Y-%m-%d %H:%M") if att.email_date else ""
+                    fp = _email_fingerprint(att.email_subject, att.email_sender, date_str, att.filename)
+
+                    if _is_already_processed(db, fp):
+                        continue
+
+                    _log(f"  新附件 [{i}] {att.filename}")
+                    new_attachment_files.append(att.filepath)
+                    _mark_processed(db, fp, att.filename, att.email_subject, date_str)
+
+            except Exception as e:
+                _log(f"邮箱连接失败（继续处理已有文件）: {e}")
+
+            if new_attachment_files:
+                _log(f"已下载 {len(new_attachment_files)} 个新附件")
+            else:
+                _log("没有新邮件附件")
+
+            # ---- 步骤 3：确定要处理的文件 ----
+            source_files = []
+            temp_dir = Path(config.get("attachments", "temp_dir",
+                                       default="output/temp_attachments"))
+
+            if clear_first:
+                # 全量：扫描所有已有文件
+                if temp_dir.exists():
+                    for fpath in sorted(temp_dir.rglob("*")):
+                        if not fpath.is_file() or fpath.name.startswith("~$"):
+                            continue
+                        ext = fpath.suffix.lower()
+                        if ext != ".pdf" and ext not in IMAGE_EXTS:
+                            continue
+                        source_files.append((str(fpath), fpath.name))
+            else:
+                # 增量：只处理新下载的附件
+                for fp in new_attachment_files:
+                    fpath = Path(fp)
+                    if fpath.exists():
+                        ext = fpath.suffix.lower()
+                        if ext != ".pdf" and ext not in IMAGE_EXTS:
+                            continue
+                        source_files.append((str(fpath), fpath.name))
+
+            _log(f"共 {len(source_files)} 个文件待处理，开始扫描…")
+
+            if not source_files:
+                _log("没有文件可处理，完成")
+                status["result"] = {"processed": 0, "skipped": 0, "files_scanned": 0}
+                status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                return
+
+            # ---- 步骤 4：提取结算单数据 ----
+            for fpath, fname in source_files:
+                fpath_str = str(fpath)
+                scanned += 1
+                try:
+                    # 提取文本
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext == ".pdf":
+                        ocr = dispatcher.ocr_engine.extract_from_pdf(fpath_str)
+                    else:
+                        ocr = dispatcher.ocr_engine.extract_from_image(fpath_str)
+
+                    # 检查文件名或内容是否包含结算单关键字
+                    has_settlement = any(
+                        kw in (ocr.raw_text or "") or kw in fname
+                        for kw in _SETTLEMENT
+                    )
+                    if not has_settlement:
+                        skipped += 1
+                        continue
+
+                    if ocr.settlement_price is None:
+                        skipped += 1
+                        continue
+
+                    # ---- 提取 user_id（电厂编号） ----
+                    user_id = ocr.user_id
+                    if not user_id:
+                        user_id = ocr._extract_user_id_from_filename(fname)
+                    if not user_id:
+                        # 从文件所在目录名匹配已知用户
+                        dir_name = str(Path(fpath).parent)
+                        for uid, pname in known_users.items():
+                            if (pname and pname in dir_name) or uid in dir_name:
+                                user_id = uid
+                                break
+                    if not user_id:
+                        skipped += 1
+                        continue
+
+                    # ---- 匹配已知用户 ----
+                    if user_id not in known_users:
+                        matched = Pipeline._match_user_id(
+                            user_id, list(known_users.keys())
+                        )
+                        if matched:
+                            user_id = matched
+                        else:
+                            skipped += 1
+                            continue
+
+                    # ---- 提取月份（文件月份 + 1） ----
+                    reading_month = ocr.reading_month
+                    if not reading_month:
+                        # 从文件名提取 yyyy-mm
+                        m = re.search(r'(\d{4})[-_]?(\d{2})', fname)
+                        if m:
+                            y, mo = int(m.group(1)), int(m.group(2))
+                            if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                                reading_month = f"{y}-{str(mo).zfill(2)}"
+                        if not reading_month:
+                            m = re.search(r'(\d{4})[-_]?(\d{2})', str(Path(fpath).parent))
+                            if m:
+                                y, mo = int(m.group(1)), int(m.group(2))
+                                if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                                    reading_month = f"{y}-{str(mo).zfill(2)}"
+                    if not reading_month:
+                        skipped += 1
+                        continue
+
+                    # 月份+1：文件月份 → 购电月份
+                    y, m = reading_month.split("-")
+                    m_int = int(m) + 1
+                    if m_int > 12:
+                        m_int = 1
+                        y = str(int(y) + 1)
+                    reading_month = f"{y}-{str(m_int).zfill(2)}"
+
+                    # ---- 增量模式：跳过已有 ----
+                    if not clear_first:
+                        with db.connection() as conn:
+                            existing = conn.execute(
+                                "SELECT grid_average_price FROM price_records "
+                                "WHERE user_id = ? AND reading_month = ?",
+                                (user_id, reading_month),
+                            ).fetchone()
+                            if existing and existing["grid_average_price"] is not None:
+                                skipped += 1
+                                continue
+
+                    # ---- 存入数据库 ----
+                    db.upsert_price(
+                        user_id=user_id,
+                        reading_month=reading_month,
+                        grid_average_price=ocr.settlement_price,
+                        source_file=fname,
+                    )
+                    total_processed += 1
+                    if total_processed <= 5 or total_processed % 20 == 0:
+                        _log(f"  已提取 [{total_processed}] {fname} → "
+                             f"用户={user_id}, 月={reading_month}, "
+                             f"结算价={ocr.settlement_price:.8f}")
+
+                except Exception as e:
+                    log.error("结算单处理失败 [%s]: %s", fname, e)
+                    skipped += 1
+
+            _log(f"[电费结算单] {mode_label}提取完成！"
+                 f"处理 {total_processed} 条，跳过 {skipped} 条"
+                 f"（共扫描 {scanned} 个文件）")
+            status["result"] = {
+                "processed": total_processed,
+                "skipped": skipped,
+                "files_scanned": scanned,
+            }
+            status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        except Exception as e:
+            log.error("电费结算单提取失败: %s", e, exc_info=True)
+            _log(f"错误: {e}")
+            status["result"] = {"error": str(e)}
+
+    def _start_settlement_update(clear_first: bool):
+        """启动电费结算单提取后台任务。"""
+        lock = app.config["BILL_REFRESH_LOCK"]
+        status = app.config["BILL_REFRESH_STATUS"]
+
+        if not lock.acquire(blocking=False):
+            return jsonify({"error": "任务正在执行中"}), 409
+
+        mode = "全量" if clear_first else "增量"
+        status["running"] = True
+        status["progress"] = f"正在启动电费结算单{mode}提取…"
+        status["result"] = None
+        status["logs"] = []
+        status["started_at"] = datetime.now().strftime("%H:%M:%S")
+
+        def _worker():
+            try:
+                _do_settlement_update(clear_first)
+            finally:
+                status["running"] = False
+                lock.release()
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        return jsonify({"success": True, "message": f"电费结算单{mode}提取已启动"})
+
+    @app.route("/api/bills/settlement/incremental", methods=["POST"])
+    def bill_settlement_incremental():
+        """电费结算单增量提取。"""
+        return _start_settlement_update(clear_first=False)
+
+    @app.route("/api/bills/settlement/full", methods=["POST"])
+    def bill_settlement_full():
+        """电费结算单全量提取。"""
+        return _start_settlement_update(clear_first=True)
+
     # ---- 账单更新状态轮询 API ----
     @app.route("/api/bill-refresh-status")
     def bill_refresh_status_api():

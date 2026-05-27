@@ -6,20 +6,100 @@
   - 反向数据（上网电量）：上月表数/本月表数/电表用量/倍率/上网电量
   - 自发用电量/金额：实际用电数/原电价/优惠后电价/金额
   - 每用户一个表格，按尖峰/峰/平/谷/合计分行
+  - 电费结算单图片（如有）附加在表格下方
 """
 
 import io
 import logging
+import os
 import re
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict
+from pathlib import Path
 
 from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XlImage
 from openpyxl.styles import (
     Alignment, Border, Font, PatternFill, Side,
 )
 from openpyxl.utils import get_column_letter
+from PIL import Image as PilImage
 
 log = logging.getLogger(__name__)
+
+_TEMP_ATTACHMENTS = Path("output/temp_attachments")
+
+_SETTLEMENT_KEYWORDS = ["电费结算单"]
+
+
+def _find_settlement_images(source_file: str, user_id: str,
+                            project_name: str) -> list[str]:
+    """从 source_file 所在目录中查找电费结算单图片。
+
+    策略：
+    1. 若目录名包含 project_name → 目录是项目专用，返回目录中所有结算单图片
+    2. 否则按文件名匹配 user_id → project_name → 无匹配时返回空
+
+    Args:
+        source_file: 数据源文件路径（相对 temp_attachments）
+        user_id: 用户编号
+        project_name: 项目名
+
+    Returns:
+        匹配的图片完整路径列表
+    """
+    if not source_file:
+        return []
+
+    dir_path = _TEMP_ATTACHMENTS / os.path.dirname(source_file)
+    if not dir_path.is_dir():
+        return []
+
+    image_exts = {".jpg", ".jpeg", ".png"}
+    candidates = []
+    try:
+        for f in os.listdir(str(dir_path)):
+            ext = os.path.splitext(f.lower())[1]
+            if ext not in image_exts:
+                continue
+            if not any(kw in f for kw in _SETTLEMENT_KEYWORDS):
+                continue
+            candidates.append(f)
+    except OSError:
+        return []
+
+    if not candidates:
+        return []
+
+    # 若目录名中包含项目名或用户编号 → 此目录为项目专用，返回所有候选
+    if project_name and project_name in str(dir_path):
+        return [str(dir_path / f) for f in candidates]
+    if user_id and user_id in str(dir_path):
+        return [str(dir_path / f) for f in candidates]
+
+    # 多用户共享目录：按文件名精确匹配
+    def match_score(fname: str) -> int:
+        s = 0
+        if user_id and user_id in fname:
+            s += 100
+        if project_name and project_name in fname:
+            s += 90
+        if project_name:
+            # 项目名的 CJK 首部出现在文件名开头（如"完美"匹配"完美印刷"）
+            cjk_chars = re.findall(r'[\u4e00-\u9fff]', project_name)
+            for end in range(2, len(cjk_chars) + 1):
+                prefix = "".join(cjk_chars[:end])
+                if fname.startswith(prefix):
+                    s = max(s, 60)
+                    break
+        return s
+
+    scored = [(match_score(f), f) for f in candidates]
+    scored.sort(key=lambda x: -x[0])
+
+    best = scored[0][0] if scored else 0
+    if best == 0:
+        return []
+    return [str(dir_path / f) for _, f in scored if _ == best]
 
 # ---------- 样式常量 ----------
 
@@ -247,7 +327,7 @@ def _build_month_sheet(wb: Workbook, month_key: str,
 
 
 def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
-    """写入单个用户的发电统计表。"""
+    """写入单个用户的发电统计表，下方附加电费结算单图片。"""
     display_key = _prev_month_key(month_key)
     year, mon = display_key.split("-")
     gen = udata.get("gen")
@@ -260,11 +340,12 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
 
     gen_mult = gen["multiplier"] if gen else 1.0
     grid_mult = grid["multiplier"] if grid else 1.0
-    pricing_mode = (gen.get("pricing_mode") or "discount") if gen else "discount"
+    pricing_src = gen or grid
+    pricing_mode = (pricing_src.get("pricing_mode") or "discount") if pricing_src else "discount"
     if pricing_mode == "discount":
-        pricing_param = gen.get("pricing_param") or gen.get("discount") or 1.0
+        pricing_param = pricing_src.get("pricing_param") or pricing_src.get("discount") or 1.0
     else:
-        pricing_param = gen.get("pricing_param") if gen and gen.get("pricing_param") is not None else 0
+        pricing_param = pricing_src.get("pricing_param") if pricing_src and pricing_src.get("pricing_param") is not None else 0
     pname = project_name or (gen or grid).get("project_name") or ""
     uid = udata["user_id"]
 
@@ -412,6 +493,8 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
         grid_avg_price = grid.get("grid_average_price") if grid else None
         if grid_avg_price is None:
             grid_avg_price = grid.get("average_price") if grid else None
+        if grid_avg_price is not None:
+            grid_tier_price = grid_avg_price  # 电费结算单均价覆盖分时原电价
         grid_pricing_mode = grid.get("pricing_mode") if grid else None
         grid_pricing_param = grid.get("pricing_param") if grid else None
         if grid_pricing_mode == "average":
@@ -502,3 +585,68 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
     _apply_cell(ws.cell(row=row, column=16), None, _total_font, _total_fill, _right)
     _apply_cell(ws.cell(row=row, column=17), None, _total_font, _total_fill, _right)
     _apply_cell(ws.cell(row=row, column=18), grid_revenue_total, _total_font, _total_fill, _right, "#,##0.00")
+
+    # ---- 电费结算单源文件 ----
+    source_file = (gen or grid or {}).get("source_file")
+    price_source = (gen or grid or {}).get("price_source")
+    all_source_files = set()
+
+    if source_file:
+        dir_path = _TEMP_ATTACHMENTS / os.path.dirname(source_file)
+
+        # 从目录扫描结算单图片
+        for img_path in _find_settlement_images(source_file, uid, pname):
+            all_source_files.add(img_path)
+
+        # 从 price_records.source_file 查找单价提取源文件
+        if price_source:
+            p_path = str(dir_path / price_source)
+            if os.path.isfile(p_path):
+                all_source_files.add(p_path)
+
+    if not all_source_files:
+        return
+
+    row += 1
+    IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+    for src_path in sorted(all_source_files):
+        if not os.path.isfile(src_path):
+            log.warning("源文件不存在: %s", src_path)
+            continue
+
+        fname = os.path.basename(src_path)
+        ext = os.path.splitext(fname)[1].lower()
+
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=total_cols)
+        label_cell = ws.cell(row=row, column=1,
+                             value=f"电费结算单: {fname}")
+        label_cell.font = Font(name="微软雅黑", size=10, bold=True, color="333333")
+        label_cell.alignment = Alignment(horizontal="left", vertical="center")
+
+        row += 1
+
+        if ext in IMAGE_EXTS:
+            try:
+                pil_img = PilImage.open(src_path)
+                orig_w, orig_h = pil_img.size
+                pil_img.close()
+
+                target_w_px = 800
+                scale = target_w_px / orig_w if orig_w > 0 else 1.0
+                target_h_pt = orig_h * scale * 0.75
+
+                ws.row_dimensions[row].height = target_h_pt
+                xl_img = XlImage(src_path)
+                xl_img.width = target_w_px
+                xl_img.height = orig_h * scale
+                xl_img.anchor = f"A{row}"
+                ws.add_image(xl_img)
+            except Exception as e:
+                log.error("插入图片失败 [%s]: %s", src_path, e)
+                ws.cell(row=row, column=1, value=f"（图片加载失败: {fname}）")
+        else:
+            ws.cell(row=row, column=1,
+                    value=f"（文件格式不支持嵌入: {fname}，请查看原始附件目录）")
+            ws.cell(row=row, column=1).font = Font(name="微软雅黑", size=9, color="999999")
+
+        row += 1

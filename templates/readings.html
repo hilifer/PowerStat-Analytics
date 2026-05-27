@@ -41,6 +41,14 @@
         <button type="button" class="btn btn-danger btn-sm update-btn"
                 onclick="startDataUpdate('full','prices')">全量提取</button>
     </div>
+    <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
+                background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
+        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">电费结算单</span>
+        <button type="button" class="btn btn-primary btn-sm update-btn"
+                onclick="startDataUpdate('incremental','settlement')">增量提取</button>
+        <button type="button" class="btn btn-danger btn-sm update-btn"
+                onclick="startDataUpdate('full','settlement')">全量提取</button>
+    </div>
 </div>
 
 <!-- 更新进度面板 -->
@@ -327,6 +335,28 @@
                 </div>
             </div>
 
+            {# ---- 电费结算单 ---- #}
+            <div class="price-section">
+                <div class="section-label" style="display:flex; align-items:center; justify-content:space-between;">
+                    <span>电费结算单</span>
+                    <div style="display:flex; gap:0.5rem; align-items:center;">
+                        {% if first_r and first_r.price_source %}
+                        <span class="price-source-tag" data-source-file="{{ first_r.price_source }}" onclick="showSourcePreview(this.dataset.sourceFile)" title="点击查看来源文件">
+                            &#128065; {{ first_r.price_source|truncate(25) }}
+                        </span>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="price-grid" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
+                    <div class="price-item" style="min-width:200px;">
+                        <label>上网电价</label>
+                        <input type="number" step="0.00000001" class="cell-input price-input" name="grid_average_price"
+                            value="{{ '%.8f'|format(first_r.grid_average_price) if first_r and first_r.grid_average_price is not none else '' }}"
+                            {% if price_locked or any_locked %}disabled{% endif %}>
+                    </div>
+                </div>
+            </div>
+
             {# ---- 数据来源区 ---- #}
             <details class="source-section">
                 <summary class="section-label" style="cursor:pointer; user-select:none; display:flex; align-items:center; gap:0.5rem;">
@@ -567,6 +597,7 @@
                         {% set grid_price_field = "grid_" ~ price_field %}
                         {% set grid_tier_price = grid[grid_price_field] if grid and grid[grid_price_field] is not none else grid[price_field] if grid and grid[price_field] is not none else none %}
                         {% set grid_avg_price = grid.grid_average_price if grid and grid.grid_average_price is not none else grid.average_price if grid and grid.average_price is not none else none %}
+                        {% if grid_avg_price is not none %}{% set grid_tier_price = grid_avg_price %}{% endif %}
                         {% if grid and grid.pricing_mode == "average" %}
                             {% set grid_price = grid_avg_price %}
                         {% elif grid and grid.pricing_mode == "fixed_price" %}
@@ -1652,7 +1683,7 @@ document.addEventListener('keydown', function(e) {
 
 
 /* === 数据提取更新 === */
-var taskLabels = { readings: '抄表日期', prices: '单价提取', all: '全部' };
+var taskLabels = { readings: '抄表日期', prices: '单价提取', settlement: '电费结算单', all: '全部' };
 
 function startDataUpdate(mode, taskType) {
     var label = taskLabels[taskType] || taskType;
@@ -1668,6 +1699,8 @@ function startDataUpdate(mode, taskType) {
         'full_readings':        '/api/bills/readings/full',
         'incremental_prices':   '/api/bills/prices/incremental',
         'full_prices':          '/api/bills/prices/full',
+        'incremental_settlement': '/api/bills/settlement/incremental',
+        'full_settlement':        '/api/bills/settlement/full',
     };
     var url = urlMap[mode + '_' + taskType];
     if (!url) return;
