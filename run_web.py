@@ -7,8 +7,12 @@
     python run_web.py --host 127.0.0.1   # 仅本地访问
 """
 
-import sys
+import os, sys
 from pathlib import Path
+
+# 确保 tesseract/pdftoppm 可用
+os.environ["TESSERACT_CMD"] = "/usr/bin/tesseract"
+os.environ["PATH"] = "/usr/bin:" + os.environ.get("PATH", "")
 
 sys.path.insert(0, str(Path(__file__).parent))
 

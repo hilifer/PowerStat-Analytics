@@ -887,7 +887,7 @@ def _register_routes(app: Flask, db: Database):
                     except Exception as e:
                         log.error("加载文件失败 %s: %s", fname, e)
 
-                _log(f"[抄表] 多轮扫描提取（{len(all_sheets)} 个 sheet）…")
+                _log(f"[抄表] 多轮提取（{len(all_sheets)} 个 sheet）…")
                 extractor = MultiPassExtractor()
                 extractor.load_dataframes(all_sheets)
                 all_records = extractor.extract_all()
@@ -940,12 +940,17 @@ def _register_routes(app: Flask, db: Database):
 
             # ---- 步骤 5：提取单价数据（图片 OCR） ----
             if task_type in ("prices", "all"):
+                price_keyword = config.get("price_extraction", "filename_keyword", default="")
                 all_ocr = []
                 _log(f"[单价] 开始从 {len(source_files)} 个文件中识别图片…")
+                skipped_by_filter = 0
                 for i, (fpath, sinfo) in enumerate(source_files, 1):
                     fname = Path(fpath).name
                     file_type = dispatcher.detect_type(fpath)
                     if file_type != "image":
+                        continue
+                    if price_keyword and price_keyword not in fname:
+                        skipped_by_filter += 1
                         continue
                     ocr_count += 1
                     if ocr_count <= 3 or ocr_count % 10 == 0:
@@ -965,7 +970,8 @@ def _register_routes(app: Flask, db: Database):
                     except Exception as e:
                         log.error("OCR 失败 %s: %s", fname, e)
 
-                _log(f"[单价] OCR 识别 {ocr_count} 张图片，有效 {len(all_ocr)} 条，写入数据库…")
+                filter_suffix = f"（关键词过滤跳过 {skipped_by_filter} 张）" if skipped_by_filter else ""
+                _log(f"[单价] OCR 识别 {ocr_count} 张图片，有效 {len(all_ocr)} 条，写入数据库…{filter_suffix}")
                 # 获取已知 user_id 用于修正 OCR 提取结果
                 known_user_ids = set()
                 try:
@@ -1095,23 +1101,22 @@ def _register_routes(app: Flask, db: Database):
         _log(f"[电费结算单] {mode_label}提取开始…")
 
         try:
-            from src.email_fetcher.fetcher import EmailFetcher
-            from src.pipeline import SmartDispatcher, Pipeline
+            from src.pipeline import Pipeline
             import re, os
-            from pathlib import Path
 
-            dispatcher = SmartDispatcher()
-
-            # 获取所有已知 user_id
+            # 获取所有已知 user_id（同时索引 meter_number → user_id）
             known_users = {}
+            meter_to_user = {}
             for m in db.get_meters():
                 uid = m.get("user_id")
                 pname = m.get("project_name")
+                mnum = m.get("meter_number")
                 if uid:
                     known_users[uid] = pname or ""
+                if mnum:
+                    meter_to_user[mnum] = {"user_id": uid, "project_name": pname or ""}
 
             IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
-            _SETTLEMENT = ["电费结算单", "电量结算单", "结算单"]
 
             # ---- 步骤 1：全量模式清空 ----
             total_processed = 0
@@ -1121,63 +1126,29 @@ def _register_routes(app: Flask, db: Database):
             if clear_first:
                 with db.connection() as conn:
                     n = conn.execute(
-                        "UPDATE price_records SET grid_average_price = NULL, source_file = NULL "
+                        "UPDATE price_records SET "
+                        "grid_sharp_peak_price = NULL, grid_peak_price = NULL, "
+                        "grid_flat_price = NULL, grid_valley_price = NULL, "
+                        "grid_average_price = NULL, settlement_source_file = NULL "
                         "WHERE grid_average_price IS NOT NULL"
                     ).rowcount
                     _log(f"已清空 {n} 条上网电价记录")
 
-            # ---- 步骤 2：下载新邮件附件（增量模式用） ----
-            new_attachment_files = []
-            try:
-                with EmailFetcher() as fetcher:
-                    attachments = fetcher.fetch_attachments()
-                _log(f"邮箱中共 {len(attachments)} 个附件")
-
-                for i, att in enumerate(attachments, 1):
-                    date_str = att.email_date.strftime("%Y-%m-%d %H:%M") if att.email_date else ""
-                    fp = _email_fingerprint(att.email_subject, att.email_sender, date_str, att.filename)
-
-                    if _is_already_processed(db, fp):
-                        continue
-
-                    _log(f"  新附件 [{i}] {att.filename}")
-                    new_attachment_files.append(att.filepath)
-                    _mark_processed(db, fp, att.filename, att.email_subject, date_str)
-
-            except Exception as e:
-                _log(f"邮箱连接失败（继续处理已有文件）: {e}")
-
-            if new_attachment_files:
-                _log(f"已下载 {len(new_attachment_files)} 个新附件")
-            else:
-                _log("没有新邮件附件")
-
-            # ---- 步骤 3：确定要处理的文件 ----
+            # ---- 步骤 2：扫描已有文件（不下邮件） ----
             source_files = []
             temp_dir = Path(config.get("attachments", "temp_dir",
                                        default="output/temp_attachments"))
 
-            if clear_first:
-                # 全量：扫描所有已有文件
-                if temp_dir.exists():
-                    for fpath in sorted(temp_dir.rglob("*")):
-                        if not fpath.is_file() or fpath.name.startswith("~$"):
-                            continue
-                        ext = fpath.suffix.lower()
-                        if ext != ".pdf" and ext not in IMAGE_EXTS:
-                            continue
-                        source_files.append((str(fpath), fpath.name))
-            else:
-                # 增量：只处理新下载的附件
-                for fp in new_attachment_files:
-                    fpath = Path(fp)
-                    if fpath.exists():
-                        ext = fpath.suffix.lower()
-                        if ext != ".pdf" and ext not in IMAGE_EXTS:
-                            continue
-                        source_files.append((str(fpath), fpath.name))
+            if temp_dir.exists():
+                for fpath in sorted(temp_dir.rglob("*")):
+                    if not fpath.is_file() or fpath.name.startswith("~$"):
+                        continue
+                    ext = fpath.suffix.lower()
+                    if ext != ".pdf" and ext not in IMAGE_EXTS:
+                        continue
+                    source_files.append((str(fpath), fpath.name))
 
-            _log(f"共 {len(source_files)} 个文件待处理，开始扫描…")
+            _log(f"共 {len(source_files)} 个文件，开始扫描…")
 
             if not source_files:
                 _log("没有文件可处理，完成")
@@ -1185,108 +1156,118 @@ def _register_routes(app: Flask, db: Database):
                 status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 return
 
-            # ---- 步骤 4：提取结算单数据 ----
+            # ---- 第1阶段：文件名过滤（批量，秒级） ----
+            _log("第1阶段：文件名过滤中...")
+            matched_files = []
             for fpath, fname in source_files:
-                fpath_str = str(fpath)
                 scanned += 1
+                if "电费结算单" in fname or ("结算单" in fname and "电量" not in fname):
+                    matched_files.append((str(fpath), fname))
+            _log(f"第1阶段完成：扫描 {scanned} 个文件 → 匹配 {len(matched_files)} 个结算单")
+
+            # 第1.5阶段：内容去重（MD5）
+            import hashlib
+            seen_hashes = set()
+            deduped = []
+            for fpath, fname in matched_files:
                 try:
-                    # 提取文本
+                    with open(fpath, "rb") as f:
+                        h = hashlib.md5(f.read()).hexdigest()
+                except Exception:
+                    continue
+                if h in seen_hashes:
+                    continue
+                seen_hashes.add(h)
+                deduped.append((fpath, fname))
+            dedup_count = len(matched_files) - len(deduped)
+            matched_files = deduped
+            if dedup_count > 0:
+                _log(f"第1.5阶段（内容去重）：去除 {dedup_count} 个重复文件，剩余 {len(matched_files)} 个")
+
+            if not matched_files:
+                _log("没有匹配的结算单文件，完成")
+                status["result"] = {"processed": 0, "skipped": len(source_files), "files_scanned": len(source_files)}
+                status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                return
+
+            # ---- 第2阶段：逐文件OCR提取 ----
+            total_matched = len(matched_files)
+            for idx, (fpath_str, fname) in enumerate(matched_files):
+                scanned += 1
+                _log(f"[{idx+1}/{total_matched}] OCR提取: {fname}")
+                try:
+                    from train_extract_settlement import process_single_image, process_pdf
+                    import pytesseract
+                    pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
                     ext = os.path.splitext(fname)[1].lower()
                     if ext == ".pdf":
-                        ocr = dispatcher.ocr_engine.extract_from_pdf(fpath_str)
+                        records = process_pdf(fpath_str, fname)
                     else:
-                        ocr = dispatcher.ocr_engine.extract_from_image(fpath_str)
-
-                    # 检查文件名或内容是否包含结算单关键字
-                    has_settlement = any(
-                        kw in (ocr.raw_text or "") or kw in fname
-                        for kw in _SETTLEMENT
-                    )
-                    if not has_settlement:
+                        records = process_single_image(fpath_str, fname)
+                    if not records:
+                        _log(f"  ✗ OCR提取失败")
                         skipped += 1
                         continue
 
-                    if ocr.settlement_price is None:
-                        skipped += 1
-                        continue
+                    file_records = 0
+                    for rec in records:
+                        meter_id = rec["meter_id"]
+                        bill_month = rec["month"]
+                        settlement_price = rec["price"]
 
-                    # ---- 提取 user_id（电厂编号） ----
-                    user_id = ocr.user_id
-                    if not user_id:
-                        user_id = ocr._extract_user_id_from_filename(fname)
-                    if not user_id:
-                        # 从文件所在目录名匹配已知用户
-                        dir_name = str(Path(fpath).parent)
-                        for uid, pname in known_users.items():
-                            if (pname and pname in dir_name) or uid in dir_name:
-                                user_id = uid
-                                break
-                    if not user_id:
-                        skipped += 1
-                        continue
+                        # 匹配已知 user_id
+                        user_id = meter_id
+                        if user_id not in known_users:
+                            # 先试 meter_number → user_id 映射
+                            if meter_id in meter_to_user:
+                                mapped = meter_to_user[meter_id]
+                                user_id = mapped["user_id"]
+                            else:
+                                matched = Pipeline._match_user_id(
+                                    user_id, list(known_users.keys())
+                                )
+                                if matched:
+                                    user_id = matched
 
-                    # ---- 匹配已知用户 ----
-                    if user_id not in known_users:
-                        matched = Pipeline._match_user_id(
-                            user_id, list(known_users.keys())
+                        # 月份+1：文件月份 → 抄表月份
+                        y, m = bill_month.split("-")
+                        m_int = int(m) + 1
+                        if m_int > 12:
+                            m_int = 1
+                            y = str(int(y) + 1)
+                        reading_month = f"{y}-{str(m_int).zfill(2)}"
+
+                        # ---- 增量模式：跳过已有 ----
+                        if not clear_first:
+                            with db.connection() as conn:
+                                existing = conn.execute(
+                                    "SELECT grid_average_price FROM price_records "
+                                    "WHERE user_id = ? AND reading_month = ?",
+                                    (user_id, reading_month),
+                                ).fetchone()
+                                if existing and existing["grid_average_price"] is not None:
+                                    skipped += 1
+                                    continue
+
+                        # ---- 存入数据库 ----
+                        db.upsert_price(
+                            user_id=user_id,
+                            reading_month=reading_month,
+                            grid_sharp_peak_price=settlement_price,
+                            grid_peak_price=settlement_price,
+                            grid_flat_price=settlement_price,
+                            grid_valley_price=settlement_price,
+                            grid_average_price=settlement_price,
+                            settlement_source_file=fpath_str,
                         )
-                        if matched:
-                            user_id = matched
-                        else:
-                            skipped += 1
-                            continue
+                        total_processed += 1
+                        file_records += 1
+                        _log(f"  ✓ [{file_records}] {fname} → "
+                             f"用户={user_id}, 月份={bill_month}→{reading_month}, "
+                             f"电价={settlement_price:.8f}")
 
-                    # ---- 提取月份（文件月份 + 1） ----
-                    reading_month = ocr.reading_month
-                    if not reading_month:
-                        # 从文件名提取 yyyy-mm
-                        m = re.search(r'(\d{4})[-_]?(\d{2})', fname)
-                        if m:
-                            y, mo = int(m.group(1)), int(m.group(2))
-                            if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                                reading_month = f"{y}-{str(mo).zfill(2)}"
-                        if not reading_month:
-                            m = re.search(r'(\d{4})[-_]?(\d{2})', str(Path(fpath).parent))
-                            if m:
-                                y, mo = int(m.group(1)), int(m.group(2))
-                                if 2015 <= y <= 2035 and 1 <= mo <= 12:
-                                    reading_month = f"{y}-{str(mo).zfill(2)}"
-                    if not reading_month:
+                    if file_records == 0:
                         skipped += 1
-                        continue
-
-                    # 月份+1：文件月份 → 购电月份
-                    y, m = reading_month.split("-")
-                    m_int = int(m) + 1
-                    if m_int > 12:
-                        m_int = 1
-                        y = str(int(y) + 1)
-                    reading_month = f"{y}-{str(m_int).zfill(2)}"
-
-                    # ---- 增量模式：跳过已有 ----
-                    if not clear_first:
-                        with db.connection() as conn:
-                            existing = conn.execute(
-                                "SELECT grid_average_price FROM price_records "
-                                "WHERE user_id = ? AND reading_month = ?",
-                                (user_id, reading_month),
-                            ).fetchone()
-                            if existing and existing["grid_average_price"] is not None:
-                                skipped += 1
-                                continue
-
-                    # ---- 存入数据库 ----
-                    db.upsert_price(
-                        user_id=user_id,
-                        reading_month=reading_month,
-                        grid_average_price=ocr.settlement_price,
-                        source_file=fname,
-                    )
-                    total_processed += 1
-                    if total_processed <= 5 or total_processed % 20 == 0:
-                        _log(f"  已提取 [{total_processed}] {fname} → "
-                             f"用户={user_id}, 月={reading_month}, "
-                             f"结算价={ocr.settlement_price:.8f}")
 
                 except Exception as e:
                     log.error("结算单处理失败 [%s]: %s", fname, e)
@@ -1332,6 +1313,227 @@ def _register_routes(app: Flask, db: Database):
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
         return jsonify({"success": True, "message": f"电费结算单{mode}提取已启动"})
+
+    @app.route("/api/bills/settlement/candidates", methods=["POST"])
+    def settlement_candidates():
+        """扫描附件目录，按文件名筛选出结算单候选文件列表（不做 OCR 加速响应）。"""
+        try:
+            import re
+            from pathlib import Path
+            data = request.get_json(silent=True) or {}
+            filter_user_id = data.get("user_id", "")
+            filter_month = data.get("reading_month", "")
+
+            temp_dir = Path(config.get("attachments", "temp_dir",
+                                       default="output/temp_attachments"))
+            IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
+            candidates = []
+            for fpath in sorted(temp_dir.rglob("*")) if temp_dir.exists() else []:
+                if not fpath.is_file() or fpath.name.startswith("~$"):
+                    continue
+                ext = fpath.suffix.lower()
+                if ext != ".pdf" and ext not in IMAGE_EXTS:
+                    continue
+                fname = fpath.name
+                if not any(kw in fname for kw in ("结算单", "核算单", "电费单")):
+                    continue
+                # 从文件名/目录推断 user_id 和月份作为预览信息
+                user_id = ""
+                m = re.search(r'(\d{8,16})', fname)
+                if m:
+                    user_id = m.group(1)
+                if not user_id:
+                    m = re.search(r'(\d{8,16})', str(fpath.parent))
+                    if m:
+                        user_id = m.group(1)
+                reading_month = ""
+                m = re.search(r'(\d{4})[-_]?(\d{2})', fname)
+                if m:
+                    y, mo = int(m.group(1)), int(m.group(2))
+                    if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                        reading_month = f"{y}-{str(mo).zfill(2)}"
+                if not reading_month:
+                    m = re.search(r'(\d{4})[-_]?(\d{2})', str(fpath.parent))
+                    if m:
+                        y, mo = int(m.group(1)), int(m.group(2))
+                        if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                            reading_month = f"{y}-{str(mo).zfill(2)}"
+                if filter_user_id and user_id != filter_user_id:
+                    continue
+                if filter_month:
+                    if reading_month:
+                        parts = reading_month.split("-")
+                        m_int = int(parts[1]) + 1
+                        y = parts[0]
+                        if m_int > 12:
+                            m_int = 1
+                            y = str(int(y) + 1)
+                        cal_month = f"{y}-{str(m_int).zfill(2)}"
+                        if cal_month != filter_month:
+                            continue
+                    else:
+                        continue
+                candidates.append({
+                    "filepath": str(fpath),
+                    "filename": fname,
+                    "user_id": user_id or "",
+                    "reading_month": reading_month or "",
+                    "settlement_price": None,
+                })
+
+            return jsonify({"candidates": candidates, "total": len(candidates)})
+        except Exception as e:
+            log.error("获取结算单候选文件失败: %s", e, exc_info=True)
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/bills/settlement/extract-selected", methods=["POST"])
+    def settlement_extract_selected():
+        """对用户选中的文件执行结算单提取并保存。"""
+        data = request.get_json(silent=True)
+        if not data or "files" not in data:
+            return jsonify({"error": "未选择文件"}), 400
+
+        selected = data["files"]
+        target_user_id = data.get("user_id", "")
+        target_month = data.get("reading_month", "")
+        clear_first = data.get("clear_first", False)
+        results = {"processed": 0, "failed": 0, "skipped": 0, "detail": ""}
+
+        if clear_first:
+            with db.connection() as conn:
+                if target_user_id and target_month:
+                    conn.execute(
+                        "UPDATE price_records SET "
+                        "grid_sharp_peak_price = NULL, grid_peak_price = NULL, "
+                        "grid_flat_price = NULL, grid_valley_price = NULL, "
+                        "grid_average_price = NULL, settlement_source_file = NULL "
+                        "WHERE user_id = ? AND reading_month = ?",
+                        (target_user_id, target_month),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE price_records SET "
+                        "grid_sharp_peak_price = NULL, grid_peak_price = NULL, "
+                        "grid_flat_price = NULL, grid_valley_price = NULL, "
+                        "grid_average_price = NULL, settlement_source_file = NULL "
+                        "WHERE grid_average_price IS NOT NULL"
+                    )
+        try:
+            import os
+            os.environ["PATH"] = "/usr/bin:" + os.environ.get("PATH", "")
+            from src.pipeline import Pipeline
+
+            known_users = {}
+            for m in db.get_meters():
+                uid = m.get("user_id")
+                pname = m.get("project_name")
+                if uid:
+                    known_users[uid] = pname or ""
+
+            from train_extract_settlement import process_single_image, process_pdf
+            import pytesseract
+            pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+
+            for fpath_str in selected:
+                fpath = Path(fpath_str)
+                if not fpath.exists():
+                    results["failed"] += 1
+                    continue
+                fname = fpath.name
+                ext = fpath.suffix.lower()
+                try:
+                    if ext == ".pdf":
+                        records = process_pdf(str(fpath), fname)
+                    else:
+                        records = process_single_image(str(fpath), fname)
+                except Exception:
+                    results["failed"] += 1
+                    continue
+
+                if not records:
+                    results["skipped"] += 1
+                    continue
+
+                file_ok = False
+                for rec in records:
+                    meter_id = rec["meter_id"]
+                    bill_month = rec["month"]
+                    settlement_price = rec["price"]
+
+                    user_id = meter_id
+                    if not user_id:
+                        dir_name = str(fpath.parent)
+                        for uid, pname in known_users.items():
+                            if (pname and pname in dir_name) or uid in dir_name:
+                                user_id = uid
+                                break
+                    if not user_id:
+                        continue
+
+                    if target_user_id and user_id != target_user_id:
+                        if user_id in known_users:
+                            matched = Pipeline._match_user_id(
+                                user_id, [target_user_id]
+                            )
+                            if not matched:
+                                continue
+                        else:
+                            continue
+                    if user_id not in known_users:
+                        matched = Pipeline._match_user_id(
+                            user_id, list(known_users.keys())
+                        )
+                        if matched:
+                            user_id = matched
+                        else:
+                            continue
+
+                    reading_month = bill_month
+                    if not reading_month:
+                        m = re.search(r'(\d{4})[-_]?(\d{2})', fname)
+                        if m:
+                            y, mo = int(m.group(1)), int(m.group(2))
+                            if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                                reading_month = f"{y}-{str(mo).zfill(2)}"
+                        if not reading_month:
+                            m = re.search(r'(\d{4})[-_]?(\d{2})', str(fpath.parent))
+                            if m:
+                                y, mo = int(m.group(1)), int(m.group(2))
+                                if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                                    reading_month = f"{y}-{str(mo).zfill(2)}"
+                    if not reading_month:
+                        continue
+
+                    y, m = reading_month.split("-")
+                    m_int = int(m) + 1
+                    if m_int > 12:
+                        m_int = 1
+                        y = str(int(y) + 1)
+                    reading_month = f"{y}-{str(m_int).zfill(2)}"
+
+                    if target_month and reading_month != target_month:
+                        continue
+
+                    db.upsert_price(
+                        user_id=user_id,
+                        reading_month=reading_month,
+                        grid_sharp_peak_price=settlement_price,
+                        grid_peak_price=settlement_price,
+                        grid_flat_price=settlement_price,
+                        grid_valley_price=settlement_price,
+                        grid_average_price=settlement_price,
+                        settlement_source_file=fname,
+                    )
+                    results["processed"] += 1
+                    file_ok = True
+
+                if not file_ok:
+                    results["skipped"] += 1
+
+            return jsonify(results)
+        except Exception as e:
+            log.error("结算单提取失败: %s", e, exc_info=True)
+            return jsonify({"error": str(e)}), 500
 
     @app.route("/api/bills/settlement/incremental", methods=["POST"])
     def bill_settlement_incremental():
@@ -1598,22 +1800,38 @@ def _register_routes(app: Flask, db: Database):
             log.error("单价锁定失败: %s", e)
             return jsonify({"ok": False, "error": str(e)})
 
+    @app.route("/api/settlement/lock", methods=["POST"])
+    def settlement_lock():
+        """单独锁定/解锁电费结算单数据（独立于单价锁定）。"""
+        data = request.get_json()
+        user_id = data.get("user_id")
+        month = data.get("month")
+        locked = data.get("locked", True)
+        if not user_id or not month:
+            return jsonify({"ok": False, "error": "缺少 user_id 或 month"})
+        try:
+            db.lock_settlement_price(user_id, month, locked)
+            return jsonify({"ok": True})
+        except Exception as e:
+            log.error("结算单锁定失败: %s", e)
+            return jsonify({"ok": False, "error": str(e)})
+
     @app.route("/api/files/images")
     def files_images():
-        """列出所有邮件附件图片，按邮件（目录）分组返回。"""
+        """列出所有附件文件（图片+PDF），按邮件（目录）分组返回，支持 q 参数关键词过滤。"""
         keyword = request.args.get("q", "")
         temp_dir = Path(config.get("attachments", "temp_dir",
                                    default="output/temp_attachments"))
         archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
-        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
+        SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp", ".pdf"}
         from collections import OrderedDict
-        groups = OrderedDict()  # group_name -> [images]
+        groups = OrderedDict()
         seen = set()
         for scan_root, prefix in [(temp_dir, "temp"), (archive_root, "archive")]:
             if not scan_root.exists():
                 continue
             for f in sorted(scan_root.rglob("*")):
-                if not f.is_file() or f.suffix.lower() not in IMAGE_EXTS:
+                if not f.is_file() or f.suffix.lower() not in SUPPORTED_EXTS:
                     continue
                 if f.name.startswith("~$"):
                     continue
@@ -1626,31 +1844,40 @@ def _register_routes(app: Flask, db: Database):
                 if key in seen:
                     continue
                 seen.add(key)
-                # 分组：顶层目录名（邮件名称）
+                ext = f.suffix.lower()
+                file_type = "pdf" if ext == ".pdf" else "image"
                 top_dir = rel.parts[0] if len(rel.parts) > 1 else ("其他" if prefix == "temp" else "归档")
                 group_key = f"{prefix}:{top_dir}"
                 if group_key not in groups:
-                    groups[group_key] = {"name": top_dir, "source": prefix, "images": []}
-                groups[group_key]["images"].append({
+                    groups[group_key] = {"name": top_dir, "source": prefix, "files": []}
+                entry = {
                     "filename": f.name,
                     "path": f"{prefix}/{rel}",
                     "dir": str(rel.parent),
-                    "url": url_for("file_image", source=prefix, filepath=str(rel)),
-                })
-        all_images = []
+                    "file_type": file_type,
+                }
+                if file_type == "image":
+                    entry["url"] = url_for("file_image", source=prefix, filepath=str(rel))
+                groups[group_key]["files"].append(entry)
+        all_files = []
         grouped = []
         for gk, gv in groups.items():
             grouped.append(gv)
-            all_images.extend(gv["images"])
-        return jsonify({"images": all_images, "groups": grouped, "total": len(all_images)})
+            all_files.extend(gv["files"])
+        return jsonify({"files": all_files, "groups": grouped, "total": len(all_files)})
 
     @app.route("/api/readings/ocr-extract", methods=["POST"])
     def readings_ocr_extract():
-        """手动选择图片重新 OCR 提取单价，用户编号由前端指定（人工确认）。"""
+        """手动选择文件 OCR 提取单价/结算单，用户编号由前端指定（人工确认）。
+
+        target: 'price'（默认）提取尖峰平谷均价，'settlement' 提取上网电价。
+        支持图片和 PDF 文件。
+        """
         data = request.get_json()
         image_path = data.get("image_path", "")  # 格式: temp/xxx 或 archive/xxx
         user_id = data.get("user_id", "")
         month = data.get("month", "")
+        target = data.get("target", "price")
         if not image_path or not user_id or not month:
             return jsonify({"ok": False, "error": "缺少 image_path / user_id / month"})
 
@@ -1669,30 +1896,48 @@ def _register_routes(app: Flask, db: Database):
             archive_root = Path(config.get("storage", "archive_root", default="output/archive"))
             full_path = archive_root / image_path
         if not full_path.exists():
-            return jsonify({"ok": False, "error": "图片文件不存在"})
+            return jsonify({"ok": False, "error": "文件不存在"})
 
         try:
             from src.pipeline import SmartDispatcher
             dispatcher = SmartDispatcher()
-            ocr = dispatcher.ocr_engine.extract_from_image(
-                str(full_path), {"filename": full_path.name, "archive_month": month})
+            ext = full_path.suffix.lower()
+            if ext == ".pdf":
+                ocr = dispatcher.ocr_engine.extract_from_pdf(
+                    str(full_path), {"filename": full_path.name, "archive_month": month})
+            else:
+                ocr = dispatcher.ocr_engine.extract_from_image(
+                    str(full_path), {"filename": full_path.name, "archive_month": month})
 
             if not ocr.has_any_data():
                 return jsonify({"ok": False, "error": "OCR 未识别到任何数据",
                                 "raw_text": ocr.raw_text[:500] if ocr.raw_text else ""})
 
-            # 有单价时保存到数据库
-            if ocr.has_price_data():
+            if target == "settlement":
+                # 结算单提取：保存上网电价（全部 grid_ 字段填入同一值）
                 db.upsert_price(
                     user_id=user_id,
                     reading_month=month,
-                    sharp_peak_price=ocr.sharp_peak_price,
-                    peak_price=ocr.peak_price,
-                    flat_price=ocr.flat_price,
-                    valley_price=ocr.valley_price,
-                    average_price=ocr.average_price,
-                    source_file=full_path.name,
+                    grid_sharp_peak_price=ocr.settlement_price,
+                    grid_peak_price=ocr.settlement_price,
+                    grid_flat_price=ocr.settlement_price,
+                    grid_valley_price=ocr.settlement_price,
+                    grid_average_price=ocr.settlement_price,
+                    settlement_source_file=full_path.name,
                 )
+            else:
+                # 单价提取：保存尖峰平谷均价
+                if ocr.has_price_data():
+                    db.upsert_price(
+                        user_id=user_id,
+                        reading_month=month,
+                        sharp_peak_price=ocr.sharp_peak_price,
+                        peak_price=ocr.peak_price,
+                        flat_price=ocr.flat_price,
+                        valley_price=ocr.valley_price,
+                        average_price=ocr.average_price,
+                        source_file=full_path.name,
+                    )
 
             # 返回所有提取到的数据
             return jsonify({
@@ -1705,6 +1950,8 @@ def _register_routes(app: Flask, db: Database):
                     "valley_price": ocr.valley_price,
                     "average_price": ocr.average_price,
                 },
+                "settlement_price": ocr.settlement_price,
+                "target": target,
                 "ocr_user_id": ocr.user_id,
                 "reading_month": ocr.reading_month,
                 "meter_records": ocr.meter_records or [],
