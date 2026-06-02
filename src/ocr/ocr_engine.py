@@ -317,6 +317,11 @@ class OCREngine:
             if uid.startswith("09"):
                 return uid
 
+        # 园区前缀（OCR 可能识别为 园+数字）
+        m = re.search(r'园(\d{16})', text)
+        if m and m.group(1).startswith("09"):
+            return m.group(1)
+
         # 兜底：查找连续数字串（8-20位），只取唯一一个
         numbers = re.findall(r'\b(\d{8,20})\b', text)
         if len(numbers) == 1:
@@ -1294,16 +1299,21 @@ class OCREngine:
             log.info("PDF 无有效文本，转为图片 OCR: %s", filepath)
             try:
                 import pytesseract
-                from PIL import Image
+                from PIL import Image, ImageEnhance, ImageFilter
                 import pypdfium2
                 import tempfile
                 pdf = pypdfium2.PdfDocument(filepath)
+                max_pages = min(len(pdf), 3)  # 最多 OCR 前 3 页（关键数据在首页）
                 ocr_texts = []
-                for i in range(len(pdf)):
-                    page_img = pdf[i].render().to_pil()
-                    # 写入临时 PNG → pytesseract（无 _engine 时走此路）
+                for i in range(max_pages):
+                    page_img = pdf[i].render(scale=3).to_pil()
+                    # 预处理: 灰度 → 增强对比度 → 锐化
+                    gray = page_img.convert("L")
+                    enhancer = ImageEnhance.Contrast(gray)
+                    high_contrast = enhancer.enhance(2.0)
+                    processed = high_contrast.filter(ImageFilter.SHARPEN)
                     tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                    page_img.save(tmp.name)
+                    processed.save(tmp.name)
                     img = Image.open(tmp.name)
                     page_text = pytesseract.image_to_string(
                         img, lang="chi_sim+eng",

@@ -1,16 +1,16 @@
 {% extends "base.html" %}
-{% block title %}抄表日期 - PowerStat{% endblock %}
+{% block title %}抄表提取 - PowerStat{% endblock %}
 
 {% block content %}
 {% macro prev_month(date_str) %}{% if date_str %}{% set p = date_str.split('-') %}{% set y = p[0]|int %}{% set m = p[1]|int %}{% set ny = y-1 if m == 1 else y %}{% set nm = 12 if m == 1 else m-1 %}{{ '%04d-%02d'|format(ny, nm) }}{% if p|length > 2 %}-{{ p[2] }}{% endif %}{% endif %}{% endmacro %}
 <div class="breadcrumb">
     <a href="{{ url_for('index') }}">首页</a>
     <span class="sep">/</span>
-    <span>抄表日期</span>
+    <span>抄表提取</span>
 </div>
 
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem; flex-wrap:wrap; gap:0.5rem;">
-    <h1 style="margin:0;">抄表日期</h1>
+    <h1 style="margin:0;">抄表提取</h1>
 </div>
 
 <!-- Tab 切换 -->
@@ -26,11 +26,11 @@
 <div style="display:flex; gap:1rem; margin-bottom:0.75rem; flex-wrap:wrap; align-items:center;">
     <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
                 background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
-        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">抄表日期</span>
+        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">抄表提取</span>
         <button type="button" class="btn btn-primary btn-sm update-btn"
-                onclick="startDataUpdate('incremental','readings')">增量提取</button>
+                onclick="startDataUpdate('incremental','readings')">增量更新</button>
         <button type="button" class="btn btn-danger btn-sm update-btn"
-                onclick="startDataUpdate('full','readings')">全量提取</button>
+                onclick="startDataUpdate('full','readings')">全量更新</button>
         <a href="{{ url_for('reading_create') }}" class="btn btn-sm" style="background:var(--success, #28a745); color:#fff; text-decoration:none;">手动创建</a>
     </div>
     <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
@@ -112,6 +112,7 @@
     {% set first_r = month_data.gen or month_data.grid %}
     {% set any_locked = (month_data.gen.reading_locked if month_data.gen else false) or (month_data.grid.reading_locked if month_data.grid else false) %}
     {% set price_locked = first_r and first_r.price_locked %}
+    {% set settlement_locked = first_r and first_r.settlement_is_locked %}
     {% set has_price = first_r and first_r.sharp_peak_price is not none %}
     {% set price_missing = first_r and first_r.sharp_peak_price is none and first_r.peak_price is none and first_r.flat_price is none and first_r.valley_price is none %}
     <div class="month-block" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
@@ -135,7 +136,7 @@
         </div>
 
         <div class="month-content">
-            {# ---- 抄表日期区 ---- #}
+            {# ---- 抄表数据区 ---- #}
             <div class="section-label">抄表数据</div>
             <div class="table-wrap">
                 <table class="reading-table">
@@ -304,7 +305,7 @@
                         </button>
                         <button class="btn btn-sm btn-outline" onclick="openImagePicker(this, '{{ group.user_id }}', '{{ month_data.month }}')"
                                 {% if price_locked or any_locked %}disabled{% endif %}
-                                title="手动选择图片重新提取单价">&#128247; 选图提取</button>
+                                title="手动选择文件重新提取单价">&#128247; 选择文件</button>
                     </div>
                 </div>
                 <div class="price-grid" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
@@ -340,19 +341,27 @@
                 <div class="section-label" style="display:flex; align-items:center; justify-content:space-between;">
                     <span>电费结算单</span>
                     <div style="display:flex; gap:0.5rem; align-items:center;">
-                        {% if first_r and first_r.price_source %}
-                        <span class="price-source-tag" data-source-file="{{ first_r.price_source }}" onclick="showSourcePreview(this.dataset.sourceFile)" title="点击查看来源文件">
-                            &#128065; {{ first_r.price_source|truncate(25) }}
+                        {% if first_r and first_r.settlement_source_file %}
+                        <span class="price-source-tag" data-source-file="{{ first_r.settlement_source_file }}" onclick="showSourcePreview(this.dataset.sourceFile)" title="点击查看来源文件">
+                            &#128065; {{ first_r.settlement_source_file|truncate(25) }}
                         </span>
                         {% endif %}
+                        <button class="btn btn-sm {% if settlement_locked %}btn-danger{% else %}btn-outline{% endif %}"
+                                onclick="toggleSettlementLock('{{ group.user_id }}', '{{ month_data.month }}', {{ 'true' if settlement_locked else 'false' }})"
+                                title="{{ '解锁结算单' if settlement_locked else '锁定结算单' }}">
+                            {% if settlement_locked %}&#128274; 已锁定{% else %}&#128275; 未锁定{% endif %}
+                        </button>
+                        <button class="btn btn-sm btn-outline" onclick="openImagePicker(this, '{{ group.user_id }}', '{{ month_data.month }}', 'settlement')"
+                                {% if settlement_locked %}disabled{% endif %}
+                                title="手动选择文件重新提取结算单价">&#128247; 选择文件</button>
                     </div>
                 </div>
-                <div class="price-grid" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
+                <div class="price-grid settlement-price-grid" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
                     <div class="price-item" style="min-width:200px;">
                         <label>上网电价</label>
                         <input type="number" step="0.00000001" class="cell-input price-input" name="grid_average_price"
                             value="{{ '%.8f'|format(first_r.grid_average_price) if first_r and first_r.grid_average_price is not none else '' }}"
-                            {% if price_locked or any_locked %}disabled{% endif %}>
+                            {% if settlement_locked %}disabled{% endif %}>
                     </div>
                 </div>
             </div>
@@ -741,17 +750,17 @@
 <div id="imagePickerModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeImagePicker()">
     <div class="modal-box">
         <div class="modal-header">
-            <h3 style="margin:0;">选择单价来源图片</h3>
+            <h3 style="margin:0;" id="imagePickerTitle">选择单价来源文件</h3>
             <button onclick="closeImagePicker()" style="background:none; border:none; font-size:1.5rem; cursor:pointer; color:var(--text-secondary);">&times;</button>
         </div>
         <div class="modal-body">
             <div style="margin-bottom:0.75rem;">
-                <input type="text" id="imagePickerSearch" placeholder="搜索图片文件名…"
+                <input type="text" id="imagePickerSearch"                     placeholder="搜索文件名…"
                        oninput="filterPickerImages()"
                        style="width:100%; padding:0.4rem 0.75rem; border:1px solid var(--border);
                               border-radius:var(--radius); font-size:0.85rem;">
             </div>
-            <div id="imagePickerLoading" style="text-align:center; padding:2rem; color:var(--text-secondary);">加载图片列表中...</div>
+            <div id="imagePickerLoading" style="text-align:center; padding:2rem; color:var(--text-secondary);">加载文件列表中...</div>
             <div id="imagePickerContent" style="display:none;"></div>
             <div id="imagePickerEmpty" style="display:none; text-align:center; padding:2rem; color:var(--text-secondary);">无图片文件</div>
         </div>
@@ -759,7 +768,7 @@
             <div id="imagePickerSelected" style="font-size:0.85rem; color:var(--text-secondary);"></div>
             <div style="display:flex; gap:0.5rem;">
                 <button class="btn btn-sm btn-outline" onclick="closeImagePicker()">取消</button>
-                <button class="btn btn-sm btn-primary" id="imagePickerConfirm" onclick="confirmImagePick()" disabled>OCR 提取单价</button>
+                <button class="btn btn-sm btn-primary" id="imagePickerConfirm" onclick="confirmImagePick()" disabled>OCR 提取</button>
             </div>
         </div>
     </div>
@@ -1029,6 +1038,10 @@
 .image-pick-item:hover { border-color:var(--primary); box-shadow:0 0 0 2px rgba(37,99,235,0.15); }
 .image-pick-item.selected { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,0.3); }
 .image-pick-item img { width:100%; height:120px; object-fit:cover; display:block; }
+.image-pick-item .file-icon-pdf {
+    width:100%; height:120px; display:flex; align-items:center; justify-content:center;
+    background:#fef3c7; color:#92400e; font-size:1.5rem; font-weight:700;
+}
 .image-pick-item .image-pick-name {
     padding:0.25rem 0.5rem; font-size:0.7rem; color:var(--text-secondary);
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
@@ -1218,7 +1231,7 @@ function saveAll(btn, userId, month) {
         saves.push({ meter_id: parseInt(meterId), month: month, fields: fields });
     });
 
-    // 收集单价
+    // 收集单价（第一个 .price-grid = 尖峰平谷）
     var priceGrid = block.querySelector('.price-grid');
     var prices = {};
     var hasPrice = false;
@@ -1227,6 +1240,18 @@ function saveAll(btn, userId, month) {
         prices[inp.name] = v === '' ? null : parseFloat(v);
         if (v !== '') hasPrice = true;
     });
+
+    // 收集结算单（第二个 .price-grid = 上网电价）
+    var settlementGrid = block.querySelector('.settlement-price-grid');
+    var settlementPrices = {};
+    var hasSettlementPrice = false;
+    if (settlementGrid) {
+        settlementGrid.querySelectorAll('.price-input').forEach(function(inp) {
+            var v = inp.value.trim();
+            settlementPrices[inp.name] = v === '' ? null : parseFloat(v);
+            if (v !== '') hasSettlementPrice = true;
+        });
+    }
 
     btn.disabled = true;
     btn.textContent = '保存中...';
@@ -1244,7 +1269,13 @@ function saveAll(btn, userId, month) {
         body: JSON.stringify({ user_id: userId, month: month, prices: prices })
     }).then(function(r) { return r.json(); }) : Promise.resolve({ ok: true });
 
-    Promise.all([p1, p2]).then(function(results) {
+    var p3 = hasSettlementPrice ? fetch('/api/readings/update-price', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, month: month, prices: settlementPrices })
+    }).then(function(r) { return r.json(); }) : Promise.resolve({ ok: true });
+
+    Promise.all([p1, p2, p3]).then(function(results) {
         var allOk = results.every(function(r) { return r.ok; });
         if (allOk) {
             btn.textContent = '已保存';
@@ -1303,11 +1334,32 @@ function togglePriceLock(userId, month, currentlyLocked) {
     .catch(function(e) { alert('请求失败: ' + e); });
 }
 
-/* === 图片选择器 === */
-var pickerState = { userId: '', month: '', selectedPath: '', selectedName: '', groups: [] };
+function toggleSettlementLock(userId, month, currentlyLocked) {
+    var action = currentlyLocked ? '解锁' : '锁定';
+    if (!confirm('确定' + action + '用户 ' + userId + ' 的 ' + month + ' 结算单数据？\n\n' +
+                 (currentlyLocked ? '解锁后结算单可编辑，程序也可自动更新。' : '锁定后结算单不可编辑，程序不能自动更改。'))) {
+        return;
+    }
+    fetch('/api/settlement/lock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, month: month, locked: !currentlyLocked })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.ok) location.reload();
+        else alert('操作失败: ' + (data.error || '未知错误'));
+    })
+    .catch(function(e) { alert('请求失败: ' + e); });
+}
 
-function openImagePicker(btn, userId, month) {
-    pickerState = { userId: userId, month: month, selectedPath: '', selectedName: '', groups: [] };
+/* === 图片选择器 === */
+var pickerState = { userId: '', month: '', target: 'price', selectedPath: '', selectedName: '', groups: [] };
+
+function openImagePicker(btn, userId, month, target) {
+    target = target || 'price';
+    var keyword = target === 'settlement' ? '电费结算单' : '微信';
+    pickerState = { userId: userId, month: month, target: target, selectedPath: '', selectedName: '', groups: [] };
     var modal = document.getElementById('imagePickerModal');
     modal.style.display = 'flex';
     document.getElementById('imagePickerLoading').style.display = '';
@@ -1318,7 +1370,15 @@ function openImagePicker(btn, userId, month) {
     document.getElementById('imagePickerSelected').textContent = '';
     document.getElementById('imagePickerSearch').value = '';
 
-    fetch('/api/files/images')
+    // 根据目标设置标题
+    if (target === 'settlement') {
+        document.getElementById('imagePickerTitle').textContent = '选择电费结算单来源文件';
+    } else {
+        document.getElementById('imagePickerTitle').textContent = '选择单价来源文件';
+    }
+
+    // 后端按关键词过滤，只返回匹配的文件
+    fetch('/api/files/images?q=' + encodeURIComponent(keyword))
         .then(function(r) {
             if (!r.ok) throw new Error('服务器返回 ' + r.status);
             return r.json();
@@ -1327,6 +1387,7 @@ function openImagePicker(btn, userId, month) {
             document.getElementById('imagePickerLoading').style.display = 'none';
             if (!data.groups || data.groups.length === 0) {
                 document.getElementById('imagePickerEmpty').style.display = '';
+                document.getElementById('imagePickerEmpty').textContent = '没有找到包含"' + keyword + '"的文件';
                 return;
             }
             pickerState.groups = data.groups;
@@ -1345,7 +1406,8 @@ function renderPickerGroups(groups) {
     var hasAny = false;
 
     groups.forEach(function(group, gi) {
-        var visibleImages = group.images.filter(function(img) { return !img._hidden; });
+        var visibleImages = group.files ? group.files.filter(function(f) { return !f._hidden; })
+                                        : (group.images || []).filter(function(f) { return !f._hidden; });
         if (visibleImages.length === 0) return;
         hasAny = true;
 
@@ -1355,19 +1417,24 @@ function renderPickerGroups(groups) {
 
         var summary = document.createElement('summary');
         summary.innerHTML = '<span class="picker-group-name">' + escapeHtml(group.name) + '</span>' +
-            '<span class="picker-group-count">' + visibleImages.length + ' 张图片</span>';
+            '<span class="picker-group-count">' + visibleImages.length + ' 个文件</span>';
         details.appendChild(summary);
 
         var grid = document.createElement('div');
         grid.className = 'image-picker-grid';
-        visibleImages.forEach(function(img) {
+        visibleImages.forEach(function(f) {
             var item = document.createElement('div');
             item.className = 'image-pick-item';
-            if (img.path === pickerState.selectedPath) item.className += ' selected';
-            item.setAttribute('data-path', img.path);
-            item.setAttribute('data-name', img.filename);
-            item.innerHTML = '<img src="' + img.url + '" alt="' + escapeHtml(img.filename) + '" loading="lazy">' +
-                '<div class="image-pick-name" title="' + escapeHtml(img.filename) + '">' + escapeHtml(img.filename) + '</div>';
+            if (f.path === pickerState.selectedPath) item.className += ' selected';
+            item.setAttribute('data-path', f.path);
+            item.setAttribute('data-name', f.filename);
+            if (f.file_type === 'pdf') {
+                item.innerHTML = '<div class="file-icon-pdf">PDF</div>' +
+                    '<div class="image-pick-name" title="' + escapeHtml(f.filename) + '">' + escapeHtml(f.filename) + '</div>';
+            } else {
+                item.innerHTML = '<img src="' + f.url + '" alt="' + escapeHtml(f.filename) + '" loading="lazy">' +
+                    '<div class="image-pick-name" title="' + escapeHtml(f.filename) + '">' + escapeHtml(f.filename) + '</div>';
+            }
             item.onclick = function() { selectImage(this); };
             grid.appendChild(item);
         });
@@ -1378,7 +1445,7 @@ function renderPickerGroups(groups) {
     if (!hasAny) {
         container.style.display = 'none';
         document.getElementById('imagePickerEmpty').style.display = '';
-        document.getElementById('imagePickerEmpty').textContent = '没有匹配的图片';
+        document.getElementById('imagePickerEmpty').textContent = '没有匹配的文件';
     } else {
         document.getElementById('imagePickerEmpty').style.display = 'none';
     }
@@ -1387,9 +1454,10 @@ function renderPickerGroups(groups) {
 function filterPickerImages() {
     var keyword = (document.getElementById('imagePickerSearch').value || '').toLowerCase().trim();
     pickerState.groups.forEach(function(group) {
-        group.images.forEach(function(img) {
-            img._hidden = keyword && img.filename.toLowerCase().indexOf(keyword) === -1
-                          && group.name.toLowerCase().indexOf(keyword) === -1;
+        var items = group.files || group.images || [];
+        items.forEach(function(f) {
+            f._hidden = keyword && f.filename.toLowerCase().indexOf(keyword) === -1
+                        && group.name.toLowerCase().indexOf(keyword) === -1;
         });
     });
     renderPickerGroups(pickerState.groups);
@@ -1412,25 +1480,27 @@ function confirmImagePick() {
     btn.disabled = true;
     btn.textContent = 'OCR 识别中...';
 
+    var isSettlement = pickerState.target === 'settlement';
+
     fetch('/api/readings/ocr-extract', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             image_path: pickerState.selectedPath,
             user_id: pickerState.userId,
-            month: pickerState.month
+            month: pickerState.month,
+            target: pickerState.target
         })
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
-        btn.textContent = 'OCR 提取单价';
+        btn.textContent = isSettlement ? 'OCR 提取结算单' : 'OCR 提取单价';
         btn.disabled = false;
         if (data.ok) {
             closeImagePicker();
             ocrResultData = data;
             showOcrResult(data);
         } else {
-            // 即使失败也展示原始文本（如果有）
             if (data.raw_text) {
                 closeImagePicker();
                 ocrResultData = null;
@@ -1442,7 +1512,7 @@ function confirmImagePick() {
     })
     .catch(function(e) {
         alert('请求失败: ' + e);
-        btn.textContent = 'OCR 提取单价';
+        btn.textContent = isSettlement ? 'OCR 提取结算单' : 'OCR 提取单价';
         btn.disabled = false;
     });
 }
@@ -1472,8 +1542,18 @@ function showOcrResult(data) {
     }
     html += '</tbody></table></div>';
 
+    // 结算单价
+    if (data.target === 'settlement' && data.settlement_price != null) {
+        html += '<div class="ocr-section">';
+        html += '<div class="ocr-section-title">结算单价</div>';
+        html += '<table class="ocr-table"><tbody>';
+        html += '<tr><td class="ocr-label">上网电价</td><td class="ocr-value">' +
+            data.settlement_price.toFixed(8) + ' 元/kWh</td></tr>';
+        html += '</tbody></table></div>';
+    }
+
     // 单价数据
-    if (data.prices) {
+    if (data.prices && data.target !== 'settlement') {
         var hasAnyPrice = Object.keys(data.prices).some(function(k) { return data.prices[k] != null; });
         html += '<div class="ocr-section">';
         html += '<div class="ocr-section-title">单价数据' + (data.has_prices ? '' : ' <span style="color:var(--text-secondary);font-size:0.8rem;">（未识别到）</span>') + '</div>';
@@ -1526,8 +1606,13 @@ function showOcrResult(data) {
 
     // 应用按钮
     var applyBtn = document.getElementById('ocrApplyBtn');
-    if (data.ok && data.has_prices) {
+    if (data.target === 'settlement' && data.settlement_price != null) {
         applyBtn.style.display = '';
+        applyBtn.textContent = '应用结算单价';
+        document.getElementById('ocrResultNote').textContent = '结算单价已保存，点击"应用结算单价"填充到表格。';
+    } else if (data.ok && data.has_prices) {
+        applyBtn.style.display = '';
+        applyBtn.textContent = '应用单价数据';
         document.getElementById('ocrResultNote').textContent = '单价数据已保存，点击"应用单价数据"填充到表格。';
     } else {
         applyBtn.style.display = 'none';
@@ -1538,18 +1623,30 @@ function showOcrResult(data) {
 }
 
 function applyOcrPrices() {
-    if (!ocrResultData || !ocrResultData.prices) return;
+    if (!ocrResultData) return;
     var block = document.querySelector('.month-block[data-user-id="' + pickerState.userId + '"][data-month="' + pickerState.month + '"]');
-    if (block) {
+    if (!block) { closeOcrResult(); return; }
+
+    if (ocrResultData.target === 'settlement') {
+        // 结算单：填充上网电价
+        var sg = block.querySelector('.settlement-price-grid');
+        if (sg && ocrResultData.settlement_price != null) {
+            var inp = sg.querySelector('[name="grid_average_price"]');
+            if (inp) inp.value = ocrResultData.settlement_price.toFixed(8);
+        }
+    } else if (ocrResultData.prices) {
+        // 单价：填充尖峰平谷
         var pg = block.querySelector('.price-grid');
-        Object.keys(ocrResultData.prices).forEach(function(k) {
-            var inp = pg.querySelector('[name="' + k + '"]');
-            if (inp && ocrResultData.prices[k] != null) {
-                inp.value = ocrResultData.prices[k].toFixed(8);
-            }
-        });
-        var sec = block.querySelector('.price-section');
-        sec.classList.remove('price-missing');
+        if (pg) {
+            Object.keys(ocrResultData.prices).forEach(function(k) {
+                var inp = pg.querySelector('[name="' + k + '"]');
+                if (inp && ocrResultData.prices[k] != null) {
+                    inp.value = ocrResultData.prices[k].toFixed(8);
+                }
+            });
+            var sec = block.querySelector('.price-section');
+            if (sec) sec.classList.remove('price-missing');
+        }
     }
     closeOcrResult();
 }
@@ -1683,7 +1780,7 @@ document.addEventListener('keydown', function(e) {
 
 
 /* === 数据提取更新 === */
-var taskLabels = { readings: '抄表日期', prices: '单价提取', settlement: '电费结算单', all: '全部' };
+var taskLabels = { readings: '抄表提取', prices: '单价提取', settlement: '电费结算单', all: '全部' };
 
 function startDataUpdate(mode, taskType) {
     var label = taskLabels[taskType] || taskType;
@@ -1764,6 +1861,174 @@ function pollUpdateStatus() {
         .catch(function() {});
 }
 
+var settlementPickerUserId = '';
+var settlementPickerMonth = '';
+function openSettlementPicker(userId, month) {
+    settlementPickerUserId = userId || '';
+    settlementPickerMonth = month || '';
+    settlementMode = 'selected';
+    document.getElementById('settlementModal').style.display = 'flex';
+    document.getElementById('settlementLoading').style.display = '';
+    document.getElementById('settlementCandidates').style.display = 'none';
+    document.getElementById('settlementCandidates').innerHTML = '';
+    document.getElementById('settlementCount').textContent = '';
+    document.getElementById('settlementConfirmBtn').disabled = true;
+    var title = '选择电费结算单文件';
+    if (userId) title += ' — 用户 ' + userId;
+    if (month) title += ' ' + month;
+    document.getElementById('settlementModalTitle').textContent = title;
+
+    fetch('/api/bills/settlement/candidates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            user_id: settlementPickerUserId,
+            reading_month: settlementPickerMonth,
+        }),
+    })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            document.getElementById('settlementLoading').style.display = 'none';
+            var container = document.getElementById('settlementCandidates');
+            container.style.display = '';
+            if (!data.candidates || data.candidates.length === 0) {
+                container.innerHTML = '<div style="text-align:center;padding:2rem;color:#999;">未找到符合条件的电费结算单文件</div>';
+                return;
+            }
+            var html = '<div style="margin-bottom:0.5rem;font-size:0.85rem;color:#666;">共找到 ' + data.total + ' 个候选文件</div>';
+            html += '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">';
+            html += '<thead><tr style="background:#f8f9fa;">';
+            html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dee2e6;"><input type="checkbox" id="selAll" onchange="toggleAll(this)"></th>';
+            html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dee2e6;">文件名</th>';
+            html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dee2e6;">用户编号</th>';
+            html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dee2e6;">月份</th>';
+            html += '<th style="padding:6px 8px;text-align:right;border-bottom:1px solid #dee2e6;">结算电价</th>';
+            html += '</tr></thead><tbody>';
+            data.candidates.forEach(function(c, i) {
+                html += '<tr>';
+                html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;"><input type="checkbox" class="selFile" value="' + i + '" onchange="updateSettlementCount()"></td>';
+                html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(c.filename) + '">' + escapeHtml(c.filename) + '</td>';
+                html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;">' + escapeHtml(c.user_id) + '</td>';
+                html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;">' + escapeHtml(c.reading_month) + '</td>';
+                html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">' + (c.settlement_price ? c.settlement_price.toFixed(8) : '-') + '</td>';
+                html += '</tr>';
+            });
+            html += '</tbody></table>';
+            container.innerHTML = html;
+            // Store candidates data for later use
+            container._candidates = data.candidates;
+            container._filepaths = data.candidates.map(function(c) { return c.filepath; });
+            updateSettlementCount();
+        })
+        .catch(function(e) {
+            document.getElementById('settlementLoading').textContent = '加载失败: ' + e;
+        });
+}
+
+function closeSettlementPicker() {
+    document.getElementById('settlementModal').style.display = 'none';
+}
+
+function toggleAll(cb) {
+    document.querySelectorAll('.selFile').forEach(function(c) { c.checked = cb.checked; });
+    updateSettlementCount();
+}
+
+function updateSettlementCount() {
+    var checked = document.querySelectorAll('.selFile:checked').length;
+    document.getElementById('settlementCount').textContent = '已选择 ' + checked + ' 个文件';
+    document.getElementById('settlementConfirmBtn').disabled = checked === 0;
+}
+
+function confirmSettlementExtract() {
+    var container = document.getElementById('settlementCandidates');
+    var filepaths = container._filepaths || [];
+    var indices = [];
+    document.querySelectorAll('.selFile:checked').forEach(function(cb) {
+        indices.push(parseInt(cb.value));
+    });
+    var selected = indices.map(function(i) { return filepaths[i]; });
+    if (selected.length === 0) return;
+
+    closeSettlementPicker();
+
+    // 按列挑选模式：只处理选中的文件，结果写入对应用户/月份
+    if (settlementPickerUserId || settlementPickerMonth) {
+        document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = true; });
+        var logsDiv = document.getElementById('updateLogs');
+        var progress = document.getElementById('updateProgress');
+        var spinner = document.getElementById('updateSpinner');
+        var panel = document.getElementById('updatePanel');
+        panel.style.display = '';
+        spinner.style.display = '';
+        progress.textContent = '正在提取 ' + selected.length + ' 个电费结算单文件…';
+        logsDiv.innerHTML = '';
+        fetch('/api/bills/settlement/extract-selected', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                files: selected,
+                user_id: settlementPickerUserId,
+                reading_month: settlementPickerMonth,
+            }),
+        })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.error) {
+                    progress.textContent = '错误: ' + data.error;
+                } else {
+                    progress.textContent = '处理完成：成功 ' + data.processed + '，跳过 ' + data.skipped + '，失败 ' + data.failed;
+                    logsDiv.innerHTML = '<div>' + (data.detail || '') + '</div>';
+                }
+                spinner.style.display = 'none';
+                document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+                setTimeout(function() { location.reload(); }, 1500);
+            })
+            .catch(function(e) {
+                progress.textContent = '请求失败: ' + e;
+                spinner.style.display = 'none';
+                document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+            });
+        return;
+    }
+
+    // 批处理模式（原逻辑，不再使用）
+    var label = settlementMode === 'full' ? '全量' : '增量';
+    document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = true; });
+    var panel = document.getElementById('updatePanel');
+    var progress = document.getElementById('updateProgress');
+    var logsDiv = document.getElementById('updateLogs');
+    var spinner = document.getElementById('updateSpinner');
+    panel.style.display = '';
+    spinner.style.display = '';
+    progress.textContent = '正在提取 ' + selected.length + ' 个电费结算单文件…';
+    logsDiv.innerHTML = '';
+
+    fetch('/api/bills/settlement/extract-selected', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: selected, clear_first: settlementMode === 'full' }),
+    })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                progress.textContent = '错误: ' + data.error;
+            } else {
+                var msg = '处理完成：成功 ' + data.processed + '，跳过 ' + data.skipped + '，失败 ' + data.failed;
+                progress.textContent = msg;
+                logsDiv.innerHTML = '<div>' + msg + '</div>';
+            }
+            spinner.style.display = 'none';
+            document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+            setTimeout(function() { location.reload(); }, 2000);
+        })
+        .catch(function(e) {
+            progress.textContent = '请求失败: ' + e;
+            spinner.style.display = 'none';
+            document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+        });
+}
+
 // 页面加载时检查是否有正在运行的更新任务
 (function() {
     fetch('/api/bill-refresh-status')
@@ -1784,4 +2049,32 @@ function pollUpdateStatus() {
         .catch(function() {});
 })();
 </script>
+
+<!-- 电费结算单文件选择弹窗 -->
+<div id="settlementModal" class="modal" style="display:none; position:fixed; inset:0; z-index:1000;
+     background:rgba(0,0,0,0.5); align-items:center; justify-content:center;">
+    <div style="background:#fff; border-radius:8px; width:90%; max-width:800px; max-height:80vh;
+                display:flex; flex-direction:column; box-shadow:0 4px 24px rgba(0,0,0,0.2);">
+        <div style="padding:1rem 1.25rem; border-bottom:1px solid #dee2e6; display:flex;
+                    align-items:center; justify-content:space-between;">
+            <h3 style="margin:0;" id="settlementModalTitle">选择电费结算单文件</h3>
+            <button type="button" onclick="closeSettlementPicker()"
+                    style="background:none; border:none; font-size:1.5rem; cursor:pointer; color:#666;">&times;</button>
+        </div>
+        <div style="flex:1; overflow-y:auto; padding:0.75rem 1.25rem;">
+            <div id="settlementLoading" style="text-align:center; padding:2rem; color:#666;">扫描候选文件中…</div>
+            <div id="settlementCandidates" style="display:none;"></div>
+        </div>
+        <div style="padding:0.75rem 1.25rem; border-top:1px solid #dee2e6; display:flex;
+                    align-items:center; justify-content:space-between;">
+            <span id="settlementCount" style="font-size:0.85rem; color:#666;"></span>
+            <div style="display:flex; gap:0.5rem;">
+                <button type="button" onclick="closeSettlementPicker()"
+                        class="btn" style="background:#f0f0f0;">取消</button>
+                <button type="button" id="settlementConfirmBtn" class="btn btn-primary"
+                        onclick="confirmSettlementExtract()" disabled>确认提取</button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}

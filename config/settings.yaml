@@ -34,6 +34,12 @@ attachments:
   # 最大附件大小 (MB)
   max_size_mb: 50
 
+# --- 单价提取设置 ---
+price_extraction:
+  # 文件名关键词过滤：仅处理文件名包含此关键词的图片
+  # 留空则不过滤，处理所有图片
+  filename_keyword: "微信"
+
 # --- OCR 设置 ---
 ocr:
   # OCR 引擎: "rapidocr"（推荐，ONNX 推理，模型随 pip 包分发）、"paddleocr" 或 "tesseract"

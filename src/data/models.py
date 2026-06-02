@@ -287,6 +287,15 @@ class Database:
                 log.info("迁移: 添加 price_records.%s 列", col)
                 conn.execute(f"ALTER TABLE price_records ADD COLUMN {col} REAL")
 
+        # 添加 price_records.settlement_is_locked 列（如果缺失）
+        price_columns = {row[1] for row in conn.execute("PRAGMA table_info(price_records)").fetchall()}
+        if "settlement_is_locked" not in price_columns:
+            log.info("迁移: 添加 price_records.settlement_is_locked 列")
+            conn.execute("ALTER TABLE price_records ADD COLUMN settlement_is_locked INTEGER DEFAULT 0")
+        if "settlement_source_file" not in price_columns:
+            log.info("迁移: 添加 price_records.settlement_source_file 列")
+            conn.execute("ALTER TABLE price_records ADD COLUMN settlement_source_file TEXT")
+
         # 创建 projects 表并导入已有项目数据
         conn.execute("""
             CREATE TABLE IF NOT EXISTS projects (
@@ -363,6 +372,9 @@ class Database:
                 p.flat_price,
                 p.valley_price,
                 p.average_price,
+                p.grid_average_price,
+                p.settlement_is_locked,
+                p.settlement_source_file,
                 ROUND(COALESCE(r.sharp_peak, 0) * m.multiplier * COALESCE(p.sharp_peak_price, 0) * COALESCE(m.discount, 1.0), 2) AS sharp_peak_amount,
                 ROUND(COALESCE(r.peak, 0) * m.multiplier * COALESCE(p.peak_price, 0) * COALESCE(m.discount, 1.0), 2)             AS peak_amount,
                 ROUND(COALESCE(r.flat, 0) * m.multiplier * COALESCE(p.flat_price, 0) * COALESCE(m.discount, 1.0), 2)              AS flat_amount,
@@ -482,6 +494,28 @@ class Database:
             if resolved != meter_number:
                 log.info("  电表号模糊匹配: '%s' -> '%s'", meter_number, resolved)
                 meter_number = resolved
+
+            # 如果电表号仍不匹配，尝试通过资产号查找已有电表
+            if asset_number:
+                asset_row = conn.execute(
+                    "SELECT id, meter_number FROM meters WHERE asset_number = ?", (asset_number,)
+                ).fetchone()
+                if asset_row:
+                    log.info("  通过资产号匹配: asset=%s -> mn=%s", asset_number, asset_row["meter_number"])
+                    meter_number = asset_row["meter_number"]
+                else:
+                    # 前缀匹配：文件中的资产号可能被截断
+                    for row in conn.execute(
+                        "SELECT id, meter_number, asset_number FROM meters WHERE asset_number IS NOT NULL AND asset_number != ''"
+                    ).fetchall():
+                        db_asset = row["asset_number"]
+                        # 文件资产号是 DB 资产号的前缀，或反之
+                        if (len(asset_number) < len(db_asset) and db_asset.startswith(asset_number)) or \
+                           (len(asset_number) > len(db_asset) and asset_number.startswith(db_asset)):
+                            log.info("  通过资产号前缀匹配: file_asset=%s -> db_asset=%s -> mn=%s",
+                                     asset_number, db_asset, row["meter_number"])
+                            meter_number = row["meter_number"]
+                            break
 
             # 解析 project_id
             project_id = self._resolve_project_id(conn, project_name) if project_name else None
@@ -980,7 +1014,9 @@ class Database:
                     p.average_price, p.is_locked AS price_locked,
                     p.grid_sharp_peak_price, p.grid_peak_price, p.grid_flat_price, p.grid_valley_price,
                     p.grid_average_price,
-                    p.source_file AS price_source
+                    p.source_file AS price_source,
+                    p.settlement_is_locked,
+                    p.settlement_source_file
         """
 
         if limit is not None:
@@ -1035,25 +1071,64 @@ class Database:
                      grid_peak_price: float = None,
                      grid_flat_price: float = None,
                      grid_valley_price: float = None,
-                     grid_average_price: float = None):
-        """插入或更新单价记录。已锁定的记录不会被自动更新。"""
+                     grid_average_price: float = None,
+                     settlement_source_file: str = None):
+        """插入或更新单价/结算单记录。单价和结算单各有独立锁定。"""
         with self.connection() as conn:
-            # 检查是否已锁定
             existing = conn.execute(
-                "SELECT is_locked FROM price_records WHERE user_id = ? AND reading_month = ?",
+                "SELECT is_locked, settlement_is_locked FROM price_records WHERE user_id = ? AND reading_month = ?",
                 (user_id, reading_month),
             ).fetchone()
-            if existing and existing["is_locked"]:
-                log.debug("单价数据已锁定，跳过: user_id=%s, month=%s", user_id, reading_month)
+            price_locked = existing and existing["is_locked"]
+            settlement_locked = existing and existing["settlement_is_locked"]
+
+            if price_locked and settlement_locked:
+                log.debug("单价+结算单均已锁定，跳过: user_id=%s, month=%s", user_id, reading_month)
                 return
 
+            # 已有行且一方锁定 → 改用逐字段 UPDATE，不覆盖锁定域
+            if existing and (price_locked or settlement_locked):
+                updates = []
+                params = []
+                if not price_locked:
+                    for field in ("sharp_peak_price", "peak_price", "flat_price",
+                                  "valley_price", "average_price"):
+                        val = locals().get(field)
+                        if val is not None:
+                            updates.append(f"{field} = ?")
+                            params.append(val)
+                    if source_file is not None:
+                        updates.append("source_file = ?")
+                        params.append(source_file)
+                if not settlement_locked:
+                    for field in ("grid_sharp_peak_price", "grid_peak_price", "grid_flat_price",
+                                  "grid_valley_price", "grid_average_price"):
+                        val = locals().get(field)
+                        if val is not None:
+                            updates.append(f"{field} = ?")
+                            params.append(val)
+                    if settlement_source_file is not None:
+                        updates.append("settlement_source_file = ?")
+                        params.append(settlement_source_file)
+                if project_name is not None:
+                    updates.append("project_name = ?")
+                    params.append(project_name)
+                if updates:
+                    params.extend([user_id, reading_month])
+                    conn.execute(
+                        f"UPDATE price_records SET {', '.join(updates)} WHERE user_id = ? AND reading_month = ?",
+                        params,
+                    )
+                return
+
+            # 全字段 INSERT / UPSERT
             conn.execute(
                 """INSERT INTO price_records
                    (user_id, reading_month, sharp_peak_price, peak_price, flat_price, valley_price,
                     average_price, source_file, project_name,
                     grid_sharp_peak_price, grid_peak_price, grid_flat_price, grid_valley_price,
-                    grid_average_price)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    grid_average_price, settlement_source_file)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(user_id, reading_month) DO UPDATE SET
                        sharp_peak_price = COALESCE(excluded.sharp_peak_price, price_records.sharp_peak_price),
                        peak_price = COALESCE(excluded.peak_price, price_records.peak_price),
@@ -1066,12 +1141,13 @@ class Database:
                        grid_valley_price = COALESCE(excluded.grid_valley_price, price_records.grid_valley_price),
                        grid_average_price = COALESCE(excluded.grid_average_price, price_records.grid_average_price),
                        source_file = COALESCE(excluded.source_file, price_records.source_file),
+                       settlement_source_file = COALESCE(excluded.settlement_source_file, price_records.settlement_source_file),
                        project_name = COALESCE(excluded.project_name, price_records.project_name)
                 """,
                 (user_id, reading_month, sharp_peak_price, peak_price, flat_price, valley_price,
                  average_price, source_file, project_name,
                  grid_sharp_peak_price, grid_peak_price, grid_flat_price, grid_valley_price,
-                 grid_average_price),
+                 grid_average_price, settlement_source_file),
             )
 
     def lock_price(self, user_id: str, reading_month: str, locked: bool = True):
@@ -1079,6 +1155,14 @@ class Database:
         with self.connection() as conn:
             conn.execute(
                 "UPDATE price_records SET is_locked = ? WHERE user_id = ? AND reading_month = ?",
+                (1 if locked else 0, user_id, reading_month),
+            )
+
+    def lock_settlement_price(self, user_id: str, reading_month: str, locked: bool = True):
+        """锁定/解锁电费结算单记录（独立于单价锁定）。"""
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE price_records SET settlement_is_locked = ? WHERE user_id = ? AND reading_month = ?",
                 (1 if locked else 0, user_id, reading_month),
             )
 
