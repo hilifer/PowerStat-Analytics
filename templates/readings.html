@@ -657,8 +657,8 @@
                         {% endfor %}
 
                         {# 合计行：正向直读总表数，反向直读反向有功总 #}
-                        {% set gen_cur_total = gen.cur_total if gen and gen.cur_total is not none else none %}
-                        {% set gen_prev_total = prev_gen.cur_total if prev_gen and prev_gen.cur_total is not none else none %}
+                        {% set gen_cur_total = gen.total_kwh if gen and gen.total_kwh is not none else none %}
+                        {% set gen_prev_total = prev_gen.total_kwh if prev_gen and prev_gen.total_kwh is not none else none %}
                         {% set gen_diff_total = (gen_cur_total - gen_prev_total) if gen_cur_total is not none and gen_prev_total is not none else none %}
                         {% set gen_amount_total = (gen_diff_total * gen_mult) if gen_diff_total is not none else none %}
                         {% set grid_rev_total = grid.rev_total if grid and grid.rev_total is not none else none %}

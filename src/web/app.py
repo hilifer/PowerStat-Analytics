@@ -799,8 +799,14 @@ def _register_routes(app: Flask, db: Database):
                         _log(f"已清空 {rc} 条抄表数据")
                     if task_type in ("prices", "all"):
                         pc = conn.execute("SELECT COUNT(*) FROM price_records").fetchone()[0]
-                        conn.execute("DELETE FROM price_records")
-                        _log(f"已清空 {pc} 条单价记录")
+                        conn.execute("""
+                            UPDATE price_records SET
+                                sharp_peak_price = NULL, peak_price = NULL,
+                                flat_price = NULL, valley_price = NULL,
+                                average_price = NULL, source_file = NULL,
+                                is_locked = 0
+                        """)
+                        _log(f"已清空 {pc} 条单价数据（保留结算字段）")
 
             # ---- 步骤 2：下载新邮件附件 ----
             _log("正在连接邮箱搜索新附件…")

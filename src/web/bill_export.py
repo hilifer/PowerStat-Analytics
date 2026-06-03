@@ -558,8 +558,8 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
         row += 1
 
     # ---- 合计行（正向直读总表数，反向直读反向有功总） ----
-    gen_cur_total_val = gen.get("cur_total") if gen else None
-    gen_prev_total_val = prev_gen.get("cur_total") if prev_gen else None
+    gen_cur_total_val = gen.get("total_kwh") if gen else None
+    gen_prev_total_val = prev_gen.get("total_kwh") if prev_gen else None
     gen_diff_total_val = (gen_cur_total_val - gen_prev_total_val) if gen_cur_total_val is not None and gen_prev_total_val is not None else None
     gen_amount_total_val = (gen_diff_total_val * gen_mult) if gen_diff_total_val is not None else None
     grid_rev_total_val = grid.get("rev_total") if grid else None
@@ -589,6 +589,7 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
     # ---- 电费结算单源文件 ----
     source_file = (gen or grid or {}).get("source_file")
     price_source = (gen or grid or {}).get("price_source")
+    settlement_source = (gen or grid or {}).get("settlement_source_file")
     all_source_files = set()
 
     if source_file:
@@ -603,6 +604,15 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
             p_path = str(dir_path / price_source)
             if os.path.isfile(p_path):
                 all_source_files.add(p_path)
+
+    # 从 price_records.settlement_source_file 查找结算单文件
+    if settlement_source:
+        if os.path.isfile(settlement_source):
+            all_source_files.add(settlement_source)
+        else:
+            s_path = str(_TEMP_ATTACHMENTS / settlement_source)
+            if os.path.isfile(s_path):
+                all_source_files.add(s_path)
 
     if not all_source_files:
         return
