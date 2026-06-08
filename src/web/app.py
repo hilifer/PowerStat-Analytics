@@ -1202,24 +1202,20 @@ def _register_routes(app: Flask, db: Database):
                 scanned += 1
                 _log(f"[{idx+1}/{total_matched}] OCR提取: {fname}")
                 try:
-                    from train_extract_settlement import process_single_image, process_pdf
-                    import pytesseract
-                    pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
-                    ext = os.path.splitext(fname)[1].lower()
-                    if ext == ".pdf":
-                        records = process_pdf(fpath_str, fname)
-                    else:
-                        records = process_single_image(fpath_str, fname)
-                    if not records:
+                    from bill_settlement_tool import BillSettlementTool
+                    bst = BillSettlementTool(dpi=300)
+                    recs = bst.extract_file(fpath_str)
+                    if not recs:
                         _log(f"  ✗ OCR提取失败")
                         skipped += 1
                         continue
 
                     file_records = 0
-                    for rec in records:
-                        meter_id = rec["meter_id"]
-                        bill_month = rec["month"]
-                        settlement_price = rec["price"]
+                    for rec in recs:
+                        meter_id = rec.bill_id or ""
+                        y, m = rec.month if rec.month else (0, 0)
+                        bill_month = f"{y}-{m:02d}"
+                        settlement_price = rec.price
 
                         # 匹配已知 user_id
                         user_id = meter_id
@@ -1436,9 +1432,8 @@ def _register_routes(app: Flask, db: Database):
                 if uid:
                     known_users[uid] = pname or ""
 
-            from train_extract_settlement import process_single_image, process_pdf
-            import pytesseract
-            pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+            from bill_settlement_tool import BillSettlementTool
+            bst = BillSettlementTool(dpi=300)
 
             for fpath_str in selected:
                 fpath = Path(fpath_str)
@@ -1446,25 +1441,22 @@ def _register_routes(app: Flask, db: Database):
                     results["failed"] += 1
                     continue
                 fname = fpath.name
-                ext = fpath.suffix.lower()
                 try:
-                    if ext == ".pdf":
-                        records = process_pdf(str(fpath), fname)
-                    else:
-                        records = process_single_image(str(fpath), fname)
+                    recs = bst.extract_file(str(fpath))
                 except Exception:
                     results["failed"] += 1
                     continue
 
-                if not records:
+                if not recs:
                     results["skipped"] += 1
                     continue
 
                 file_ok = False
-                for rec in records:
-                    meter_id = rec["meter_id"]
-                    bill_month = rec["month"]
-                    settlement_price = rec["price"]
+                for rec in recs:
+                    meter_id = rec.bill_id or ""
+                    y, m = rec.month if rec.month else (0, 0)
+                    bill_month = f"{y}-{m:02d}"
+                    settlement_price = rec.price
 
                     user_id = meter_id
                     if not user_id:
