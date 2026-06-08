@@ -1,9 +1,9 @@
 """Flask Web 应用：电费数据管理系统的 Web 界面。"""
 
 import hashlib
+import json
 import os
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -1122,12 +1122,12 @@ def _register_routes(app: Flask, db: Database):
                 if mnum:
                     meter_to_user[mnum] = {"user_id": uid, "project_name": pname or ""}
 
-            IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp"}
+            from bill_settlement_tool import BillSettlementTool
+            bst = BillSettlementTool(dpi=300)
 
-            # ---- 步骤 1：全量模式清空 ----
+            # ---- 全量模式清空 ----
             total_processed = 0
             skipped = 0
-            scanned = 0
 
             if clear_first:
                 with db.connection() as conn:
@@ -1140,80 +1140,29 @@ def _register_routes(app: Flask, db: Database):
                     ).rowcount
                     _log(f"已清空 {n} 条上网电价记录")
 
-            # ---- 步骤 2：扫描已有文件（不下邮件） ----
-            source_files = []
+            # ---- 扫描 + 过滤 + 提取（与测试一致：filter_bill_files + extract_file） ----
             temp_dir = Path(config.get("attachments", "temp_dir",
                                        default="output/temp_attachments"))
 
-            if temp_dir.exists():
-                for fpath in sorted(temp_dir.rglob("*")):
-                    if not fpath.is_file() or fpath.name.startswith("~$"):
-                        continue
-                    ext = fpath.suffix.lower()
-                    if ext != ".pdf" and ext not in IMAGE_EXTS:
-                        continue
-                    source_files.append((str(fpath), fpath.name))
+            files = bst.filter_bill_files(str(temp_dir)) if temp_dir.exists() else []
+            _log(f"过滤+去重后电费结算单文件: {len(files)} 个")
 
-            _log(f"共 {len(source_files)} 个文件，开始扫描…")
-
-            if not source_files:
-                _log("没有文件可处理，完成")
-                status["result"] = {"processed": 0, "skipped": 0, "files_scanned": 0}
-                status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                return
-
-            # ---- 第1阶段：文件名过滤（批量，秒级） ----
-            _log("第1阶段：文件名过滤中...")
-            matched_files = []
-            for fpath, fname in source_files:
-                scanned += 1
-                if "电费结算单" in fname or ("结算单" in fname and "电量" not in fname):
-                    matched_files.append((str(fpath), fname))
-            _log(f"第1阶段完成：扫描 {scanned} 个文件 → 匹配 {len(matched_files)} 个结算单")
-
-            # 第1.5阶段：内容去重（MD5）
-            import hashlib
-            seen_hashes = set()
-            deduped = []
-            for fpath, fname in matched_files:
-                try:
-                    with open(fpath, "rb") as f:
-                        h = hashlib.md5(f.read()).hexdigest()
-                except Exception:
-                    continue
-                if h in seen_hashes:
-                    continue
-                seen_hashes.add(h)
-                deduped.append((fpath, fname))
-            dedup_count = len(matched_files) - len(deduped)
-            matched_files = deduped
-            if dedup_count > 0:
-                _log(f"第1.5阶段（内容去重）：去除 {dedup_count} 个重复文件，剩余 {len(matched_files)} 个")
-
-            if not matched_files:
-                _log("没有匹配的结算单文件，完成")
-                status["result"] = {"processed": 0, "skipped": len(source_files), "files_scanned": len(source_files)}
-                status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                return
-
-            # ---- 第2阶段：逐文件OCR提取 ----
-            from bill_settlement_tool import BillSettlementTool
-            bst = BillSettlementTool(dpi=300)
-            total_matched = len(matched_files)
-            for idx, (fpath_str, fname) in enumerate(matched_files):
-                scanned += 1
-                _log(f"[{idx+1}/{total_matched}] OCR提取: {fname}")
+            total_files = len(files)
+            for fi, fpath_str in enumerate(files, 1):
+                fname = os.path.basename(fpath_str)
+                _log(f"[{fi}/{total_files}] OCR提取: {fname}")
                 try:
                     recs = bst.extract_file(fpath_str)
                     if not recs:
-                        _log(f"  ✗ OCR提取失败")
                         skipped += 1
                         continue
 
                     file_records = 0
                     for rec in recs:
-                        meter_id = rec.bill_id or ""
-                        y, m = rec.month if rec.month else (0, 0)
+                        if not rec.bill_id or not rec.month or rec.price == 0.0:
+                            continue
+                        meter_id = rec.bill_id
+                        y, m = rec.month
                         bill_month = f"{y}-{m:02d}"
                         settlement_price = rec.price
 
@@ -1251,14 +1200,10 @@ def _register_routes(app: Flask, db: Database):
                                     skipped += 1
                                     continue
 
-                        # ---- 存入数据库 ----
+                        # ---- 存入数据库（只写上网电价，不动分时电价） ----
                         db.upsert_price(
                             user_id=user_id,
                             reading_month=reading_month,
-                            grid_sharp_peak_price=settlement_price,
-                            grid_peak_price=settlement_price,
-                            grid_flat_price=settlement_price,
-                            grid_valley_price=settlement_price,
                             grid_average_price=settlement_price,
                             settlement_source_file=fpath_str,
                         )
@@ -1277,11 +1222,11 @@ def _register_routes(app: Flask, db: Database):
 
             _log(f"[电费结算单] {mode_label}提取完成！"
                  f"处理 {total_processed} 条，跳过 {skipped} 条"
-                 f"（共扫描 {scanned} 个文件）")
+                 f"（共 {total_files} 个文件）")
             status["result"] = {
                 "processed": total_processed,
                 "skipped": skipped,
-                "files_scanned": scanned,
+                "files_scanned": total_files,
             }
             status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1453,8 +1398,10 @@ def _register_routes(app: Flask, db: Database):
 
                 file_ok = False
                 for rec in recs:
-                    meter_id = rec.bill_id or ""
-                    y, m = rec.month if rec.month else (0, 0)
+                    if not rec.bill_id or not rec.month or rec.price == 0.0:
+                        continue
+                    meter_id = rec.bill_id
+                    y, m = rec.month
                     bill_month = f"{y}-{m:02d}"
                     settlement_price = rec.price
 
@@ -1515,10 +1462,6 @@ def _register_routes(app: Flask, db: Database):
                     db.upsert_price(
                         user_id=user_id,
                         reading_month=reading_month,
-                        grid_sharp_peak_price=settlement_price,
-                        grid_peak_price=settlement_price,
-                        grid_flat_price=settlement_price,
-                        grid_valley_price=settlement_price,
                         grid_average_price=settlement_price,
                         settlement_source_file=fname,
                     )
@@ -2379,7 +2322,6 @@ def _register_routes(app: Flask, db: Database):
         month_is_reading=1 时，month 参数视为抄表月份（读数月份），不做 offset 转换。
         用于 readings.html 的电费单 Tab（显示原始抄表月份）。
         """
-        import json
         from src.web.bill_export import generate_bill_excel
 
         selected_items = None
