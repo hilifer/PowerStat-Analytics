@@ -1197,13 +1197,13 @@ def _register_routes(app: Flask, db: Database):
                 return
 
             # ---- 第2阶段：逐文件OCR提取 ----
+            from bill_settlement_tool import BillSettlementTool
+            bst = BillSettlementTool(dpi=300)
             total_matched = len(matched_files)
             for idx, (fpath_str, fname) in enumerate(matched_files):
                 scanned += 1
                 _log(f"[{idx+1}/{total_matched}] OCR提取: {fname}")
                 try:
-                    from bill_settlement_tool import BillSettlementTool
-                    bst = BillSettlementTool(dpi=300)
                     recs = bst.extract_file(fpath_str)
                     if not recs:
                         _log(f"  ✗ OCR提取失败")
