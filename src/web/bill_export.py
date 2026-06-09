@@ -13,7 +13,11 @@ import io
 import logging
 import os
 import re
+import tempfile
 from collections import OrderedDict
+
+# 存放导出过程中 PDF 转换生成的临时 PNG，工作簿保存后清理
+_source_images_pending = []
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -23,6 +27,10 @@ from openpyxl.styles import (
 )
 from openpyxl.utils import get_column_letter
 from PIL import Image as PilImage
+
+# 逆向查找缓存：{file_path: [BillRecord, ...]}，避免同一文件重复 OCR
+_pdf_page_records_cache = {}
+_bst_instance = None
 
 log = logging.getLogger(__name__)
 
@@ -182,6 +190,8 @@ def generate_bill_excel(db, project_name: str = None, user_id: str = None,
                         month_is_reading: bool = False) -> io.BytesIO:
     """生成月度电费单 Excel 文件（发电统计表格式）。
 
+    每次调用时清除 PDF 页缓存，确保使用最新数据。
+
     Args:
         db: Database 实例
         project_name: 项目名筛选
@@ -194,6 +204,7 @@ def generate_bill_excel(db, project_name: str = None, user_id: str = None,
     Returns:
         BytesIO 流，可直接发送给浏览器
     """
+    _pdf_page_records_cache.clear()
     from src.config_loader import config as _cfg
     bill_offset = int(_cfg.get("billing_month_offset", default=0))
 
@@ -300,6 +311,7 @@ def generate_bill_excel(db, project_name: str = None, user_id: str = None,
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
+    _clean_source_images()
     return buf
 
 
@@ -309,6 +321,41 @@ def _prev_month_key(month_key: str) -> str:
     ny = str(int(y) - 1) if m == "01" else y
     nm = "12" if m == "01" else f"{int(m)-1:02d}"
     return f"{ny}-{nm}"
+
+
+def _find_pdf_pages_for_meter(pdf_path: str, meter_ids: list) -> list:
+    """用 BillSettlementTool 逆向查找，在多页 PDF 中找到指定编号所在页面。
+
+    使用 RapidOCR 逐页提取后反向查找页码，比 pytesseract 更准确。
+    返回 0-based 页码列表（兼容 pypdfium2 索引）。
+    """
+    global _bst_instance, _pdf_page_records_cache
+    if _bst_instance is None:
+        from bill_settlement_tool import BillSettlementTool
+        _bst_instance = BillSettlementTool(dpi=200)
+
+    if pdf_path not in _pdf_page_records_cache:
+        _pdf_page_records_cache[pdf_path] = _bst_instance.extract_file(
+            pdf_path, verbose=False
+        )
+
+    records = _pdf_page_records_cache[pdf_path]
+    target_ids = {str(m).strip() for m in meter_ids}
+    # records 的 page 是 1-based，转成 0-based 返回
+    pages = sorted({
+        r.page - 1 for r in records
+        if r.bill_id and r.bill_id.strip() in target_ids
+    })
+    return pages if pages else [0]
+
+
+def _clean_source_images():
+    for p in _source_images_pending:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+    _source_images_pending.clear()
 
 
 def _build_month_sheet(wb: Workbook, month_key: str,
@@ -485,16 +532,12 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
         else:
             d_price = (price * pricing_param) if price is not None else None
         tier_amount = (self_use * d_price) if self_use is not None and d_price is not None else None
-        # 上网电价：基于上网表的原电价，按价格类型计算
+        # 上网电价：仅取结算单数据（grid_*），不降级到单价表
         grid_price_field = f"grid_{price_field}"
         grid_tier_price = grid.get(grid_price_field) if grid else None
-        if grid_tier_price is None:
-            grid_tier_price = grid.get(price_field) if grid else None
         grid_avg_price = grid.get("grid_average_price") if grid else None
-        if grid_avg_price is None:
-            grid_avg_price = grid.get("average_price") if grid else None
         if grid_avg_price is not None:
-            grid_tier_price = grid_avg_price  # 电费结算单均价覆盖分时原电价
+            grid_tier_price = grid_avg_price  # 结算单均价覆盖分时电价
         grid_pricing_mode = grid.get("pricing_mode") if grid else None
         grid_pricing_param = grid.get("pricing_param") if grid else None
         if grid_pricing_mode == "average":
@@ -586,77 +629,116 @@ def _write_user_bill(ws, month_key: str, udata: dict, project_name: str = None):
     _apply_cell(ws.cell(row=row, column=17), None, _total_font, _total_fill, _right)
     _apply_cell(ws.cell(row=row, column=18), grid_revenue_total, _total_font, _total_fill, _right, "#,##0.00")
 
-    # ---- 电费结算单源文件 ----
+    # ---- 电费结算单源文件（并排：左单价 / 右结算单） ----
+    IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
     source_file = (gen or grid or {}).get("source_file")
     price_source = (gen or grid or {}).get("price_source")
     settlement_source = (gen or grid or {}).get("settlement_source_file")
-    all_source_files = set()
 
-    if source_file:
+    # 收集源文件路径
+    price_path = None
+    settle_path = None
+
+    # 单价来源图片
+    if source_file and price_source:
         dir_path = _TEMP_ATTACHMENTS / os.path.dirname(source_file)
+        p_path = str(dir_path / price_source)
+        ext = os.path.splitext(p_path)[1].lower()
+        if os.path.isfile(p_path) and (ext in IMAGE_EXTS or ext == ".pdf"):
+            price_path = p_path
 
-        # 从目录扫描结算单图片
-        for img_path in _find_settlement_images(source_file, uid, pname):
-            all_source_files.add(img_path)
-
-        # 从 price_records.source_file 查找单价提取源文件
-        if price_source:
-            p_path = str(dir_path / price_source)
-            if os.path.isfile(p_path):
-                all_source_files.add(p_path)
-
-    # 从 price_records.settlement_source_file 查找结算单文件
+    # 结算单来源（优先 settlement_source_file，其次目录扫描）
     if settlement_source:
-        if os.path.isfile(settlement_source):
-            all_source_files.add(settlement_source)
-        else:
+        s_path = settlement_source if os.path.isfile(settlement_source) else ""
+        if not s_path:
             s_path = str(_TEMP_ATTACHMENTS / settlement_source)
-            if os.path.isfile(s_path):
-                all_source_files.add(s_path)
+        if os.path.isfile(s_path):
+            settle_path = s_path
+    if not settle_path and source_file:
+        dir_images = _find_settlement_images(source_file, uid, pname)
+        if dir_images:
+            settle_path = dir_images[0]
 
-    if not all_source_files:
+    if not price_path and not settle_path:
         return
 
-    row += 1
-    IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
-    for src_path in sorted(all_source_files):
-        if not os.path.isfile(src_path):
-            log.warning("源文件不存在: %s", src_path)
-            continue
-
-        fname = os.path.basename(src_path)
-        ext = os.path.splitext(fname)[1].lower()
-
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=total_cols)
-        label_cell = ws.cell(row=row, column=1,
-                             value=f"电费结算单: {fname}")
-        label_cell.font = Font(name="微软雅黑", size=10, bold=True, color="333333")
-        label_cell.alignment = Alignment(horizontal="left", vertical="center")
-
-        row += 1
-
-        if ext in IMAGE_EXTS:
+    # ---- 渲染源文件为图片 ----
+    def _render_to_temp(src: str) -> str:
+        """返回临时 PNG 路径，PDF 则渲染指定页。"""
+        ext = os.path.splitext(src)[1].lower()
+        if ext == ".pdf":
             try:
-                pil_img = PilImage.open(src_path)
-                orig_w, orig_h = pil_img.size
-                pil_img.close()
+                import pypdfium2
+                search_ids = [uid]
+                if gen and gen.get("meter_number"):
+                    search_ids.append(str(gen["meter_number"]))
+                if grid and grid.get("meter_number"):
+                    search_ids.append(str(grid["meter_number"]))
+                pages = _find_pdf_pages_for_meter(src, search_ids)
+                pdf = pypdfium2.PdfDocument(src)
+                pil_img = pdf[pages[0]].render(scale=2).to_pil()
+                pdf.close()
+                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                pil_img.save(tmp.name)
+                _source_images_pending.append(tmp.name)
+                return tmp.name
+            except Exception:
+                return src
+        return src
 
-                target_w_px = 800
-                scale = target_w_px / orig_w if orig_w > 0 else 1.0
-                target_h_pt = orig_h * scale * 0.75
+    price_render = _render_to_temp(price_path) if price_path else None
+    settle_render = _render_to_temp(settle_path) if settle_path else None
 
-                ws.row_dimensions[row].height = target_h_pt
-                xl_img = XlImage(src_path)
-                xl_img.width = target_w_px
-                xl_img.height = orig_h * scale
-                xl_img.anchor = f"A{row}"
-                ws.add_image(xl_img)
-            except Exception as e:
-                log.error("插入图片失败 [%s]: %s", src_path, e)
-                ws.cell(row=row, column=1, value=f"（图片加载失败: {fname}）")
-        else:
-            ws.cell(row=row, column=1,
-                    value=f"（文件格式不支持嵌入: {fname}，请查看原始附件目录）")
-            ws.cell(row=row, column=1).font = Font(name="微软雅黑", size=9, color="999999")
+    # ---- 标签行 ----
+    row += 1
+    label_parts = []
+    if price_path:
+        label_parts.append(os.path.basename(price_path))
+    if settle_path:
+        label_parts.append(os.path.basename(settle_path))
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=total_cols)
+    lbl = ws.cell(row=row, column=1, value=f"来源文件: {' | '.join(label_parts)}")
+    lbl.font = Font(name="微软雅黑", size=10, bold=True, color="333333")
+    lbl.alignment = Alignment(horizontal="left", vertical="center")
 
+    # ---- 图片行 ----
+    row += 1
+    mid_col = total_cols // 2 + 1  # 左右分界线
+    max_h_pt = 0
+
+    MAX_IMAGE_WIDTH_PX = 760
+    MAX_IMAGE_HEIGHT_PT = 400
+
+    def _place_image(img_path: str, anchor_col: int) -> float:
+        nonlocal max_h_pt
+        try:
+            pil = PilImage.open(img_path)
+            ow, oh = pil.size
+            pil.close()
+            scale_w = MAX_IMAGE_WIDTH_PX / ow
+            scale_h = MAX_IMAGE_HEIGHT_PT / (oh * 0.75)
+            scale = min(scale_w, scale_h, 1.0)
+            w_px = int(ow * scale)
+            h_pt = oh * scale * 0.75
+            xl = XlImage(img_path)
+            xl.width = w_px
+            xl.height = oh * scale
+            col_letter = get_column_letter(anchor_col)
+            xl.anchor = f"{col_letter}{row}"
+            ws.add_image(xl)
+            if h_pt > max_h_pt:
+                max_h_pt = h_pt
+            return h_pt
+        except Exception:
+            return 0
+
+    if price_render:
+        _place_image(price_render, 1)  # 左：A 列
+    if settle_render:
+        _place_image(settle_render, mid_col if price_render else 1)  # 右：中间列
+
+    if max_h_pt > 0:
+        ws.row_dimensions[row].height = max_h_pt
         row += 1
+        ws.cell(row=row, column=1, value="")
+    ws.cell(row=row, column=1, value="")
