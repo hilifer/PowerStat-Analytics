@@ -38,7 +38,8 @@ attachments:
 price_extraction:
   # 文件名关键词过滤：仅处理文件名包含此关键词的图片
   # 留空则不过滤，处理所有图片
-  filename_keyword: "微信"
+  filename_keyword: ""
+  content_keyword: "电费通知单"
 
 # --- OCR 设置 ---
 ocr:

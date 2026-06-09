@@ -947,9 +947,11 @@ def _register_routes(app: Flask, db: Database):
             # ---- 步骤 5：提取单价数据（图片 OCR） ----
             if task_type in ("prices", "all"):
                 price_keyword = config.get("price_extraction", "filename_keyword", default="")
+                content_keyword = config.get("price_extraction", "content_keyword", default="")
                 all_ocr = []
                 _log(f"[单价] 开始从 {len(source_files)} 个文件中识别图片…")
                 skipped_by_filter = 0
+                skipped_by_content = 0
                 for i, (fpath, sinfo) in enumerate(source_files, 1):
                     fname = Path(fpath).name
                     file_type = dispatcher.detect_type(fpath)
@@ -963,6 +965,9 @@ def _register_routes(app: Flask, db: Database):
                         _log(f"[单价] OCR 图片 [{ocr_count}] {fname}")
                     try:
                         ocr = dispatcher.ocr_engine.extract_from_image(fpath, sinfo)
+                        if content_keyword and content_keyword not in ocr.raw_text:
+                            skipped_by_content += 1
+                            continue
                         if ocr.has_any_data():
                             all_ocr.append(ocr)
                             if ocr.has_price_data():
@@ -976,7 +981,12 @@ def _register_routes(app: Flask, db: Database):
                     except Exception as e:
                         log.error("OCR 失败 %s: %s", fname, e)
 
-                filter_suffix = f"（关键词过滤跳过 {skipped_by_filter} 张）" if skipped_by_filter else ""
+                filter_parts = []
+                if skipped_by_filter:
+                    filter_parts.append(f"文件名过滤跳过 {skipped_by_filter} 张")
+                if skipped_by_content:
+                    filter_parts.append(f"内容过滤跳过 {skipped_by_content} 张")
+                filter_suffix = f"（{'，'.join(filter_parts)}）" if filter_parts else ""
                 _log(f"[单价] OCR 识别 {ocr_count} 张图片，有效 {len(all_ocr)} 条，写入数据库…{filter_suffix}")
                 # 获取已知 user_id 用于修正 OCR 提取结果
                 known_user_ids = set()
@@ -1098,13 +1108,23 @@ def _register_routes(app: Flask, db: Database):
         """
         status = app.config["BILL_REFRESH_STATUS"]
 
+        log_dir = Path(config.get("attachments", "temp_dir",
+                                   default="output/temp_attachments")).parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"settlement_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        _log_file = open(log_file, "w", encoding="utf-8")
+
         def _log(msg):
             ts = datetime.now().strftime("%H:%M:%S")
-            status["logs"].append(f"[{ts}] {msg}")
+            line = f"[{ts}] {msg}"
+            status["logs"].append(line)
             status["progress"] = msg
+            _log_file.write(line + "\n")
+            _log_file.flush()
 
         mode_label = "全量" if clear_first else "增量"
         _log(f"[电费结算单] {mode_label}提取开始…")
+        _log(f"日志文件: {log_file}")
 
         try:
             from src.pipeline import Pipeline
@@ -1152,7 +1172,7 @@ def _register_routes(app: Flask, db: Database):
                 fname = os.path.basename(fpath_str)
                 _log(f"[{fi}/{total_files}] OCR提取: {fname}")
                 try:
-                    recs = bst.extract_file(fpath_str)
+                    recs = bst.extract_file(fpath_str, log_fn=_log)
                     if not recs:
                         skipped += 1
                         continue
@@ -1229,11 +1249,15 @@ def _register_routes(app: Flask, db: Database):
                 "files_scanned": total_files,
             }
             status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            status["log_file"] = str(log_file)
 
         except Exception as e:
             log.error("电费结算单提取失败: %s", e, exc_info=True)
             _log(f"错误: {e}")
             status["result"] = {"error": str(e)}
+            status["log_file"] = str(log_file)
+        finally:
+            _log_file.close()
 
     def _start_settlement_update(clear_first: bool):
         """启动电费结算单提取后台任务。"""
@@ -1346,6 +1370,21 @@ def _register_routes(app: Flask, db: Database):
         clear_first = data.get("clear_first", False)
         results = {"processed": 0, "failed": 0, "skipped": 0, "detail": ""}
 
+        log_dir = Path(config.get("attachments", "temp_dir",
+                                   default="output/temp_attachments")).parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"settlement_selected_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        _log_file = open(log_file, "w", encoding="utf-8")
+
+        def _log(msg):
+            ts = datetime.now().strftime("%H:%M:%S")
+            line = f"[{ts}] {msg}"
+            results.setdefault("logs", []).append(line)
+            _log_file.write(line + "\n")
+            _log_file.flush()
+
+        _log(f"[选定文件提取] 开始，共 {len(selected)} 个文件")
+
         if clear_first:
             with db.connection() as conn:
                 if target_user_id and target_month:
@@ -1382,17 +1421,20 @@ def _register_routes(app: Flask, db: Database):
 
             for fpath_str in selected:
                 fpath = Path(fpath_str)
+                fname = fpath.name
                 if not fpath.exists():
+                    _log(f"  [失败] {fname} — 文件不存在")
                     results["failed"] += 1
                     continue
-                fname = fpath.name
                 try:
-                    recs = bst.extract_file(str(fpath))
-                except Exception:
+                    recs = bst.extract_file(str(fpath), log_fn=_log)
+                except Exception as e:
+                    _log(f"  [失败] {fname} — {e}")
                     results["failed"] += 1
                     continue
 
                 if not recs:
+                    _log(f"  [跳过] {fname} — OCR 无结果")
                     results["skipped"] += 1
                     continue
 
@@ -1467,14 +1509,20 @@ def _register_routes(app: Flask, db: Database):
                     )
                     results["processed"] += 1
                     file_ok = True
+                    _log(f"  ✓ {fname} → 用户={user_id}, 月份={reading_month}, 电价={settlement_price:.8f}")
 
                 if not file_ok:
+                    _log(f"  [跳过] {fname} — 无有效记录（编号/月份/电价为空）")
                     results["skipped"] += 1
 
+            _log(f"完成：成功 {results['processed']} 条，跳过 {results['skipped']} 条，失败 {results['failed']} 条")
+            results["log_file"] = str(log_file)
             return jsonify(results)
         except Exception as e:
             log.error("结算单提取失败: %s", e, exc_info=True)
             return jsonify({"error": str(e)}), 500
+        finally:
+            _log_file.close()
 
     @app.route("/api/bills/settlement/incremental", methods=["POST"])
     def bill_settlement_incremental():
