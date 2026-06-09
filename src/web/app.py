@@ -947,11 +947,9 @@ def _register_routes(app: Flask, db: Database):
             # ---- 步骤 5：提取单价数据（图片 OCR） ----
             if task_type in ("prices", "all"):
                 price_keyword = config.get("price_extraction", "filename_keyword", default="")
-                content_keyword = config.get("price_extraction", "content_keyword", default="")
                 all_ocr = []
                 _log(f"[单价] 开始从 {len(source_files)} 个文件中识别图片…")
                 skipped_by_filter = 0
-                skipped_by_content = 0
                 for i, (fpath, sinfo) in enumerate(source_files, 1):
                     fname = Path(fpath).name
                     file_type = dispatcher.detect_type(fpath)
@@ -965,9 +963,6 @@ def _register_routes(app: Flask, db: Database):
                         _log(f"[单价] OCR 图片 [{ocr_count}] {fname}")
                     try:
                         ocr = dispatcher.ocr_engine.extract_from_image(fpath, sinfo)
-                        if content_keyword and content_keyword not in ocr.raw_text:
-                            skipped_by_content += 1
-                            continue
                         if ocr.has_any_data():
                             all_ocr.append(ocr)
                             if ocr.has_price_data():
@@ -981,12 +976,7 @@ def _register_routes(app: Flask, db: Database):
                     except Exception as e:
                         log.error("OCR 失败 %s: %s", fname, e)
 
-                filter_parts = []
-                if skipped_by_filter:
-                    filter_parts.append(f"文件名过滤跳过 {skipped_by_filter} 张")
-                if skipped_by_content:
-                    filter_parts.append(f"内容过滤跳过 {skipped_by_content} 张")
-                filter_suffix = f"（{'，'.join(filter_parts)}）" if filter_parts else ""
+                filter_suffix = f"（关键词过滤跳过 {skipped_by_filter} 张）" if skipped_by_filter else ""
                 _log(f"[单价] OCR 识别 {ocr_count} 张图片，有效 {len(all_ocr)} 条，写入数据库…{filter_suffix}")
                 # 获取已知 user_id 用于修正 OCR 提取结果
                 known_user_ids = set()
