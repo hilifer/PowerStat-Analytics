@@ -178,13 +178,13 @@
             <div style="display:flex; align-items:center; gap:1rem; flex-wrap:wrap;">
                 <span style="font-weight:600; font-size:0.9rem;">单价设置</span>
                 <div class="price-edit-grid" data-user-id="{{ group.user_id }}" data-month="{{ sel_month }}">
-                    <label>尖价 <input type="number" step="0.00000001" class="cell-input price-input" name="sharp_peak_price"
+                    <label>尖价 <input type="text" inputmode="decimal" class="cell-input price-input" name="sharp_peak_price"
                         value="{{ '%.8f'|format(gen.sharp_peak_price) if gen and gen.sharp_peak_price is not none else '' }}"></label>
-                    <label>峰价 <input type="number" step="0.00000001" class="cell-input price-input" name="peak_price"
+                    <label>峰价 <input type="text" inputmode="decimal" class="cell-input price-input" name="peak_price"
                         value="{{ '%.8f'|format(gen.peak_price) if gen and gen.peak_price is not none else '' }}"></label>
-                    <label>平价 <input type="number" step="0.00000001" class="cell-input price-input" name="flat_price"
+                    <label>平价 <input type="text" inputmode="decimal" class="cell-input price-input" name="flat_price"
                         value="{{ '%.8f'|format(gen.flat_price) if gen and gen.flat_price is not none else '' }}"></label>
-                    <label>谷价 <input type="number" step="0.00000001" class="cell-input price-input" name="valley_price"
+                    <label>谷价 <input type="text" inputmode="decimal" class="cell-input price-input" name="valley_price"
                         value="{{ '%.8f'|format(gen.valley_price) if gen and gen.valley_price is not none else '' }}"></label>
                 </div>
                 <button class="btn btn-primary btn-sm" onclick="savePrices(this)">保存单价</button>

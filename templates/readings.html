@@ -311,25 +311,25 @@
                 <div class="price-grid" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
                     <div class="price-item">
                         <label>尖价</label>
-                        <input type="number" step="0.00000001" class="cell-input price-input" name="sharp_peak_price"
+                        <input type="text" inputmode="decimal" class="cell-input price-input" name="sharp_peak_price"
                             value="{{ '%.8f'|format(first_r.sharp_peak_price) if first_r and first_r.sharp_peak_price is not none else '' }}"
                             {% if price_locked or any_locked %}disabled{% endif %}>
                     </div>
                     <div class="price-item">
                         <label>峰价</label>
-                        <input type="number" step="0.00000001" class="cell-input price-input" name="peak_price"
+                        <input type="text" inputmode="decimal" class="cell-input price-input" name="peak_price"
                             value="{{ '%.8f'|format(first_r.peak_price) if first_r and first_r.peak_price is not none else '' }}"
                             {% if price_locked or any_locked %}disabled{% endif %}>
                     </div>
                     <div class="price-item">
                         <label>平价</label>
-                        <input type="number" step="0.00000001" class="cell-input price-input" name="flat_price"
+                        <input type="text" inputmode="decimal" class="cell-input price-input" name="flat_price"
                             value="{{ '%.8f'|format(first_r.flat_price) if first_r and first_r.flat_price is not none else '' }}"
                             {% if price_locked or any_locked %}disabled{% endif %}>
                     </div>
                     <div class="price-item">
                         <label>谷价</label>
-                        <input type="number" step="0.00000001" class="cell-input price-input" name="valley_price"
+                        <input type="text" inputmode="decimal" class="cell-input price-input" name="valley_price"
                             value="{{ '%.8f'|format(first_r.valley_price) if first_r and first_r.valley_price is not none else '' }}"
                             {% if price_locked or any_locked %}disabled{% endif %}>
                     </div>
@@ -359,7 +359,7 @@
                 <div class="price-grid settlement-price-grid" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
                     <div class="price-item" style="min-width:200px;">
                         <label>上网电价</label>
-                        <input type="number" step="0.00000001" class="cell-input price-input" name="grid_average_price"
+                        <input type="text" inputmode="decimal" class="cell-input price-input" name="grid_average_price"
                             value="{{ '%.8f'|format(first_r.grid_average_price) if first_r and first_r.grid_average_price is not none else '' }}"
                             {% if settlement_locked %}disabled{% endif %}>
                     </div>
@@ -1051,7 +1051,7 @@
 <script>
 
 /* === Tab 切换 === */
-function switchTab(tabName) {
+window.switchTab = function switchTab(tabName) {
     document.querySelectorAll('.tab-btn').forEach(function(btn) {
         btn.classList.toggle('active', btn.getAttribute('data-tab') === tabName);
     });
@@ -1060,7 +1060,7 @@ function switchTab(tabName) {
     });
     // 记住选中的 tab
     try { sessionStorage.setItem('readings_tab', tabName); } catch(e) {}
-}
+};
 // 恢复上次选中的 tab
 (function() {
     try {
@@ -1094,17 +1094,84 @@ function filterReadingsMonth() {
     if (month) filterReadingsMonth();
 })();
 
+/* === 导出遮罩 === */
+function showExportLoading(text) {
+    document.getElementById('exportLoadingOverlay').style.display = 'flex';
+    document.getElementById('exportLoadingText').textContent = text || '处理中...';
+}
+function hideExportLoading() {
+    document.getElementById('exportLoadingOverlay').style.display = 'none';
+}
+
 /* === 单月电费单导出（此页面月份为原始抄表月份，传 month_is_reading=1） === */
 function exportMonthBill(userId, month, project) {
+    showExportLoading('正在生成电费单...');
     var params = new URLSearchParams();
     if (project) params.set('project', project);
     if (userId) params.set('user_id', userId);
     if (month) params.set('month', month);
     params.set('month_is_reading', '1');
-    var url = "{{ url_for('bills_export_excel') }}";
-    var qs = params.toString();
-    if (qs) url += '?' + qs;
-    window.location.href = url;
+    var url = "{{ url_for('bills_export_excel') }}?" + params.toString();
+    fetch(url)
+        .then(function(r) {
+            if (!r.ok) throw new Error('导出失败');
+            var disposition = r.headers.get('Content-Disposition') || '';
+            var match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+            var filename = match ? match[1].replace(/['"]/g, '') : '电费单.xlsx';
+            return r.blob().then(function(blob) { return { blob: blob, filename: filename }; });
+        })
+        .then(function(result) {
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(result.blob);
+            a.download = result.filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(a.href);
+        })
+        .catch(function(e) {
+            alert('导出失败: ' + e.message);
+        })
+        .finally(function() {
+            hideExportLoading();
+        });
+}
+
+/* === 批量导出 === */
+function exportSelectedBills() {
+    var checked = document.querySelectorAll('.bill-check:checked');
+    if (checked.length === 0) return;
+    showExportLoading('正在生成批量电费单...');
+    var items = [];
+    checked.forEach(function(cb) {
+        items.push({ user_id: cb.getAttribute('data-user'), month: cb.getAttribute('data-month') });
+    });
+    var formData = new FormData();
+    formData.append('items', JSON.stringify(items));
+    formData.append('month_is_reading', '1');
+    fetch("{{ url_for('bills_export_excel') }}", { method: 'POST', body: formData })
+        .then(function(r) {
+            if (!r.ok) throw new Error('导出失败');
+            var disposition = r.headers.get('Content-Disposition') || '';
+            var match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+            var filename = match ? match[1].replace(/['"]/g, '') : '批量电费单.xlsx';
+            return r.blob().then(function(blob) { return { blob: blob, filename: filename }; });
+        })
+        .then(function(result) {
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(result.blob);
+            a.download = result.filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(a.href);
+        })
+        .catch(function(e) {
+            alert('导出失败: ' + e.message);
+        })
+        .finally(function() {
+            hideExportLoading();
+        });
 }
 
 /* === 电费单筛选 === */
@@ -1124,7 +1191,6 @@ function filterBills() {
             return;
         }
 
-        // 按月份过滤月块
         var anyVisible = false;
         card.querySelectorAll('.bill-month-block').forEach(function(block) {
             var blockMonth = block.getAttribute('data-month');
@@ -1134,7 +1200,6 @@ function filterBills() {
         });
         card.style.display = anyVisible ? '' : 'none';
     });
-    // 筛选后重置选择状态
     uncheckHiddenBills();
     updateBillSelection();
 }
@@ -1156,7 +1221,6 @@ function uncheckHiddenBills() {
     });
 }
 
-/* === 电费单勾选 === */
 function getVisibleBillChecks() {
     return Array.from(document.querySelectorAll('.bill-check')).filter(function(cb) {
         var block = cb.closest('.bill-month-block');
@@ -1176,44 +1240,9 @@ function updateBillSelection() {
     var checked = visible.filter(function(cb) { return cb.checked; });
     document.getElementById('billSelectedCount').textContent = '已选 ' + checked.length + ' 项';
     document.getElementById('billBatchExportBtn').disabled = checked.length === 0;
-    // 同步全选框状态
     var masterCb = document.getElementById('billSelectAll');
     masterCb.checked = visible.length > 0 && checked.length === visible.length;
     masterCb.indeterminate = checked.length > 0 && checked.length < visible.length;
-}
-
-/* === 批量导出已选电费单 === */
-function exportSelectedBills() {
-    var checked = document.querySelectorAll('.bill-check:checked');
-    if (checked.length === 0) return;
-
-    var items = [];
-    checked.forEach(function(cb) {
-        items.push({ user_id: cb.getAttribute('data-user'), month: cb.getAttribute('data-month') });
-    });
-
-    // 通过隐藏表单 POST 提交
-    var form = document.createElement('form');
-    form.method = 'POST';
-    form.action = "{{ url_for('bills_export_excel') }}";
-    form.style.display = 'none';
-
-    var input = document.createElement('input');
-    input.type = 'hidden';
-    input.name = 'items';
-    input.value = JSON.stringify(items);
-    form.appendChild(input);
-
-    // 此页面的 month 是原始抄表月份，告诉后端不做 offset 转换
-    var flag = document.createElement('input');
-    flag.type = 'hidden';
-    flag.name = 'month_is_reading';
-    flag.value = '1';
-    form.appendChild(flag);
-
-    document.body.appendChild(form);
-    form.submit();
-    document.body.removeChild(form);
 }
 
 /* === 保存（抄表 + 单价一起保存） === */
@@ -1235,7 +1264,7 @@ function saveAll(btn, userId, month) {
     var priceGrid = block.querySelector('.price-grid');
     var prices = {};
     var hasPrice = false;
-    priceGrid.querySelectorAll('.price-input').forEach(function(inp) {
+    if (priceGrid) priceGrid.querySelectorAll('.price-input').forEach(function(inp) {
         var v = inp.value.trim();
         prices[inp.name] = v === '' ? null : parseFloat(v);
         if (v !== '') hasPrice = true;
@@ -2077,4 +2106,15 @@ function confirmSettlementExtract() {
         </div>
     </div>
 </div>
+
+{# 全局导出遮罩 #}
+<div id="exportLoadingOverlay" style="display:none;position:fixed;inset:0;z-index:99999;
+     background:rgba(0,0,0,0.5);flex-direction:column;align-items:center;justify-content:center;">
+  <div style="border:4px solid #f3f3f3;border-top:4px solid #3498db;border-radius:50%;
+              width:48px;height:48px;animation:spin 0.8s linear infinite;"></div>
+  <div id="exportLoadingText" style="color:#fff;font-size:18px;margin-top:16px;">处理中...</div>
+</div>
+<style>
+@keyframes spin { 0%{transform:rotate(0deg)} 100%{transform:rotate(360deg)} }
+</style>
 {% endblock %}
