@@ -35,6 +35,7 @@ class OCRResult:
         self.source_file: str = ""
         self.confidence: float = 0.0
         self.meter_records: list[dict] = []
+        self.bill_type: int = 0
 
     def has_price_data(self) -> bool:
         return any(v is not None for v in [
@@ -182,6 +183,7 @@ class OCREngine:
 
             # 提取单价（多级策略）
             prices = self._extract_prices(raw_text)
+            result.bill_type = self._detect_bill_type(raw_text)
             result.sharp_peak_price = prices.get("sharp_peak_price")
             result.peak_price = prices.get("peak_price")
             result.flat_price = prices.get("flat_price")
