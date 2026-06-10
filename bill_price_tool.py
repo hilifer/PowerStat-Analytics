@@ -175,9 +175,7 @@ class BillPriceTool:
     """电费通知单 尖峰平谷提取 / 比对 工具类。"""
 
     SUPPORTED_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-    FILTER_KEYWORD = "中国南方电网"
-    # 文件名预过滤：跳过明显不是电费通知单的文件
-    SKIP_FILENAME_PATTERNS = ["结算单", "核算单", "电量", "补贴"]
+    KEEP_KEYWORD = "电费通知单"
 
     def __init__(self, ocr_engine=None):
         self._ocr = ocr_engine
@@ -217,7 +215,7 @@ class BillPriceTool:
                         ext = os.path.splitext(fname)[1].lower()
                         if ext not in cls.SUPPORTED_EXT:
                             continue
-                        if any(kw in fname for kw in cls.SKIP_FILENAME_PATTERNS):
+                        if cls.KEEP_KEYWORD not in fname:
                             skipped_name += 1
                             continue
                         files.append(os.path.join(root, fname))
@@ -225,7 +223,7 @@ class BillPriceTool:
                 print(f"  路径不存在: {p}")
 
         if verbose and skipped_name:
-            print(f"  文件名预过滤跳过 {skipped_name} 个（结算单/核算单等）")
+            print(f"  文件名过滤跳过 {skipped_name} 个（不含\"{cls.KEEP_KEYWORD}\"）")
 
         # 按内容去重
         seen: dict = {}
@@ -294,13 +292,6 @@ class BillPriceTool:
                     log_fn(msg)
                 elif verbose:
                     print(msg)
-                continue
-
-            # 内容过滤：文本必须包含"中国南方电网"
-            if self.FILTER_KEYWORD not in ocr_result.raw_text:
-                skipped_content += 1
-                if verbose:
-                    print(f"[{fi}/{total}] OCR {fname} → ✗ 内容不包含\"{self.FILTER_KEYWORD}\"，跳过")
                 continue
 
             # 必须提取到单价数据
@@ -619,7 +610,7 @@ def _main(argv: List[str]) -> int:
         print(f"[方法1] 共 {len(files)} 个文件\n")
 
         # 步骤 2：提取尖峰平谷
-        print(f"[方法2] OCR 提取尖峰平谷（只保留含\"{BillPriceTool.FILTER_KEYWORD}\"的图片）…")
+        print(f"[方法2] OCR 提取尖峰平谷…")
         records = tool.extract_prices(files, verbose=verbose or show_detail)
         print(f"[方法2] 有效结果 {len(records)} 条\n")
 
