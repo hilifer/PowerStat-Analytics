@@ -12,3 +12,4 @@ build/
 .venv/
 venv/
 output/data/powerstat.db
+output/price_extract_result.json
