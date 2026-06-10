@@ -1092,7 +1092,7 @@ def _register_routes(app: Flask, db: Database):
                 fname = os.path.basename(fpath_str)
                 _log(f"[{fi}/{total_files}] OCR提取: {fname}")
                 try:
-                    recs = bst.extract_file(fpath_str, log_fn=_log)
+                    recs = bst.extract_file(fpath_str)
                     if not recs:
                         skipped += 1
                         continue
@@ -1347,7 +1347,7 @@ def _register_routes(app: Flask, db: Database):
                     results["failed"] += 1
                     continue
                 try:
-                    recs = bst.extract_file(str(fpath), log_fn=_log)
+                    recs = bst.extract_file(str(fpath))
                 except Exception as e:
                     _log(f"  [失败] {fname} — {e}")
                     results["failed"] += 1
