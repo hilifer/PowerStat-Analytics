@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}归档浏览 - PowerStat{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <span>归档浏览</span>
+</div>
+
+<h1 style="margin-bottom:1rem;">归档浏览（按年月分类）</h1>
+
+{% if months %}
+{% for month, files in months.items() %}
+<details class="archive-month" {% if loop.first %}open{% endif %}>
+    <summary>{{ month }} <span style="color:var(--text-secondary);font-weight:normal;font-size:0.85rem;">({{ files|length }} 个文件)</span></summary>
+    <div class="archive-files">
+        {% for f in files %}
+        <div class="file-item">
+            <div>
+                <span class="file-name">
+                    {% if f.subfolder %}
+                    <span style="color:var(--text-secondary);font-size:0.75rem;">{{ f.subfolder }}/</span>
+                    {% endif %}
+                    {{ f.name }}
+                </span>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.75rem;">
+                <span class="file-meta">{{ f.size_kb }} KB</span>
+                <a href="{{ url_for('archive_download', filepath=f.path) }}" class="btn btn-outline btn-sm">下载</a>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</details>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <p>暂无归档文件</p>
+    <a href="{{ url_for('index') }}" class="btn btn-primary">返回首页刷新邮件</a>
+</div>
+{% endif %}
+
+<div style="margin-top:1.5rem;">
+    <a href="{{ url_for('index') }}" class="btn btn-secondary">返回首页</a>
+</div>
+{% endblock %}

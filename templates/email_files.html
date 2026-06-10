@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}邮件文件 - PowerStat{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <span>邮件文件</span>
+</div>
+
+<h1 style="margin-bottom:1rem;">邮件文件</h1>
+
+{% if email_groups %}
+{% for group in email_groups %}
+<details class="email-group" {% if loop.first %}open{% endif %}>
+    <summary>
+        <span class="email-title">{{ group.name }}</span>
+        <span class="email-meta">{{ group.file_count }} 个文件{% if group.image_count %}，{{ group.image_count }} 张图片{% endif %}</span>
+    </summary>
+    <div class="email-files">
+        {% set current_sub = [None] %}
+        {% for f in group.files %}
+        {% if f.subfolder and f.subfolder != current_sub[0] %}
+        {% if current_sub.append(f.subfolder) %}{% endif %}
+        <div class="subfolder-label">{{ f.subfolder }}</div>
+        {% elif not f.subfolder and current_sub[0] %}
+        {% if current_sub.append(None) %}{% endif %}
+        {% endif %}
+        <div class="file-item {% if f.is_image %}file-image{% endif %}">
+            <div style="display:flex; align-items:center; gap:0.5rem; min-width:0; flex:1;">
+                <span class="file-icon">
+                    {% if f.is_image %}&#128247;
+                    {% elif f.is_excel %}&#128202;
+                    {% elif f.ext == '.pdf' %}&#128196;
+                    {% elif f.ext in ('.zip',) %}&#128230;
+                    {% else %}&#128196;{% endif %}
+                </span>
+                <span class="file-name" title="{{ f.name }}">{{ f.name }}</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                <span class="file-size">{{ f.size_kb }} KB</span>
+                {% if f.is_image %}
+                <button class="btn btn-sm btn-outline" onclick="previewImage('{{ f.path }}')">预览</button>
+                {% endif %}
+                <a href="{{ url_for('email_file_download', filepath=f.path) }}" class="btn btn-sm btn-outline">下载</a>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</details>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <p>暂无邮件附件文件</p>
+    <p style="font-size:0.9rem;">在首页点击「增量更新」从邮箱下载</p>
+</div>
+{% endif %}
+
+{# 图片预览弹窗 #}
+<div id="imageModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%;
+     background:rgba(0,0,0,0.85); z-index:9999; cursor:pointer; overflow:auto;"
+     onclick="closeModal()">
+    <div style="position:absolute; top:10px; right:20px; color:#fff; font-size:2rem; cursor:pointer; z-index:10000;">&times;</div>
+    <div style="display:flex; align-items:center; justify-content:center; min-height:100vh; padding:2rem;">
+        <img id="modalImg" style="max-width:95%; max-height:95vh; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.5);"
+             onclick="event.stopPropagation();">
+    </div>
+</div>
+
+<style>
+.email-group {
+    margin-bottom:0.75rem;
+}
+.email-group summary {
+    cursor:pointer; font-weight:600; font-size:0.95rem;
+    padding:0.75rem 1rem;
+    background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+    display:flex; align-items:center; justify-content:space-between;
+    list-style:none;
+}
+.email-group summary::before { content:""; }
+.email-group[open] summary { border-bottom-left-radius:0; border-bottom-right-radius:0; }
+.email-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.email-meta { font-size:0.8rem; font-weight:400; color:var(--text-secondary); white-space:nowrap; margin-left:1rem; }
+.email-files {
+    border:1px solid var(--border); border-top:none;
+    border-radius:0 0 var(--radius) var(--radius);
+    padding:0.25rem 0.5rem;
+    background:var(--surface);
+}
+.subfolder-label {
+    font-size:0.75rem; font-weight:600; color:var(--text-secondary);
+    padding:0.4rem 0.75rem 0.15rem; text-transform:uppercase; letter-spacing:0.03em;
+    border-top:1px solid var(--border); margin-top:0.25rem;
+}
+.subfolder-label:first-child { border-top:none; margin-top:0; }
+.file-item {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:0.35rem 0.75rem; border-radius:4px; gap:0.5rem;
+}
+.file-item:hover { background:#f8fafc; }
+.file-icon { font-size:1rem; flex-shrink:0; }
+.file-name {
+    font-size:0.83rem; min-width:0; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap;
+}
+.file-size { font-size:0.75rem; color:var(--text-secondary); white-space:nowrap; }
+</style>
+
+<script>
+function previewImage(filepath) {
+    var modal = document.getElementById('imageModal');
+    var img = document.getElementById('modalImg');
+    img.src = '/email-files/view/' + filepath;
+    modal.style.display = 'block';
+    document.body.style.overflow = 'hidden';
+}
+function closeModal() {
+    document.getElementById('imageModal').style.display = 'none';
+    document.body.style.overflow = '';
+}
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeModal(); });
+</script>
+{% endblock %}

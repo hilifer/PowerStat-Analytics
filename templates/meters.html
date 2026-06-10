@@ -1,0 +1,445 @@
+{% extends "base.html" %}
+{% block title %}电表管理 - PowerStat{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <span>电表管理</span>
+</div>
+
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem; flex-wrap:wrap; gap:0.5rem;">
+    <h1 style="margin:0;">电表管理</h1>
+    <a href="{{ url_for('meter_create') }}" class="btn btn-primary">新建电表</a>
+</div>
+
+<!-- 筛选栏 -->
+<form method="GET" action="{{ url_for('meters_list') }}" class="filter-bar">
+    <div class="filter-group">
+        <label>项目</label>
+        <select name="project" class="auto-submit">
+            <option value="">全部项目</option>
+            {% for p in projects %}
+            <option value="{{ p }}" {% if sel_project == p %}selected{% endif %}>{{ p }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>用户编号</label>
+        <select name="user_id" class="auto-submit">
+            <option value="">全部用户</option>
+            {% for u in user_ids %}
+            <option value="{{ u }}" {% if sel_user_id == u %}selected{% endif %}>{{ u }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <button type="submit" class="btn btn-secondary btn-sm">筛选</button>
+    <a href="{{ url_for('meters_list') }}" class="btn btn-outline btn-sm">重置</a>
+</form>
+
+{% if meters %}
+<div class="card-header" style="border:none; padding:0; margin-bottom:0.5rem;">
+    <h2>共 {{ meters|length }} 块电表，{{ meter_groups|length }} 个用户</h2>
+</div>
+
+{% for uid, group in meter_groups|items %}
+<div class="card" style="margin-bottom:1rem;">
+    <div class="card-header">
+        <h2 style="font-size:0.95rem;">
+            用户编号: <strong>{{ uid }}</strong>
+            <span style="color:var(--text-secondary); font-weight:normal; margin-left:0.5rem;">
+                {{ group[0].project_name or '' }}
+            </span>
+        </h2>
+        <span style="font-size:0.8rem; color:var(--text-secondary); display:flex; align-items:center; gap:0.5rem;">
+            {% set gen_count = group|selectattr('meter_type', 'equalto', '发电表')|list|length %}
+            {% set grid_count = group|selectattr('meter_type', 'equalto', '上网表')|list|length %}
+            {% if gen_count > 0 and grid_count > 0 %}
+            <span class="tag tag-gen" style="font-size:0.7rem;">发电表 {{ gen_count }}</span>
+            <span style="margin:0 0.25rem;">+</span>
+            <span class="tag tag-grid" style="font-size:0.7rem;">上网表 {{ grid_count }}</span>
+            {% elif gen_count > 0 %}
+            <span class="tag tag-gen" style="font-size:0.7rem;">发电表 {{ gen_count }}</span>
+            {% elif grid_count > 0 %}
+            <span class="tag tag-grid" style="font-size:0.7rem;">上网表 {{ grid_count }}</span>
+            {% endif %}
+            <a class="btn btn-outline btn-sm" style="font-size:0.7rem; padding:2px 8px; margin-left:0.25rem;" onclick="showSources('{{ uid }}')">数据来源</a>
+        </span>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>电表号</th>
+                    <th>资产编号</th>
+                    <th>类型</th>
+                    <th class="num">倍率</th>
+                    <th>计价模式</th>
+                    <th>配对电表</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for m in group|sort(attribute='meter_type') %}
+                <tr>
+                    <td>
+                        <a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="row-link">{{ m.meter_number or '-' }}</a>
+                        {% if m.is_locked %}<span class="tag-lock" title="已锁定，不会被自动更新">&#128274;</span>{% endif %}
+                    </td>
+                    <td style="font-size:0.8rem;">{{ m.asset_number or '-' }}</td>
+                    <td>
+                        {% if m.meter_type == '上网表' %}
+                        <span class="tag tag-grid">上网表</span>
+                        {% elif m.meter_type == '发电表' %}
+                        <span class="tag tag-gen">发电表</span>
+                        {% else %}
+                        <span class="tag tag-unknown">{{ m.meter_type }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="num">{{ m.multiplier }}</td>
+                    <td style="font-size:0.8rem;">
+                        {% set pm = m.pricing_mode or 'discount' %}
+                        {% if pm == 'fixed_discount' %}
+                        优惠固定价 -{{ '%.4f'|format(m.pricing_param) }}/kWh
+                        {% elif pm == 'fixed_price' %}
+                        固定价 {{ '%.8f'|format(m.pricing_param) }}/kWh
+                        {% elif m.discount and m.discount != 1.0 %}
+                        折扣 {{ '%.2f'|format(m.discount) }} ({{ '%.1f'|format(m.discount * 10) }}折)
+                        {% else %}
+                        折扣 1.0 (10折)
+                        {% endif %}
+                    </td>
+                    <td style="font-size:0.8rem;">
+                        {% if m.paired_meter_id %}
+                            {% set partner = meters|selectattr('id', 'equalto', m.paired_meter_id)|first %}
+                        {% else %}
+                            {% set partner = none %}
+                        {% endif %}
+                        {% if partner %}
+                        <a href="{{ url_for('meter_detail', meter_id=partner.id) }}" style="color:var(--primary);">
+                            {% if partner.meter_type == '发电表' %}发电{% else %}上网{% endif %}
+                            {{ partner.meter_number[-6:] }}
+                        </a>
+                        {% else %}
+                        <span style="color:var(--text-secondary);">-</span>
+                        {% endif %}
+                    </td>
+                    <td style="white-space:nowrap;">
+                        <a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="btn btn-outline btn-sm">详情</a>
+                        <button class="btn btn-danger btn-sm" onclick="deleteMeter('{{ m.meter_number }}')">删除</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endfor %}
+
+{% if ungrouped %}
+<div class="card" style="margin-bottom:1rem;">
+    <div class="card-header">
+        <h2 style="font-size:0.95rem;">未关联用户编号</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>电表号</th>
+                    <th>资产编号</th>
+                    <th>类型</th>
+                    <th class="num">倍率</th>
+                    <th>项目</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for m in ungrouped %}
+                <tr>
+                    <td>
+                        <a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="row-link">{{ m.meter_number or '-' }}</a>
+                        {% if m.is_locked %}<span class="tag-lock" title="已锁定，不会被自动更新">&#128274;</span>{% endif %}
+                    </td>
+                    <td style="font-size:0.8rem;">{{ m.asset_number or '-' }}</td>
+                    <td>
+                        {% if m.meter_type == '上网表' %}
+                        <span class="tag tag-grid">上网表</span>
+                        {% elif m.meter_type == '发电表' %}
+                        <span class="tag tag-gen">发电表</span>
+                        {% else %}
+                        <span class="tag tag-unknown">{{ m.meter_type }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="num">{{ m.multiplier }}</td>
+                    <td>{{ m.project_name or '-' }}</td>
+                    <td style="white-space:nowrap;">
+                        <a href="{{ url_for('meter_detail', meter_id=m.id) }}" class="btn btn-outline btn-sm">详情</a>
+                        <button class="btn btn-danger btn-sm" onclick="deleteMeter('{{ m.meter_number }}')">删除</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
+{% else %}
+<div class="empty-state">
+    <p>暂无电表数据</p>
+    <a href="{{ url_for('index') }}" class="btn btn-primary">返回首页刷新邮件</a>
+</div>
+{% endif %}
+
+<!-- 文件内容查看弹窗 -->
+<div id="file-view-modal" class="source-modal-overlay" onclick="if(event.target===this)closeFileViewModal()" style="z-index:10000;">
+    <div class="source-modal" style="width:90vw; max-width:1000px;">
+        <div class="source-modal-header">
+            <span id="file-view-title" class="source-modal-title">文件内容</span>
+            <button class="source-modal-close" onclick="closeFileViewModal()">&times;</button>
+        </div>
+        <div id="file-view-body" class="source-modal-body" style="max-height:70vh; overflow:auto;">
+            <div class="source-modal-loading">加载中…</div>
+        </div>
+    </div>
+</div>
+
+<!-- 数据来源弹窗 -->
+<div id="source-modal" class="source-modal-overlay" onclick="if(event.target===this)closeSourceModal()">
+    <div class="source-modal">
+        <div class="source-modal-header">
+            <span id="source-modal-title" class="source-modal-title">数据来源</span>
+            <button class="source-modal-close" onclick="closeSourceModal()">&times;</button>
+        </div>
+        <div id="source-modal-body" class="source-modal-body">
+            <div class="source-modal-loading">加载中…</div>
+        </div>
+    </div>
+</div>
+
+<style>
+.source-modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: rgba(0,0,0,0.6);
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+}
+.source-modal {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.3);
+    max-width: 90vw;
+    max-height: 80vh;
+    width: 720px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.source-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #eee;
+    flex-shrink: 0;
+}
+.source-modal-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: #333;
+}
+.source-modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    color: #999;
+    cursor: pointer;
+    padding: 0 0.3rem;
+    line-height: 1;
+}
+.source-modal-close:hover { color: #333; }
+.source-modal-body {
+    overflow: auto;
+    padding: 1.5rem;
+    flex: 1;
+    min-height: 120px;
+}
+.source-modal-loading {
+    text-align: center;
+    padding: 2rem;
+    color: var(--text-secondary);
+}
+.source-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.source-table th {
+    background: #f5f7fa;
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 2px solid #e0e0e0;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+}
+.source-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid #f0f0f0;
+    word-break: break-all;
+}
+.source-table tr:hover td {
+    background: #f8f9ff;
+}
+</style>
+
+<script>
+function showSources(userId) {
+    var modal = document.getElementById('source-modal');
+    var body = document.getElementById('source-modal-body');
+    var title = document.getElementById('source-modal-title');
+    title.textContent = '数据来源 - 用户 ' + userId;
+    body.innerHTML = '<div class="source-modal-loading">加载中…</div>';
+    modal.style.display = 'flex';
+
+    fetch('/api/meters/sources?user_id=' + encodeURIComponent(userId))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.sources || data.sources.length === 0) {
+                body.innerHTML = '<p style="text-align:center;color:var(--text-secondary);">暂无数据来源记录</p>';
+                return;
+            }
+            var html = '<table class="source-table"><thead><tr>'
+                + '<th>电表号</th><th>类型</th><th>月份</th><th>来源文件</th><th>工作表</th>'
+                + '</tr></thead><tbody>';
+            data.sources.forEach(function(s) {
+                var typeTag = s.meter_type === '发电表'
+                    ? '<span class="tag tag-gen">' + s.meter_type + '</span>'
+                    : (s.meter_type === '上网表'
+                        ? '<span class="tag tag-grid">' + s.meter_type + '</span>'
+                        : (s.meter_type || '-'));
+                var fileCell = s.source_file
+                    ? '<a href="javascript:void(0)" onclick="viewSourceFile(\'' + s.source_file.replace(/'/g, "\\'") + '\', \'' + (s.source_sheet || '').replace(/'/g, "\\'") + '\')" style="color:var(--primary);text-decoration:underline;cursor:pointer;">' + s.source_file + '</a>'
+                    : '-';
+                html += '<tr>'
+                    + '<td>' + (s.meter_number || '-') + '</td>'
+                    + '<td>' + typeTag + '</td>'
+                    + '<td>' + (s.reading_month || '-') + '</td>'
+                    + '<td>' + fileCell + '</td>'
+                    + '<td>' + (s.source_sheet || '-') + '</td>'
+                    + '</tr>';
+            });
+            html += '</tbody></table>';
+            body.innerHTML = html;
+        })
+        .catch(function(e) {
+            body.innerHTML = '<p style="text-align:center;color:var(--danger);">加载失败: ' + e + '</p>';
+        });
+}
+
+function closeSourceModal() {
+    document.getElementById('source-modal').style.display = 'none';
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        var fvm = document.getElementById('file-view-modal');
+        if (fvm && fvm.style.display === 'flex') {
+            closeFileViewModal();
+        } else {
+            closeSourceModal();
+        }
+    }
+});
+
+function viewSourceFile(filename, sheet) {
+    var modal = document.getElementById('file-view-modal');
+    var body = document.getElementById('file-view-body');
+    var title = document.getElementById('file-view-title');
+    title.textContent = filename;
+    body.innerHTML = '<div class="source-modal-loading">加载中…</div>';
+    modal.style.display = 'flex';
+
+    var url = '/api/source-file/view?filename=' + encodeURIComponent(filename);
+    if (sheet) url += '&sheet=' + encodeURIComponent(sheet);
+
+    fetch(url)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                body.innerHTML = '<p style="text-align:center;color:var(--danger);">' + data.error + '</p>';
+                return;
+            }
+            if (data.type === 'excel') {
+                var html = '';
+                if (data.all_sheet_names.length > 1) {
+                    html += '<div style="display:flex;gap:4px;margin-bottom:.75rem;flex-wrap:wrap;">';
+                    data.all_sheet_names.forEach(function(sn) {
+                        var isActive = data.sheets.some(function(s) { return s.sheet_name === sn; });
+                        html += '<span style="padding:4px 12px;border:1px solid ' + (isActive ? 'var(--primary)' : '#ddd') + ';border-radius:4px;font-size:.8rem;cursor:pointer;background:' + (isActive ? 'var(--primary);color:#fff' : '#f8f9fa') + ';" '
+                              + 'onclick="viewSourceFile(\'' + filename.replace(/'/g, "\\'") + '\', \'' + sn.replace(/'/g, "\\'") + '\')">'
+                              + sn + '</span>';
+                    });
+                    html += '</div>';
+                }
+                data.sheets.forEach(function(s) {
+                    html += '<div style="overflow-x:auto;"><table class="source-table"><tbody>';
+                    s.rows.forEach(function(row, ri) {
+                        html += '<tr>';
+                        row.forEach(function(cell) {
+                            var tag = ri === 0 ? 'th' : 'td';
+                            html += '<' + tag + '>' + (cell || '') + '</' + tag + '>';
+                        });
+                        html += '</tr>';
+                    });
+                    html += '</tbody></table></div>';
+                    if (s.truncated) {
+                        html += '<p style="text-align:center;color:#999;font-size:.8rem;margin-top:.5rem;">仅显示前 200 行</p>';
+                    }
+                });
+                body.innerHTML = html;
+            } else if (data.type === 'image') {
+                body.innerHTML = '<div style="text-align:center;"><img src="data:' + data.mime + ';base64,' + data.data + '" style="max-width:100%;max-height:65vh;"></div>';
+            } else if (data.type === 'csv') {
+                var html = '<div style="overflow-x:auto;"><table class="source-table"><thead><tr>';
+                data.headers.forEach(function(h) { html += '<th>' + h + '</th>'; });
+                html += '</tr></thead><tbody>';
+                data.rows.forEach(function(row) {
+                    html += '<tr>';
+                    row.forEach(function(cell) { html += '<td>' + (cell || '') + '</td>'; });
+                    html += '</tr>';
+                });
+                html += '</tbody></table></div>';
+                body.innerHTML = html;
+            }
+        })
+        .catch(function(e) {
+            body.innerHTML = '<p style="text-align:center;color:var(--danger);">加载失败: ' + e + '</p>';
+        });
+}
+
+function closeFileViewModal() {
+    document.getElementById('file-view-modal').style.display = 'none';
+}
+
+function deleteMeter(meterNumber) {
+    if (!confirm('确定要删除电表 ' + meterNumber + ' 吗？\n\n该操作将同时删除该电表的所有抄表记录，且不可恢复！')) {
+        return;
+    }
+    fetch('/api/meters/' + meterNumber + '/delete', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (d.success) {
+                location.reload();
+            } else {
+                alert(d.error || '删除失败');
+            }
+        })
+        .catch(e => alert('请求失败: ' + e));
+}
+</script>
+{% endblock %}

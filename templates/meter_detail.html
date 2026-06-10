@@ -1,0 +1,503 @@
+{% extends "base.html" %}
+{% block title %}电表 {{ meter.meter_number }} - PowerStat{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <a href="{{ url_for('meters_list') }}">电表管理</a>
+    <span class="sep">/</span>
+    <span>{{ meter.meter_number or meter.user_id }}</span>
+</div>
+
+<h1 style="margin-bottom:1rem;">电表详情
+    {% if meter.is_locked %}
+    <span class="tag" style="background:#ffc107;color:#333;font-size:0.7rem;vertical-align:middle;">已锁定</span>
+    {% endif %}
+</h1>
+
+<!-- 基本信息：发电表 + 上网表并排展示 -->
+<div class="card">
+    <div class="card-header">
+        <h2>基本信息</h2>
+        <div style="display:flex; gap:0.5rem;">
+            <a href="{{ url_for('meter_edit', meter_id=meter.id) }}" class="btn btn-primary btn-sm">编辑</a>
+            {% if paired_meter %}
+            <a href="{{ url_for('meter_edit', meter_id=paired_meter.id) }}" class="btn btn-outline btn-sm">编辑配对表</a>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if paired_meter %}
+    {# 并排展示发电表和上网表 #}
+    {% if meter.meter_type == '发电表' %}
+        {% set gen_meter = meter %}
+        {% set grid_meter = paired_meter %}
+    {% else %}
+        {% set gen_meter = paired_meter %}
+        {% set grid_meter = meter %}
+    {% endif %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th style="width:120px;">属性</th>
+                    <th style="text-align:center; background:#f0fdf4;"><span class="tag tag-gen">发电表</span></th>
+                    <th style="text-align:center; background:#eff6ff;"><span class="tag tag-grid">上网表</span></th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="font-weight:600;">电表号</td>
+                    <td style="text-align:center;">
+                        <a href="{{ url_for('meter_detail', meter_id=gen_meter.id) }}" style="color:var(--primary);">{{ gen_meter.meter_number or '-' }}</a>
+                        {% if gen_meter.is_locked %}<span class="tag-lock" title="已锁定">&#128274;</span>{% endif %}
+                    </td>
+                    <td style="text-align:center;">
+                        <a href="{{ url_for('meter_detail', meter_id=grid_meter.id) }}" style="color:var(--primary);">{{ grid_meter.meter_number or '-' }}</a>
+                        {% if grid_meter.is_locked %}<span class="tag-lock" title="已锁定">&#128274;</span>{% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <td style="font-weight:600;">用户编号</td>
+                    <td style="text-align:center;">{{ gen_meter.user_id or '-' }}</td>
+                    <td style="text-align:center;">{{ grid_meter.user_id or '-' }}</td>
+                </tr>
+                <tr>
+                    <td style="font-weight:600;">资产编号</td>
+                    <td style="text-align:center;">{{ gen_meter.asset_number or '-' }}</td>
+                    <td style="text-align:center;">{{ grid_meter.asset_number or '-' }}</td>
+                </tr>
+                <tr>
+                    <td style="font-weight:600;">倍率</td>
+                    <td style="text-align:center;">{{ gen_meter.multiplier }}</td>
+                    <td style="text-align:center;">{{ grid_meter.multiplier }}</td>
+                </tr>
+                <tr>
+                    <td style="font-weight:600;">计价模式</td>
+                    <td style="text-align:center;">{% set pm = gen_meter.pricing_mode or 'discount' %}{% if pm == 'fixed_discount' %}优惠固定价 -{{ '%.4f'|format(gen_meter.pricing_param) }}/kWh{% elif pm == 'fixed_price' %}固定价 {{ '%.8f'|format(gen_meter.pricing_param) }}/kWh{% elif gen_meter.discount and gen_meter.discount != 1.0 %}折扣 {{ gen_meter.discount }} ({{ '%.1f'|format(gen_meter.discount * 10) }}折){% else %}折扣 1.0{% endif %}</td>
+                    <td style="text-align:center;">{% set pm = grid_meter.pricing_mode or 'discount' %}{% if pm == 'fixed_discount' %}优惠固定价 -{{ '%.4f'|format(grid_meter.pricing_param) }}/kWh{% elif pm == 'fixed_price' %}固定价 {{ '%.8f'|format(grid_meter.pricing_param) }}/kWh{% elif grid_meter.discount and grid_meter.discount != 1.0 %}折扣 {{ grid_meter.discount }} ({{ '%.1f'|format(grid_meter.discount * 10) }}折){% else %}折扣 1.0{% endif %}</td>
+                </tr>
+                <tr>
+                    <td style="font-weight:600;">项目</td>
+                    <td style="text-align:center;">{{ gen_meter.project_name or '-' }}</td>
+                    <td style="text-align:center;">{{ grid_meter.project_name or '-' }}</td>
+                </tr>
+                <tr>
+                    <td style="font-weight:600;">锁定状态</td>
+                    <td style="text-align:center;">
+                        <button class="btn btn-sm {% if gen_meter.is_locked %}btn-danger{% else %}btn-outline{% endif %}"
+                                onclick="toggleMeterLock('{{ gen_meter.meter_number }}', {{ 'true' if gen_meter.is_locked else 'false' }}, this)">
+                            {% if gen_meter.is_locked %}&#128274; 已锁定{% else %}&#128275; 未锁定{% endif %}
+                        </button>
+                    </td>
+                    <td style="text-align:center;">
+                        <button class="btn btn-sm {% if grid_meter.is_locked %}btn-danger{% else %}btn-outline{% endif %}"
+                                onclick="toggleMeterLock('{{ grid_meter.meter_number }}', {{ 'true' if grid_meter.is_locked else 'false' }}, this)">
+                            {% if grid_meter.is_locked %}&#128274; 已锁定{% else %}&#128275; 未锁定{% endif %}
+                        </button>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    {# 单表展示 #}
+    <div class="kv-grid">
+        <div class="kv-item">
+            <span class="kv-label">电表号</span>
+            <span class="kv-value">{{ meter.meter_number or '-' }}</span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">用户编号</span>
+            <span class="kv-value">{{ meter.user_id or '-' }}</span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">资产编号</span>
+            <span class="kv-value">{{ meter.asset_number or '-' }}</span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">类型</span>
+            <span class="kv-value">
+                {% if meter.meter_type == '上网表' %}
+                <span class="tag tag-grid">上网表</span>
+                {% elif meter.meter_type == '发电表' %}
+                <span class="tag tag-gen">发电表</span>
+                {% else %}
+                <span class="tag tag-unknown">{{ meter.meter_type }}</span>
+                {% endif %}
+            </span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">倍率</span>
+            <span class="kv-value">{{ meter.multiplier }}</span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">计价模式</span>
+            <span class="kv-value">{% set pm = meter.pricing_mode or 'discount' %}{% if pm == 'fixed_discount' %}优惠固定价 -{{ '%.4f'|format(meter.pricing_param) }}/kWh{% elif pm == 'fixed_price' %}固定价 {{ '%.8f'|format(meter.pricing_param) }}/kWh{% elif meter.discount and meter.discount != 1.0 %}折扣 {{ meter.discount }} ({{ '%.1f'|format(meter.discount * 10) }}折){% else %}折扣 1.0{% endif %}</span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">项目</span>
+            <span class="kv-value">{{ meter.project_name or '-' }}</span>
+        </div>
+        <div class="kv-item">
+            <span class="kv-label">配对电表</span>
+            <span class="kv-value">
+                <span style="color:var(--text-secondary);">未配对</span>
+            </span>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- 单价记录 -->
+{% if price_records %}
+<div class="card">
+    <div class="card-header">
+        <h2>单价记录 ({{ price_records|length }} 条)</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>月份</th>
+                    <th class="num">尖峰价</th>
+                    <th class="num">峰价</th>
+                    <th class="num">平价</th>
+                    <th class="num">谷价</th>
+                    <th>数据来源</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in price_records %}
+                <tr>
+                    <td>{{ p.reading_month }}</td>
+                    <td class="num">{{ "%.8f"|format(p.sharp_peak_price) if p.sharp_peak_price is not none else '-' }}</td>
+                    <td class="num">{{ "%.8f"|format(p.peak_price) if p.peak_price is not none else '-' }}</td>
+                    <td class="num">{{ "%.8f"|format(p.flat_price) if p.flat_price is not none else '-' }}</td>
+                    <td class="num">{{ "%.8f"|format(p.valley_price) if p.valley_price is not none else '-' }}</td>
+                    <td style="font-size:0.75rem;">
+                        {% if p.source_file %}
+                        <a href="javascript:void(0)" class="source-link" data-filename="{{ p.source_file }}">{{ p.source_file }}</a>
+                        {% else %}-{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
+<!-- 抄表记录：同时展示发电表和上网表 -->
+<div class="card">
+    <div class="card-header">
+        <h2>月度抄表记录
+            {% if paired_meter %}
+            (发电表 + 上网表)
+            {% else %}
+            ({{ readings|length }} 条)
+            {% endif %}
+        </h2>
+        <a href="{{ url_for('readings', user_id=meter.user_id) }}" class="btn btn-outline btn-sm">在账单中查看</a>
+    </div>
+
+    {% if readings or paired_readings %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th rowspan="2">月份</th>
+                    {% if paired_meter %}
+                    <th colspan="5" style="text-align:center; background:#f0fdf4;">发电表 - 正向数据 (发电量)</th>
+                    <th colspan="5" style="text-align:center; background:#eff6ff;">上网表 - 反向数据 (上网电量)</th>
+                    {% else %}
+                    <th colspan="5" style="text-align:center; background:#f0fdf4;">正向有功</th>
+                    <th colspan="5" style="text-align:center; background:#eff6ff;">反向有功</th>
+                    {% endif %}
+                    <th rowspan="2">来源</th>
+                </tr>
+                <tr>
+                    <th class="num" style="background:#f0fdf4;">总(kWh)</th>
+                    <th class="num" style="background:#f0fdf4;">尖</th>
+                    <th class="num" style="background:#f0fdf4;">峰</th>
+                    <th class="num" style="background:#f0fdf4;">平</th>
+                    <th class="num" style="background:#f0fdf4;">谷</th>
+                    <th class="num" style="background:#eff6ff;">总(kWh)</th>
+                    <th class="num" style="background:#eff6ff;">尖</th>
+                    <th class="num" style="background:#eff6ff;">峰</th>
+                    <th class="num" style="background:#eff6ff;">平</th>
+                    <th class="num" style="background:#eff6ff;">谷</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if paired_meter %}
+                {# 合并展示：按月份对齐发电表正向 + 上网表反向 #}
+                {% for month, data in merged_readings.items() %}
+                {% set gen = data.get('gen') %}
+                {% set grid = data.get('grid') %}
+                <tr>
+                    <td>{{ month }}</td>
+                    {# 发电表正向数据 #}
+                    <td class="num" style="background:#f9fdf9;"><strong>{{ "%.2f"|format(gen.total_kwh) if gen and gen.total_kwh is not none else '-' }}</strong></td>
+                    <td class="num" style="background:#f9fdf9;">{{ "%.2f"|format(gen.sharp_peak) if gen and gen.sharp_peak is not none else '-' }}</td>
+                    <td class="num" style="background:#f9fdf9;">{{ "%.2f"|format(gen.peak) if gen and gen.peak is not none else '-' }}</td>
+                    <td class="num" style="background:#f9fdf9;">{{ "%.2f"|format(gen.flat) if gen and gen.flat is not none else '-' }}</td>
+                    <td class="num" style="background:#f9fdf9;">{{ "%.2f"|format(gen.valley) if gen and gen.valley is not none else '-' }}</td>
+                    {# 上网表反向数据 #}
+                    <td class="num" style="background:#f5f8ff;"><strong>{{ "%.2f"|format(grid.rev_total) if grid and grid.rev_total is not none else '-' }}</strong></td>
+                    <td class="num" style="background:#f5f8ff;">{{ "%.2f"|format(grid.rev_sharp_peak) if grid and grid.rev_sharp_peak is not none else '-' }}</td>
+                    <td class="num" style="background:#f5f8ff;">{{ "%.2f"|format(grid.rev_peak) if grid and grid.rev_peak is not none else '-' }}</td>
+                    <td class="num" style="background:#f5f8ff;">{{ "%.2f"|format(grid.rev_flat) if grid and grid.rev_flat is not none else '-' }}</td>
+                    <td class="num" style="background:#f5f8ff;">{{ "%.2f"|format(grid.rev_valley) if grid and grid.rev_valley is not none else '-' }}</td>
+                    <td style="font-size:0.75rem;">
+                        {% set src = (gen.source_file if gen else '') or (grid.source_file if grid else '') %}
+                        {% if src %}
+                        <a href="javascript:void(0)" class="source-link" data-filename="{{ src }}">{{ src }}</a>
+                        {% else %}-{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                {% else %}
+                {# 单表展示 #}
+                {% for r in readings %}
+                <tr>
+                    <td>{{ r.reading_month }}</td>
+                    <td class="num" style="background:#f9fdf9;"><strong>{{ "%.2f"|format(r.total_kwh) if r.total_kwh is not none else '-' }}</strong></td>
+                    <td class="num" style="background:#f9fdf9;">{{ "%.2f"|format(r.sharp_peak) if r.sharp_peak is not none else '-' }}</td>
+                    <td class="num" style="background:#f9fdf9;">{{ "%.2f"|format(r.peak) if r.peak is not none else '-' }}</td>
+                    <td class="num" style="background:#f9fdf9;">{{ "%.2f"|format(r.flat) if r.flat is not none else '-' }}</td>
+                    <td class="num" style="background:#f9fdf9;">{{ "%.2f"|format(r.valley) if r.valley is not none else '-' }}</td>
+                    <td class="num" style="background:#f5f8ff;"><strong>{{ "%.2f"|format(r.rev_total) if r.rev_total is not none else '-' }}</strong></td>
+                    <td class="num" style="background:#f5f8ff;">{{ "%.2f"|format(r.rev_sharp_peak) if r.rev_sharp_peak is not none else '-' }}</td>
+                    <td class="num" style="background:#f5f8ff;">{{ "%.2f"|format(r.rev_peak) if r.rev_peak is not none else '-' }}</td>
+                    <td class="num" style="background:#f5f8ff;">{{ "%.2f"|format(r.rev_flat) if r.rev_flat is not none else '-' }}</td>
+                    <td class="num" style="background:#f5f8ff;">{{ "%.2f"|format(r.rev_valley) if r.rev_valley is not none else '-' }}</td>
+                    <td style="font-size:0.75rem;">
+                        {% if r.source_file %}
+                        <a href="javascript:void(0)" class="source-link" data-filename="{{ r.source_file }}">{{ r.source_file }}</a>
+                        {% else %}-{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state"><p>暂无抄表记录</p></div>
+    {% endif %}
+</div>
+
+<div style="margin-top:1rem; display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+    <a href="{{ url_for('meters_list') }}" class="btn btn-secondary">返回电表列表</a>
+    <button class="btn btn-danger btn-sm" style="margin-left:auto;" onclick="deleteMeter()">删除此电表</button>
+</div>
+
+<!-- 文件预览弹窗 -->
+<div id="file-modal" class="file-modal-overlay" onclick="if(event.target===this)closeModal()">
+    <div class="file-modal">
+        <div class="file-modal-header">
+            <span id="modal-title" class="file-modal-title"></span>
+            <div style="display:flex;gap:0.5rem;align-items:center;">
+                <a id="modal-download" href="#" class="btn btn-primary btn-sm" download>下载文件</a>
+                <button class="file-modal-close" onclick="closeModal()">&times;</button>
+            </div>
+        </div>
+        <div id="modal-body" class="file-modal-body">
+            <div class="file-modal-loading">加载中…</div>
+        </div>
+    </div>
+</div>
+
+<style>
+.source-link {
+    color: var(--primary);
+    text-decoration: none;
+    cursor: pointer;
+    word-break: break-all;
+}
+.source-link:hover {
+    text-decoration: underline;
+}
+.file-modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: rgba(0,0,0,0.6);
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+}
+.file-modal {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.3);
+    max-width: 95vw;
+    max-height: 90vh;
+    width: 900px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.file-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #eee;
+    flex-shrink: 0;
+}
+.file-modal-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: #333;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 60%;
+}
+.file-modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    color: #999;
+    cursor: pointer;
+    padding: 0 0.3rem;
+    line-height: 1;
+}
+.file-modal-close:hover { color: #333; }
+.file-modal-body {
+    overflow: auto;
+    padding: 1.5rem;
+    flex: 1;
+    min-height: 200px;
+}
+.file-modal-body img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+}
+.file-modal-body iframe {
+    width: 100%;
+    height: 70vh;
+    border: none;
+    border-radius: 6px;
+}
+.file-modal-loading {
+    text-align: center;
+    padding: 3rem;
+    color: var(--text-secondary);
+}
+.file-modal-body .preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+}
+.file-modal-body .preview-table th {
+    background: #f5f7fa;
+    padding: 6px 10px;
+    text-align: left;
+    border-bottom: 2px solid #e0e0e0;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+}
+.file-modal-body .preview-table td {
+    padding: 5px 10px;
+    border-bottom: 1px solid #f0f0f0;
+}
+.file-modal-body .preview-table tr:hover td {
+    background: #f8f9ff;
+}
+</style>
+
+<script>
+function openSourcePreview(filename) {
+    var modal = document.getElementById('file-modal');
+    var body = document.getElementById('modal-body');
+    var title = document.getElementById('modal-title');
+    var dlBtn = document.getElementById('modal-download');
+
+    title.textContent = filename.split('/').pop() || filename;
+    body.innerHTML = '<div class="file-modal-loading">加载中…</div>';
+    dlBtn.style.display = 'none';
+    modal.style.display = 'flex';
+
+    fetch('/api/archive/preview?filename=' + encodeURIComponent(filename))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (!d.found) {
+                body.innerHTML = '<div class="file-modal-loading" style="color:#e74c3c;">文件未找到: ' + filename + '</div>';
+                return;
+            }
+            dlBtn.href = d.download_url;
+            dlBtn.style.display = 'inline-flex';
+
+            if (d.type === 'image') {
+                body.innerHTML = '<img src="' + d.url + '" alt="' + d.filename + '">';
+            } else if (d.type === 'excel') {
+                body.innerHTML = d.html;
+            } else if (d.type === 'pdf') {
+                body.innerHTML = '<iframe src="' + d.url + '"></iframe>';
+            } else if (d.type === 'error') {
+                body.innerHTML = '<div class="file-modal-loading" style="color:#e74c3c;">' + d.message + '</div>';
+            } else {
+                body.innerHTML = '<div class="file-modal-loading">此文件类型不支持预览，请下载查看</div>';
+            }
+        })
+        .catch(function(e) {
+            body.innerHTML = '<div class="file-modal-loading" style="color:#e74c3c;">加载失败: ' + e + '</div>';
+        });
+}
+
+function closeModal() {
+    document.getElementById('file-modal').style.display = 'none';
+    document.getElementById('modal-body').innerHTML = '';
+}
+
+// ESC 关闭弹窗
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeModal();
+});
+
+// 绑定所有来源链接
+document.querySelectorAll('.source-link[data-filename]').forEach(function(el) {
+    el.addEventListener('click', function() {
+        openSourcePreview(this.dataset.filename);
+    });
+});
+
+function toggleMeterLock(meterNumber, isCurrentlyLocked, btn) {
+    var action = isCurrentlyLocked ? 'unlock' : 'lock';
+    fetch('/api/meters/' + meterNumber + '/' + action, { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (d.success) {
+                location.reload();
+            } else {
+                alert(d.error || '操作失败');
+            }
+        })
+        .catch(function(e) { alert('请求失败: ' + e); });
+}
+
+function deleteMeter() {
+    const meterNumber = "{{ meter.meter_number }}";
+    if (!confirm('确定要删除电表 ' + meterNumber + ' 吗？\n\n该操作将同时删除该电表的所有抄表记录，且不可恢复！')) {
+        return;
+    }
+    fetch('/api/meters/' + meterNumber + '/delete', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (d.success) {
+                window.location.href = "{{ url_for('meters_list') }}";
+            } else {
+                alert(d.error || '删除失败');
+            }
+        })
+        .catch(e => alert('请求失败: ' + e));
+}
+</script>
+{% endblock %}

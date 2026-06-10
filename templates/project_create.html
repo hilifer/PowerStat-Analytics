@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}新建项目 - PowerStat{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <a href="{{ url_for('projects_list') }}">项目管理</a>
+    <span class="sep">/</span>
+    <span>新建项目</span>
+</div>
+
+<h1 style="margin-bottom:1rem;">新建项目</h1>
+
+<div class="card">
+    <div class="card-header"><h2>填写项目名称</h2></div>
+    <form method="POST" action="{{ url_for('project_create') }}">
+        <div style="padding:1rem;">
+            <div class="form-group">
+                <label>项目名称 <span style="color:red;">*</span></label>
+                <input type="text" name="name" required class="form-input" placeholder="请输入项目名称" autofocus>
+            </div>
+        </div>
+        <div style="padding:0 1rem 1rem; display:flex; gap:0.5rem;">
+            <button type="submit" class="btn btn-primary">创建项目</button>
+            <a href="{{ url_for('projects_list') }}" class="btn btn-secondary">取消</a>
+        </div>
+    </form>
+</div>
+
+<style>
+.form-group { display:flex; flex-direction:column; gap:0.3rem; max-width:400px; }
+.form-group label { font-weight:600; font-size:0.9rem; color:#333; }
+.form-input { padding:0.5rem; border:1px solid #ddd; border-radius:4px; font-size:0.9rem; }
+</style>
+{% endblock %}

@@ -1,0 +1,2120 @@
+{% extends "base.html" %}
+{% block title %}抄表提取 - PowerStat{% endblock %}
+
+{% block content %}
+{% macro prev_month(date_str) %}{% if date_str %}{% set p = date_str.split('-') %}{% set y = p[0]|int %}{% set m = p[1]|int %}{% set ny = y-1 if m == 1 else y %}{% set nm = 12 if m == 1 else m-1 %}{{ '%04d-%02d'|format(ny, nm) }}{% if p|length > 2 %}-{{ p[2] }}{% endif %}{% endif %}{% endmacro %}
+<div class="breadcrumb">
+    <a href="{{ url_for('index') }}">首页</a>
+    <span class="sep">/</span>
+    <span>抄表提取</span>
+</div>
+
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem; flex-wrap:wrap; gap:0.5rem;">
+    <h1 style="margin:0;">抄表提取</h1>
+</div>
+
+<!-- Tab 切换 -->
+<div class="tab-bar">
+    <button class="tab-btn active" data-tab="readings" onclick="switchTab('readings')">抄表记录</button>
+    <button class="tab-btn" data-tab="bills" onclick="switchTab('bills')">电费单</button>
+</div>
+
+<!-- ========== Tab 1: 抄表记录 ========== -->
+<div id="tab-readings" class="tab-content active">
+
+<!-- 操作区 -->
+<div style="display:flex; gap:1rem; margin-bottom:0.75rem; flex-wrap:wrap; align-items:center;">
+    <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
+                background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
+        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">抄表提取</span>
+        <button type="button" class="btn btn-primary btn-sm update-btn"
+                onclick="startDataUpdate('incremental','readings')">增量更新</button>
+        <button type="button" class="btn btn-danger btn-sm update-btn"
+                onclick="startDataUpdate('full','readings')">全量更新</button>
+        <a href="{{ url_for('reading_create') }}" class="btn btn-sm" style="background:var(--success, #28a745); color:#fff; text-decoration:none;">手动创建</a>
+    </div>
+    <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
+                background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
+        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">单价提取</span>
+        <button type="button" class="btn btn-primary btn-sm update-btn"
+                onclick="startDataUpdate('incremental','prices')">增量提取</button>
+        <button type="button" class="btn btn-danger btn-sm update-btn"
+                onclick="startDataUpdate('full','prices')">全量提取</button>
+    </div>
+    <div style="display:flex; align-items:center; gap:0.5rem; padding:0.5rem 0.75rem;
+                background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);">
+        <span style="font-size:0.85rem; font-weight:600; color:var(--text); white-space:nowrap;">电费结算单</span>
+        <button type="button" class="btn btn-primary btn-sm update-btn"
+                onclick="startDataUpdate('incremental','settlement')">增量提取</button>
+        <button type="button" class="btn btn-danger btn-sm update-btn"
+                onclick="startDataUpdate('full','settlement')">全量提取</button>
+    </div>
+</div>
+
+<!-- 更新进度面板 -->
+<div class="card" id="updatePanel" style="display:none; margin-bottom:1rem;">
+    <div class="card-header">
+        <div style="display:flex; align-items:center; gap:0.5rem;">
+            <div class="spinner" id="updateSpinner"></div>
+            <h2 id="updateProgress" style="margin:0; font-size:0.95rem;"></h2>
+        </div>
+    </div>
+    <div id="updateLogs"
+         style="background:#f8f9fa; border:1px solid #dee2e6; border-radius:6px;
+                padding:0.75rem; max-height:250px; overflow-y:auto;
+                font-family:monospace; font-size:0.8rem; line-height:1.5; color:#333;">
+    </div>
+</div>
+
+<!-- 筛选栏 -->
+<form method="GET" action="{{ url_for('readings') }}" class="filter-bar">
+    <div class="filter-group">
+        <label>项目</label>
+        <select name="project" class="auto-submit">
+            <option value="">全部项目</option>
+            {% for p in projects %}
+            <option value="{{ p }}" {% if sel_project == p %}selected{% endif %}>{{ p }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>用户编号</label>
+        <select name="user_id" class="auto-submit">
+            <option value="">全部用户</option>
+            {% for u in user_ids %}
+            <option value="{{ u }}" {% if sel_user_id == u %}selected{% endif %}>{{ u }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>月份</label>
+        <input type="month" name="month" id="readingsFilterMonth" class="form-input"
+               value="{{ sel_month or '' }}" placeholder="全部月份"
+               style="min-width:150px;">
+    </div>
+    <button type="submit" class="btn btn-secondary btn-sm">查询</button>
+    <a href="{{ url_for('readings') }}" class="btn btn-outline btn-sm">重置</a>
+</form>
+
+{% if grouped_data %}
+{% for group in grouped_data %}
+<div class="card reading-group">
+    <div class="card-header" style="flex-wrap:wrap; gap:0.5rem;">
+        <h2 style="margin:0;">
+            {{ group.project_name or '未分类' }}
+            <span style="font-weight:400; font-size:0.85rem; color:var(--text-secondary); margin-left:0.5rem;">
+                用户 {{ group.user_id }}
+            </span>
+        </h2>
+    </div>
+
+    {% for month_data in group.months %}
+    {% set first_r = month_data.gen or month_data.grid %}
+    {% set any_locked = (month_data.gen.reading_locked if month_data.gen else false) or (month_data.grid.reading_locked if month_data.grid else false) %}
+    {% set price_locked = first_r and first_r.price_locked %}
+    {% set settlement_locked = first_r and first_r.settlement_is_locked %}
+    {% set has_price = first_r and first_r.sharp_peak_price is not none %}
+    {% set price_missing = first_r and first_r.sharp_peak_price is none and first_r.peak_price is none and first_r.flat_price is none and first_r.valley_price is none %}
+    <div class="month-block" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
+        {# ---- 月份标题栏 ---- #}
+        <div class="month-header">
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                {% if first_r and first_r.stat_date %}
+                <span style="font-size:0.85rem; color:var(--text-secondary);">抄表日期: {{ first_r.stat_date }}</span>
+                {% endif %}
+            </div>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+                <button class="btn btn-sm {% if any_locked %}btn-danger{% else %}btn-outline{% endif %}"
+                        onclick="toggleMonthLock('{{ group.user_id }}', '{{ month_data.month }}', {{ 'true' if any_locked else 'false' }})"
+                        title="{{ '解锁此月数据' if any_locked else '锁定此月数据' }}">
+                    {% if any_locked %}&#128274; 已锁定{% else %}&#128275; 未锁定{% endif %}
+                </button>
+                <button class="btn btn-sm btn-primary save-btn"
+                        onclick="saveAll(this, '{{ group.user_id }}', '{{ month_data.month }}')"
+                        {% if any_locked %}disabled{% endif %}>保存</button>
+            </div>
+        </div>
+
+        <div class="month-content">
+            {# ---- 抄表数据区 ---- #}
+            <div class="section-label">抄表数据</div>
+            <div class="table-wrap">
+                <table class="reading-table">
+                    <thead>
+                        <tr>
+                            <th rowspan="2" style="min-width:70px;">类型</th>
+                            <th rowspan="2">电表号</th>
+                            <th rowspan="2" class="num">倍率</th>
+                            <th colspan="5" class="num" style="text-align:center; background:#f0fdf4;">正向有功</th>
+                            <th colspan="5" class="num" style="text-align:center; background:#eff6ff;">反向有功</th>
+                            <th rowspan="2">来源</th>
+                            <th rowspan="2">状态</th>
+                        </tr>
+                        <tr>
+                            <th class="num" style="background:#f0fdf4;">总(kWh)</th>
+                            <th class="num" style="background:#f0fdf4;">尖</th>
+                            <th class="num" style="background:#f0fdf4;">峰</th>
+                            <th class="num" style="background:#f0fdf4;">平</th>
+                            <th class="num" style="background:#f0fdf4;">谷</th>
+                            <th class="num" style="background:#eff6ff;">总(kWh)</th>
+                            <th class="num" style="background:#eff6ff;">尖</th>
+                            <th class="num" style="background:#eff6ff;">峰</th>
+                            <th class="num" style="background:#eff6ff;">平</th>
+                            <th class="num" style="background:#eff6ff;">谷</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {# 发电表 #}
+                        {% if month_data.gen %}
+                        {% set r = month_data.gen %}
+                        {% set incomplete = r.sharp_peak is none and r.peak is none and r.flat is none and r.valley is none %}
+                        <tr class="{% if incomplete %}row-incomplete{% endif %}{% if r.reading_locked %} row-locked{% endif %}"
+                            data-meter-id="{{ r.meter_id }}" data-month="{{ month_data.month }}">
+                            <td><span class="tag tag-gen">发电表</span></td>
+                            <td class="meter-num">{{ r.meter_number }}</td>
+                            <td class="num">{{ r.multiplier }}</td>
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input total-input" name="total_kwh"
+                                value="{{ '%.2f'|format(r.total_kwh) if r.total_kwh is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
+                                value="{{ '%.2f'|format(r.sharp_peak) if r.sharp_peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="peak"
+                                value="{{ '%.2f'|format(r.peak) if r.peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="flat"
+                                value="{{ '%.2f'|format(r.flat) if r.flat is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="valley"
+                                value="{{ '%.2f'|format(r.valley) if r.valley is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input total-input" name="rev_total"
+                                value="{{ '%.2f'|format(r.rev_total) if r.rev_total is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_sharp_peak"
+                                value="{{ '%.2f'|format(r.rev_sharp_peak) if r.rev_sharp_peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_peak"
+                                value="{{ '%.2f'|format(r.rev_peak) if r.rev_peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_flat"
+                                value="{{ '%.2f'|format(r.rev_flat) if r.rev_flat is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_valley"
+                                value="{{ '%.2f'|format(r.rev_valley) if r.rev_valley is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td style="font-size:0.7rem; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                                title="{{ r.source_file or '' }}">
+                                {% if r.source_file %}
+                                <a href="javascript:void(0)" class="source-link" data-source-file="{{ r.source_file }}" onclick="showSourcePreview(this.dataset.sourceFile)">{{ r.source_file.split('/')[-1]|truncate(18) }}</a>
+                                {% else %}-{% endif %}
+                            </td>
+                            <td>
+                                {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
+                                {% elif incomplete %}<span class="status-badge badge-incomplete">&#9888; 数据不全</span>
+                                {% else %}<span class="status-badge badge-ok">&#10003;</span>{% endif %}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr class="row-incomplete row-missing">
+                            <td><span class="tag tag-gen">发电表</span></td>
+                            <td colspan="13" style="text-align:center; color:var(--text-secondary);">无数据</td>
+                            <td><span class="status-badge badge-incomplete">&#9888; 缺失</span></td>
+                        </tr>
+                        {% endif %}
+
+                        {# 上网表 #}
+                        {% if month_data.grid %}
+                        {% set r = month_data.grid %}
+                        {% set incomplete = r.sharp_peak is none and r.peak is none and r.flat is none and r.valley is none %}
+                        <tr class="{% if incomplete %}row-incomplete{% endif %}{% if r.reading_locked %} row-locked{% endif %}"
+                            data-meter-id="{{ r.meter_id }}" data-month="{{ month_data.month }}">
+                            <td><span class="tag tag-grid">上网表</span></td>
+                            <td class="meter-num">{{ r.meter_number }}</td>
+                            <td class="num">{{ r.multiplier }}</td>
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input total-input" name="total_kwh"
+                                value="{{ '%.2f'|format(r.total_kwh) if r.total_kwh is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="sharp_peak"
+                                value="{{ '%.2f'|format(r.sharp_peak) if r.sharp_peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="peak"
+                                value="{{ '%.2f'|format(r.peak) if r.peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="flat"
+                                value="{{ '%.2f'|format(r.flat) if r.flat is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num fwd-cell"><input type="number" step="0.01" class="cell-input" name="valley"
+                                value="{{ '%.2f'|format(r.valley) if r.valley is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input total-input" name="rev_total"
+                                value="{{ '%.2f'|format(r.rev_total) if r.rev_total is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_sharp_peak"
+                                value="{{ '%.2f'|format(r.rev_sharp_peak) if r.rev_sharp_peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_peak"
+                                value="{{ '%.2f'|format(r.rev_peak) if r.rev_peak is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_flat"
+                                value="{{ '%.2f'|format(r.rev_flat) if r.rev_flat is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td class="num rev-cell"><input type="number" step="0.01" class="cell-input" name="rev_valley"
+                                value="{{ '%.2f'|format(r.rev_valley) if r.rev_valley is not none else '' }}"
+                                {% if r.reading_locked %}disabled{% endif %}></td>
+                            <td style="font-size:0.7rem; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                                title="{{ r.source_file or '' }}">
+                                {% if r.source_file %}
+                                <a href="javascript:void(0)" class="source-link" data-source-file="{{ r.source_file }}" onclick="showSourcePreview(this.dataset.sourceFile)">{{ r.source_file.split('/')[-1]|truncate(18) }}</a>
+                                {% else %}-{% endif %}
+                            </td>
+                            <td>
+                                {% if r.reading_locked %}<span class="status-badge badge-locked">&#128274; 锁定</span>
+                                {% elif incomplete %}<span class="status-badge badge-incomplete">&#9888; 数据不全</span>
+                                {% else %}<span class="status-badge badge-ok">&#10003;</span>{% endif %}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr class="row-incomplete row-missing">
+                            <td><span class="tag tag-grid">上网表</span></td>
+                            <td colspan="13" style="text-align:center; color:var(--text-secondary);">无数据</td>
+                            <td><span class="status-badge badge-incomplete">&#9888; 缺失</span></td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+
+            {# ---- 单价数据区 ---- #}
+            <div class="price-section {% if price_missing %}price-missing{% endif %}">
+                <div class="section-label" style="display:flex; align-items:center; justify-content:space-between;">
+                    <span>
+                        单价数据
+                        {% if price_missing %}<span class="status-badge badge-incomplete" style="margin-left:0.5rem;">&#9888; 单价未匹配</span>{% endif %}
+                    </span>
+                    <div style="display:flex; gap:0.5rem; align-items:center;">
+                        {% if first_r and first_r.price_source %}
+                        <span class="price-source-tag" data-source-file="{{ first_r.price_source }}" onclick="showSourcePreview(this.dataset.sourceFile)" title="点击查看来源图片">
+                            &#128065; {{ first_r.price_source|truncate(25) }}
+                        </span>
+                        {% endif %}
+                        <button class="btn btn-sm {% if price_locked %}btn-danger{% else %}btn-outline{% endif %}"
+                                onclick="togglePriceLock('{{ group.user_id }}', '{{ month_data.month }}', {{ 'true' if price_locked else 'false' }})"
+                                title="{{ '解锁单价' if price_locked else '锁定单价' }}">
+                            {% if price_locked %}&#128274; 已锁定{% else %}&#128275; 未锁定{% endif %}
+                        </button>
+                        <button class="btn btn-sm btn-outline" onclick="openImagePicker(this, '{{ group.user_id }}', '{{ month_data.month }}')"
+                                {% if price_locked or any_locked %}disabled{% endif %}
+                                title="手动选择文件重新提取单价">&#128247; 选择文件</button>
+                    </div>
+                </div>
+                <div class="price-grid" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
+                    <div class="price-item">
+                        <label>尖价</label>
+                        <input type="text" inputmode="decimal" class="cell-input price-input" name="sharp_peak_price"
+                            value="{{ '%.8f'|format(first_r.sharp_peak_price) if first_r and first_r.sharp_peak_price is not none else '' }}"
+                            {% if price_locked or any_locked %}disabled{% endif %}>
+                    </div>
+                    <div class="price-item">
+                        <label>峰价</label>
+                        <input type="text" inputmode="decimal" class="cell-input price-input" name="peak_price"
+                            value="{{ '%.8f'|format(first_r.peak_price) if first_r and first_r.peak_price is not none else '' }}"
+                            {% if price_locked or any_locked %}disabled{% endif %}>
+                    </div>
+                    <div class="price-item">
+                        <label>平价</label>
+                        <input type="text" inputmode="decimal" class="cell-input price-input" name="flat_price"
+                            value="{{ '%.8f'|format(first_r.flat_price) if first_r and first_r.flat_price is not none else '' }}"
+                            {% if price_locked or any_locked %}disabled{% endif %}>
+                    </div>
+                    <div class="price-item">
+                        <label>谷价</label>
+                        <input type="text" inputmode="decimal" class="cell-input price-input" name="valley_price"
+                            value="{{ '%.8f'|format(first_r.valley_price) if first_r and first_r.valley_price is not none else '' }}"
+                            {% if price_locked or any_locked %}disabled{% endif %}>
+                    </div>
+                </div>
+            </div>
+
+            {# ---- 电费结算单 ---- #}
+            <div class="price-section">
+                <div class="section-label" style="display:flex; align-items:center; justify-content:space-between;">
+                    <span>电费结算单</span>
+                    <div style="display:flex; gap:0.5rem; align-items:center;">
+                        {% if first_r and first_r.settlement_source_file %}
+                        <span class="price-source-tag" data-source-file="{{ first_r.settlement_source_file }}" onclick="showSourcePreview(this.dataset.sourceFile)" title="点击查看来源文件">
+                            &#128065; {{ first_r.settlement_source_file|truncate(25) }}
+                        </span>
+                        {% endif %}
+                        <button class="btn btn-sm {% if settlement_locked %}btn-danger{% else %}btn-outline{% endif %}"
+                                onclick="toggleSettlementLock('{{ group.user_id }}', '{{ month_data.month }}', {{ 'true' if settlement_locked else 'false' }})"
+                                title="{{ '解锁结算单' if settlement_locked else '锁定结算单' }}">
+                            {% if settlement_locked %}&#128274; 已锁定{% else %}&#128275; 未锁定{% endif %}
+                        </button>
+                        <button class="btn btn-sm btn-outline" onclick="openImagePicker(this, '{{ group.user_id }}', '{{ month_data.month }}', 'settlement')"
+                                {% if settlement_locked %}disabled{% endif %}
+                                title="手动选择文件重新提取结算单价">&#128247; 选择文件</button>
+                    </div>
+                </div>
+                <div class="price-grid settlement-price-grid" data-user-id="{{ group.user_id }}" data-month="{{ month_data.month }}">
+                    <div class="price-item" style="min-width:200px;">
+                        <label>上网电价</label>
+                        <input type="text" inputmode="decimal" class="cell-input price-input" name="grid_average_price"
+                            value="{{ '%.8f'|format(first_r.grid_average_price) if first_r and first_r.grid_average_price is not none else '' }}"
+                            {% if settlement_locked %}disabled{% endif %}>
+                    </div>
+                </div>
+            </div>
+
+            {# ---- 数据来源区 ---- #}
+            <details class="source-section">
+                <summary class="section-label" style="cursor:pointer; user-select:none; display:flex; align-items:center; gap:0.5rem;">
+                    <span>&#128196; 数据来源</span>
+                    <span style="font-weight:400; font-size:0.7rem; color:var(--text-secondary);">(点击展开)</span>
+                </summary>
+                <div class="source-list">
+                    {% if month_data.gen and month_data.gen.source_file %}
+                    <div class="source-item">
+                        <span class="tag tag-gen" style="font-size:0.7rem;">发电表</span>
+                        <span class="source-file source-link" title="{{ month_data.gen.source_file }}"
+                              data-source-file="{{ month_data.gen.source_file }}" onclick="showSourcePreview(this.dataset.sourceFile)">{{ month_data.gen.source_file.split('/')[-1] }}</span>
+                        {% if month_data.gen.source_sheet %}
+                        <span class="source-sheet">/ {{ month_data.gen.source_sheet }}</span>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                    {% if month_data.grid and month_data.grid.source_file %}
+                    <div class="source-item">
+                        <span class="tag tag-grid" style="font-size:0.7rem;">上网表</span>
+                        <span class="source-file source-link" title="{{ month_data.grid.source_file }}"
+                              data-source-file="{{ month_data.grid.source_file }}" onclick="showSourcePreview(this.dataset.sourceFile)">{{ month_data.grid.source_file.split('/')[-1] }}</span>
+                        {% if month_data.grid.source_sheet %}
+                        <span class="source-sheet">/ {{ month_data.grid.source_sheet }}</span>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                    {% if first_r and first_r.price_source %}
+                    <div class="source-item">
+                        <span class="tag" style="font-size:0.7rem; background:#e0e7ff; color:#3730a3;">单价</span>
+                        <span class="source-file source-link" title="点击查看: {{ first_r.price_source }}"
+                              data-source-file="{{ first_r.price_source }}" onclick="showSourcePreview(this.dataset.sourceFile)">{{ first_r.price_source }}</span>
+                    </div>
+                    {% endif %}
+                    {% if not (month_data.gen and month_data.gen.source_file) and not (month_data.grid and month_data.grid.source_file) and not (first_r and first_r.price_source) %}
+                    <div class="source-item" style="color:var(--text-secondary); font-style:italic;">暂无来源信息</div>
+                    {% endif %}
+                </div>
+            </details>
+
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <p>暂无抄表数据</p>
+</div>
+{% endif %}
+
+<div class="pagination-bar">
+    <div class="pagination">
+        {% set sep = '&' if '?' in pagination_base else '?' %}
+        {% if page > 1 %}
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page=1">&#171;</a>
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page={{ page - 1 }}">&#8249;</a>
+        {% else %}
+        <button class="btn btn-sm btn-outline" disabled>&#171;</button>
+        <button class="btn btn-sm btn-outline" disabled>&#8249;</button>
+        {% endif %}
+        <span class="pagination-info">第 {{ page }} / {{ total_pages }} 页（共 {{ total_items }} 组）</span>
+        {% if page < total_pages %}
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page={{ page + 1 }}">&#8250;</a>
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page={{ total_pages }}">&#187;</a>
+        {% else %}
+        <button class="btn btn-sm btn-outline" disabled>&#8250;</button>
+        <button class="btn btn-sm btn-outline" disabled>&#187;</button>
+        {% endif %}
+    </div>
+</div>
+
+</div>{# end tab-readings #}
+
+<!-- ========== Tab 2: 电费单 ========== -->
+<div id="tab-bills" class="tab-content">
+
+<!-- 电费单筛选栏（与服务端过滤参数一致） -->
+<form method="GET" action="{{ url_for('readings') }}" class="filter-bar" style="margin-bottom:1rem;">
+    <div class="filter-group">
+        <label>项目</label>
+        <select name="project" onchange="this.form.submit()">
+            <option value="">全部项目</option>
+            {% for p in projects %}
+            <option value="{{ p }}" {% if sel_project == p %}selected{% endif %}>{{ p }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>用户编号</label>
+        <select name="user_id" onchange="this.form.submit()">
+            <option value="">全部用户</option>
+            {% for u in user_ids %}
+            <option value="{{ u }}" {% if sel_user_id == u %}selected{% endif %}>{{ u }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>月份</label>
+        <input type="month" name="month" class="form-input"
+               value="{{ sel_month or '' }}" placeholder="全部月份"
+               onchange="this.form.submit()"
+               style="min-width:150px;">
+    </div>
+    <button type="submit" class="btn btn-secondary btn-sm">查询</button>
+    <a href="{{ url_for('readings') }}" class="btn btn-outline btn-sm">重置</a>
+</form>
+
+<!-- 批量操作栏 -->
+<div class="bill-batch-bar" style="display:flex; align-items:center; gap:1rem; margin-bottom:0.75rem; flex-wrap:wrap;">
+    <label style="display:flex; align-items:center; gap:0.3rem; cursor:pointer; font-size:0.85rem;">
+        <input type="checkbox" id="billSelectAll" onchange="toggleBillSelectAll(this)">
+        <span>全选</span>
+    </label>
+    <span id="billSelectedCount" style="font-size:0.85rem; color:var(--text-secondary);">已选 0 项</span>
+    <button type="button" class="btn btn-primary btn-sm" id="billBatchExportBtn" disabled
+            onclick="exportSelectedBills()">
+        批量导出 Excel
+    </button>
+</div>
+
+{% if grouped_data %}
+{% for group in grouped_data %}
+<div class="card reading-group bill-group-card" data-project="{{ group.project_name or '' }}" data-user="{{ group.user_id }}">
+    <div class="card-header" style="flex-wrap:wrap; gap:0.5rem;">
+        <h2 style="margin:0;">
+            {{ group.project_name or '未分类' }}
+            <span style="font-weight:400; font-size:0.85rem; color:var(--text-secondary); margin-left:0.5rem;">
+                用户 {{ group.user_id }}
+            </span>
+        </h2>
+    </div>
+
+    {% for month_data in group.months %}
+    {% set first_r = month_data.gen or month_data.grid %}
+    {% set has_price = first_r and first_r.sharp_peak_price is not none %}
+    <div class="month-block bill-month-block" data-month="{{ month_data.month }}">
+        <div class="month-header">
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                <input type="checkbox" class="bill-check" data-user="{{ group.user_id }}" data-month="{{ month_data.month }}" data-project="{{ group.project_name or '' }}" onchange="updateBillSelection()">
+                <h3 style="margin:0; font-size:1rem;">{{ prev_month(month_data.month) }} 电费单</h3>
+                {% if first_r and first_r.stat_date %}
+                <span style="font-size:0.85rem; color:var(--text-secondary);">抄表日期: {{ first_r.stat_date }}</span>
+                {% endif %}
+            </div>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+                <button class="btn btn-sm btn-primary"
+                        onclick="exportMonthBill('{{ group.user_id }}', '{{ month_data.month }}', '{{ group.project_name or '' }}')">
+                    导出 Excel
+                </button>
+            </div>
+        </div>
+
+        <div class="month-content">
+            {# ---- 发电统计表：正向(发电) + 反向(上网) + 自发用电 ---- #}
+            {% set gen = month_data.gen %}
+            {% set grid = month_data.grid %}
+            {% set prev_gen = month_data.prev_gen %}
+            {% set prev_grid = month_data.prev_grid %}
+            {% set gen_mult = gen.multiplier if gen else 1.0 %}
+            {% set grid_mult = grid.multiplier if grid else 1.0 %}
+            {% set discount = gen.discount if gen and gen.discount else 1.0 %}
+
+            {% if gen or grid %}
+            <div class="bill-meter-section">
+                <div class="section-label" style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                    {% if gen %}<span class="tag tag-gen">发电表 {{ gen.meter_number }}</span>
+                    {% if gen.asset_number %}<span style="font-size:0.75rem; color:var(--text-secondary);">资产号: {{ gen.asset_number }}</span>{% endif %}
+                    <span style="font-size:0.75rem; color:var(--text-secondary);">倍率: {{ gen_mult }}</span>{% endif %}
+                    {% if grid %}<span class="tag tag-grid" style="margin-left:0.5rem;">上网表 {{ grid.meter_number }}</span>
+                    {% if grid.asset_number %}<span style="font-size:0.75rem; color:var(--text-secondary);">资产号: {{ grid.asset_number }}</span>{% endif %}
+                    <span style="font-size:0.75rem; color:var(--text-secondary);">倍率: {{ grid_mult }}</span>{% endif %}
+                    {% if discount != 1.0 %}<span style="font-size:0.75rem; color:var(--text-secondary);">| 折扣: {{ discount }}</span>{% endif %}
+                </div>
+                <div class="table-wrap">
+                    <table class="calc-table">
+                        <thead>
+                            <tr>
+                                <th rowspan="2" style="min-width:65px;">类别</th>
+                                <th colspan="5" style="text-align:center; background:#f0fdf4;">正向数据（发电量）</th>
+                                <th colspan="5" style="text-align:center; background:#eff6ff;">反向数据（上网电量）</th>
+                                <th colspan="4" style="text-align:center; background:#fef9f0;">自发用电量/金额</th>
+                                <th colspan="3" style="text-align:center; background:#f0fdf4;">上网电量/金额</th>
+                            </tr>
+                            <tr>
+                                <th class="num" style="background:#f0fdf4;">上月表数</th>
+                                <th class="num" style="background:#f0fdf4;">本月表数</th>
+                                <th class="num" style="background:#f0fdf4;">电表用量</th>
+                                <th class="num" style="background:#f0fdf4;">倍率</th>
+                                <th class="num" style="background:#f0fdf4;">发电量</th>
+                                <th class="num" style="background:#eff6ff;">上月表数</th>
+                                <th class="num" style="background:#eff6ff;">本月表数</th>
+                                <th class="num" style="background:#eff6ff;">电表用量</th>
+                                <th class="num" style="background:#eff6ff;">倍率</th>
+                                <th class="num" style="background:#eff6ff;">上网电量</th>
+                                <th class="num" style="background:#fef9f0;">实际用电数</th>
+                                <th class="num" style="background:#fef9f0;">原电价</th>
+                                <th class="num" style="background:#fef9f0;">优惠后电价</th>
+                                <th class="num" style="background:#fef9f0;">金额</th>
+                                <th class="num" style="background:#f0fdf4;">原电价</th>
+                                <th class="num" style="background:#f0fdf4;">优惠电价</th>
+                                <th class="num" style="background:#f0fdf4;">上网金额</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% set tiers = [
+                            ('正有功尖峰', 'sharp_peak', 'rev_sharp_peak', 'sharp_peak_price'),
+                            ('正有功峰', 'peak', 'rev_peak', 'peak_price'),
+                            ('正有功平', 'flat', 'rev_flat', 'flat_price'),
+                            ('正有功谷', 'valley', 'rev_valley', 'valley_price'),
+                        ] %}
+
+                        {% set ns = namespace(
+                            gen_prev_total=0, gen_cur_total=0, gen_diff_total=0, gen_amount_total=0,
+                            grid_prev_total=0, grid_cur_total=0, grid_diff_total=0, grid_amount_total=0,
+                            self_total=0, amount_total=0, grid_revenue_total=0
+                        ) %}
+
+                        {% for tier_label, fwd_field, rev_field, price_field in tiers %}
+                        {# 正向（发电表）: 上月表数/本月表数 来自 prev_gen 和 gen 的对应字段 #}
+                        {% set gen_prev = prev_gen[fwd_field] if prev_gen and prev_gen[fwd_field] is not none else none %}
+                        {% set gen_cur = gen[fwd_field] if gen and gen[fwd_field] is not none else none %}
+                        {% set gen_diff = (gen_cur - gen_prev) if gen_cur is not none and gen_prev is not none else none %}
+                        {% set gen_amount = (gen_diff * gen_mult) if gen_diff is not none else none %}
+
+                        {# 反向（上网表）: 上月表数/本月表数 来自 prev_grid 和 grid 的反向字段 #}
+                        {% set grid_prev = prev_grid[rev_field] if prev_grid and prev_grid[rev_field] is not none else none %}
+                        {% set grid_cur = grid[rev_field] if grid and grid[rev_field] is not none else none %}
+                        {% set grid_diff = (grid_cur - grid_prev) if grid_cur is not none and grid_prev is not none else none %}
+                        {% set grid_amount = (grid_diff * grid_mult) if grid_diff is not none else none %}
+
+                        {# 自发用电 = 发电量 - 上网电量 #}
+                        {% set self_use = (gen_amount - grid_amount) if gen_amount is not none and grid_amount is not none else none %}
+                        {% set price = gen[price_field] if gen and gen[price_field] is not none else none %}
+                        {% set discounted_price = (price * discount) if price is not none else none %}
+                        {% set tier_amount = (self_use * discounted_price) if self_use is not none and discounted_price is not none else none %}
+                        {# 上网电价：基于上网表的原电价，按价格类型计算 #}
+                        {% set grid_price_field = "grid_" ~ price_field %}
+                        {% set grid_tier_price = grid[grid_price_field] if grid and grid[grid_price_field] is not none else grid[price_field] if grid and grid[price_field] is not none else none %}
+                        {% set grid_avg_price = grid.grid_average_price if grid and grid.grid_average_price is not none else grid.average_price if grid and grid.average_price is not none else none %}
+                        {% if grid_avg_price is not none %}{% set grid_tier_price = grid_avg_price %}{% endif %}
+                        {% if grid and grid.pricing_mode == "average" %}
+                            {% set grid_price = grid_avg_price %}
+                        {% elif grid and grid.pricing_mode == "fixed_price" %}
+                            {% set grid_price = grid.pricing_param %}
+                        {% elif grid and grid.pricing_mode == "fixed_discount" and grid_tier_price is not none %}
+                            {% set grid_price = grid_tier_price - grid.pricing_param if grid.pricing_param is not none else grid_tier_price %}
+                        {% else %}
+                            {% set grid_price = grid_tier_price %}
+                        {% endif %}
+                        {% set grid_revenue = (grid_amount * grid_price) if grid_amount is not none and grid_price is not none else none %}
+
+                        {# 累加总计 #}
+                        {% if gen_prev is not none %}{% set ns.gen_prev_total = ns.gen_prev_total + gen_prev %}{% endif %}
+                        {% if gen_cur is not none %}{% set ns.gen_cur_total = ns.gen_cur_total + gen_cur %}{% endif %}
+                        {% if gen_diff is not none %}{% set ns.gen_diff_total = ns.gen_diff_total + gen_diff %}{% endif %}
+                        {% if gen_amount is not none %}{% set ns.gen_amount_total = ns.gen_amount_total + gen_amount %}{% endif %}
+                        {% if grid_prev is not none %}{% set ns.grid_prev_total = ns.grid_prev_total + grid_prev %}{% endif %}
+                        {% if grid_cur is not none %}{% set ns.grid_cur_total = ns.grid_cur_total + grid_cur %}{% endif %}
+                        {% if grid_diff is not none %}{% set ns.grid_diff_total = ns.grid_diff_total + grid_diff %}{% endif %}
+                        {% if grid_amount is not none %}{% set ns.grid_amount_total = ns.grid_amount_total + grid_amount %}{% endif %}
+                        {% if self_use is not none %}{% set ns.self_total = ns.self_total + self_use %}{% endif %}
+                        {% if tier_amount is not none %}{% set ns.amount_total = ns.amount_total + tier_amount %}{% endif %}
+                        {% if grid_revenue is not none %}{% set ns.grid_revenue_total = ns.grid_revenue_total + grid_revenue %}{% endif %}
+
+                        <tr>
+                            <td style="font-weight:600; white-space:nowrap;">{{ tier_label }}</td>
+                            {# 正向（发电量） #}
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_prev) if gen_prev is not none else '-' }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_cur) if gen_cur is not none else '-' }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_diff) if gen_diff is not none else '-' }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_mult) }}</td>
+                            <td class="num fwd-cell"><strong>{{ "%.2f"|format(gen_amount) if gen_amount is not none else '-' }}</strong></td>
+                            {# 反向（上网电量） #}
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_prev) if grid_prev is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_cur) if grid_cur is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_diff) if grid_diff is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_mult) }}</td>
+                            <td class="num rev-cell"><strong>{{ "%.2f"|format(grid_amount) if grid_amount is not none else '-' }}</strong></td>
+                            {# 自发用电 #}
+                            <td class="num self-cell"><strong>{{ "%.2f"|format(self_use) if self_use is not none else '-' }}</strong></td>
+                            <td class="num self-cell">{{ "%.8f"|format(price) if price is not none else '-' }}</td>
+                            <td class="num self-cell">{{ "%.8f"|format(discounted_price) if discounted_price is not none else '-' }}</td>
+                            <td class="num self-cell"><strong>{{ "%.2f"|format(tier_amount) if tier_amount is not none else '-' }}</strong></td>
+                            <td class="num rev-cell">{{ "%.8f"|format(grid_tier_price) if grid_tier_price is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.8f"|format(grid_price) if grid_price is not none else '-' }}</td>
+                            <td class="num rev-cell"><strong>{{ "%.2f"|format(grid_revenue) if grid_revenue is not none else '-' }}</strong></td>
+                        </tr>
+                        {% endfor %}
+
+                        {# 合计行：正向直读总表数，反向直读反向有功总 #}
+                        {% set gen_cur_total = gen.total_kwh if gen and gen.total_kwh is not none else none %}
+                        {% set gen_prev_total = prev_gen.total_kwh if prev_gen and prev_gen.total_kwh is not none else none %}
+                        {% set gen_diff_total = (gen_cur_total - gen_prev_total) if gen_cur_total is not none and gen_prev_total is not none else none %}
+                        {% set gen_amount_total = (gen_diff_total * gen_mult) if gen_diff_total is not none else none %}
+                        {% set grid_rev_total = grid.rev_total if grid and grid.rev_total is not none else none %}
+                        {% set grid_prev_total = prev_grid.rev_total if prev_grid and prev_grid.rev_total is not none else none %}
+                        {% set grid_diff_total = (grid_rev_total - grid_prev_total) if grid_rev_total is not none and grid_prev_total is not none else none %}
+                        {% set grid_amount_total = (grid_diff_total * grid_mult) if grid_diff_total is not none else none %}
+                        {# 实际用电数 = 总发电量 - 总上网电量 #}
+                        {% set self_total = (gen_amount_total - grid_amount_total) if gen_amount_total is not none and grid_amount_total is not none else none %}
+                        <tr class="total-row">
+                            <td style="font-weight:700;">正有功总</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_prev_total) if gen_prev_total is not none else '-' }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_cur_total) if gen_cur_total is not none else '-' }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_diff_total) if gen_diff_total is not none else '-' }}</td>
+                            <td class="num fwd-cell">{{ "%.2f"|format(gen_mult) }}</td>
+                            <td class="num fwd-cell"><strong>{{ "%.2f"|format(gen_amount_total) if gen_amount_total is not none else '-' }}</strong></td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_prev_total) if grid_prev_total is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_rev_total) if grid_rev_total is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_diff_total) if grid_diff_total is not none else '-' }}</td>
+                            <td class="num rev-cell">{{ "%.2f"|format(grid_mult) }}</td>
+                            <td class="num rev-cell"><strong>{{ "%.2f"|format(grid_amount_total) if grid_amount_total is not none else '-' }}</strong></td>
+                            <td class="num self-cell"><strong>{{ "%.2f"|format(self_total) if self_total is not none else '-' }}</strong></td>
+                            <td class="num self-cell"></td>
+                            <td class="num self-cell"></td>
+                            <td class="num self-cell"><strong>{{ "%.2f"|format(ns.amount_total) }}</strong></td>
+                            <td class="num rev-cell"></td>
+                            <td class="num rev-cell"></td>
+                            <td class="num rev-cell"><strong>{{ "%.2f"|format(ns.grid_revenue_total) }}</strong></td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
+
+            {# ---- 单价汇总 ---- #}
+            {% if has_price %}
+            <div class="bill-price-summary">
+                <span class="section-label">单价:</span>
+                <span class="bill-price-tag">尖 {{ '%.8f'|format(first_r.sharp_peak_price) if first_r.sharp_peak_price is not none else '-' }}</span>
+                <span class="bill-price-tag">峰 {{ '%.8f'|format(first_r.peak_price) if first_r.peak_price is not none else '-' }}</span>
+                <span class="bill-price-tag">平 {{ '%.8f'|format(first_r.flat_price) if first_r.flat_price is not none else '-' }}</span>
+                <span class="bill-price-tag">谷 {{ '%.8f'|format(first_r.valley_price) if first_r.valley_price is not none else '-' }}</span>
+                {% if first_r.average_price is not none %}
+                <span class="bill-price-tag">均价 {{ '%.8f'|format(first_r.average_price) }}</span>
+                {% endif %}
+            </div>
+            {% else %}
+            <div class="bill-price-summary" style="color:var(--warning);">
+                <span>⚠ 单价数据未匹配，无法计算费用</span>
+            </div>
+            {% endif %}
+
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <p>暂无电费单数据</p>
+    <p style="font-size:0.9rem;">请先在「抄表记录」中录入数据</p>
+</div>
+{% endif %}
+
+<div class="pagination-bar">
+    <div class="pagination">
+        {% set sep = '&' if '?' in pagination_base else '?' %}
+        {% if page > 1 %}
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page=1">&#171;</a>
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page={{ page - 1 }}">&#8249;</a>
+        {% else %}
+        <button class="btn btn-sm btn-outline" disabled>&#171;</button>
+        <button class="btn btn-sm btn-outline" disabled>&#8249;</button>
+        {% endif %}
+        <span class="pagination-info">第 {{ page }} / {{ total_pages }} 页（共 {{ total_items }} 组）</span>
+        {% if page < total_pages %}
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page={{ page + 1 }}">&#8250;</a>
+        <a class="btn btn-sm btn-outline" href="{{ pagination_base }}{{ sep }}page={{ total_pages }}">&#187;</a>
+        {% else %}
+        <button class="btn btn-sm btn-outline" disabled>&#8250;</button>
+        <button class="btn btn-sm btn-outline" disabled>&#187;</button>
+        {% endif %}
+    </div>
+</div>
+
+</div>{# end tab-bills #}
+
+{# ---- 图片选择弹窗 ---- #}
+<div id="imagePickerModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeImagePicker()">
+    <div class="modal-box">
+        <div class="modal-header">
+            <h3 style="margin:0;" id="imagePickerTitle">选择单价来源文件</h3>
+            <button onclick="closeImagePicker()" style="background:none; border:none; font-size:1.5rem; cursor:pointer; color:var(--text-secondary);">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div style="margin-bottom:0.75rem;">
+                <input type="text" id="imagePickerSearch"                     placeholder="搜索文件名…"
+                       oninput="filterPickerImages()"
+                       style="width:100%; padding:0.4rem 0.75rem; border:1px solid var(--border);
+                              border-radius:var(--radius); font-size:0.85rem;">
+            </div>
+            <div id="imagePickerLoading" style="text-align:center; padding:2rem; color:var(--text-secondary);">加载文件列表中...</div>
+            <div id="imagePickerContent" style="display:none;"></div>
+            <div id="imagePickerEmpty" style="display:none; text-align:center; padding:2rem; color:var(--text-secondary);">无图片文件</div>
+        </div>
+        <div class="modal-footer" id="imagePickerFooter" style="display:none;">
+            <div id="imagePickerSelected" style="font-size:0.85rem; color:var(--text-secondary);"></div>
+            <div style="display:flex; gap:0.5rem;">
+                <button class="btn btn-sm btn-outline" onclick="closeImagePicker()">取消</button>
+                <button class="btn btn-sm btn-primary" id="imagePickerConfirm" onclick="confirmImagePick()" disabled>OCR 提取</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# ---- OCR 结果弹窗 ---- #}
+<div id="ocrResultModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeOcrResult()">
+    <div class="modal-box" style="max-width:700px;">
+        <div class="modal-header">
+            <h3 style="margin:0;">OCR 提取结果</h3>
+            <button onclick="closeOcrResult()" style="background:none; border:none; font-size:1.5rem; cursor:pointer; color:var(--text-secondary);">&times;</button>
+        </div>
+        <div class="modal-body" style="max-height:70vh; overflow-y:auto;">
+            <div id="ocrResultContent"></div>
+        </div>
+        <div class="modal-footer">
+            <div style="font-size:0.8rem; color:var(--text-secondary);" id="ocrResultNote"></div>
+            <div style="display:flex; gap:0.5rem;">
+                <button class="btn btn-sm btn-outline" onclick="closeOcrResult()">关闭</button>
+                <button class="btn btn-sm btn-primary" id="ocrApplyBtn" onclick="applyOcrPrices()" style="display:none;">应用单价数据</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# ---- 来源文件预览弹窗 ---- #}
+<div id="sourcePreviewModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeSourcePreview()">
+    <div class="modal-box" style="max-width:900px; max-height:90vh;">
+        <div class="modal-header">
+            <h3 style="margin:0;" id="sourcePreviewTitle">文件预览</h3>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+                <a id="sourcePreviewDownload" href="#" class="btn btn-sm btn-outline" style="display:none; text-decoration:none;" download>下载</a>
+                <button onclick="closeSourcePreview()" style="background:none; border:none; font-size:1.5rem; cursor:pointer; color:var(--text-secondary);">&times;</button>
+            </div>
+        </div>
+        <div class="modal-body" style="max-height:75vh; overflow:auto; padding:0;">
+            <div id="sourcePreviewLoading" style="text-align:center; padding:3rem; color:var(--text-secondary);">加载中...</div>
+            <div id="sourcePreviewContent" style="display:none;"></div>
+        </div>
+    </div>
+</div>
+
+{# ---- 图片预览弹窗（旧版保留兼容） ---- #}
+<div id="priceImageModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%;
+     background:rgba(0,0,0,0.85); z-index:9999; cursor:pointer; overflow:auto;"
+     onclick="closePriceImage()">
+    <div style="position:absolute; top:10px; right:20px; color:#fff; font-size:2rem; cursor:pointer; z-index:10000;"
+         onclick="closePriceImage()">&times;</div>
+    <div style="display:flex; align-items:center; justify-content:center; min-height:100vh; padding:2rem;">
+        <div id="priceImageLoading" style="color:#fff; font-size:1.2rem;">加载中...</div>
+        <img id="priceImageImg" style="display:none; max-width:95%; max-height:95vh; border-radius:8px;
+             box-shadow:0 4px 20px rgba(0,0,0,0.5);" onclick="event.stopPropagation();">
+    </div>
+</div>
+
+<style>
+/* Tab 栏 */
+.tab-bar {
+    display:flex; gap:0; margin-bottom:1rem;
+    border-bottom:2px solid var(--border);
+}
+.tab-btn {
+    padding:0.6rem 1.5rem; border:none; background:none;
+    font-size:0.9rem; font-weight:500; cursor:pointer;
+    color:var(--text-secondary); border-bottom:2px solid transparent;
+    margin-bottom:-2px; transition:all 0.15s;
+}
+.tab-btn:hover { color:var(--text); background:#f8fafc; }
+.tab-btn.active {
+    color:var(--primary); border-bottom-color:var(--primary); font-weight:600;
+}
+.tab-content { display:none; }
+.tab-content.active { display:block; }
+
+/* 电费单表格 */
+.bill-table { font-size:0.83rem; width:100%; border-collapse:collapse; }
+.bill-table th, .bill-table td { padding:0.4rem 0.6rem; border-bottom:1px solid var(--border); }
+.bill-table th { background:#f8fafc; font-weight:600; font-size:0.78rem; color:var(--text-secondary); }
+.bill-total-row { background:#f0fdf4; }
+.bill-total-row td { border-top:2px solid var(--border); }
+.bill-meter-section {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius); padding:0.75rem; margin-bottom:0.5rem;
+}
+.bill-price-summary {
+    display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap;
+    padding:0.5rem 0.75rem; font-size:0.8rem;
+    background:#f8fafc; border:1px solid var(--border); border-radius:var(--radius);
+}
+.bill-price-tag {
+    background:#eff6ff; color:var(--text); padding:0.15rem 0.5rem;
+    border-radius:4px; font-variant-numeric:tabular-nums; font-size:0.78rem;
+}
+
+/* 月份块 */
+.month-block { margin-bottom:1.5rem; }
+.month-header {
+    display:flex; align-items:center; justify-content:space-between;
+    gap:0.75rem; margin-bottom:0.5rem; flex-wrap:wrap;
+}
+.month-content { display:flex; flex-direction:column; gap:0.75rem; }
+.section-label {
+    font-size:0.8rem; font-weight:600; color:var(--text-secondary);
+    text-transform:uppercase; letter-spacing:0.03em; margin-bottom:0.25rem;
+}
+.reading-group .month-block:not(:last-child) {
+    border-bottom:1px solid var(--border); padding-bottom:1rem;
+}
+
+
+/* 输入框 */
+.cell-input {
+    width:80px; padding:0.2rem 0.3rem; border:1px solid var(--border);
+    border-radius:4px; font-size:0.83rem; text-align:right; background:#fff;
+    font-variant-numeric:tabular-nums;
+}
+.cell-input:focus { outline:none; border-color:var(--primary); box-shadow:0 0 0 2px rgba(37,99,235,0.15); }
+.cell-input:disabled { background:#f1f5f9; color:var(--text-secondary); cursor:not-allowed; }
+.cell-input.total-input { font-weight:600; }
+.fwd-cell { background:#f0fdf4; }
+.rev-cell { background:#eff6ff; }
+.self-cell { background:#fefbf5; }
+.calc-table { font-size:0.82rem; }
+.calc-table th { font-size:0.78rem; padding:6px 8px; white-space:nowrap; }
+.calc-table td { padding:5px 8px; }
+.total-row { background:#f0f0f0; font-weight:600; border-top:2px solid #ccc; }
+.total-row td { padding-top:8px; padding-bottom:8px; }
+.reading-table { font-size:0.8rem; }
+
+/* 行状态 */
+.row-incomplete { background:#fffbeb !important; }
+.row-incomplete td:first-child { box-shadow:inset 4px 0 0 var(--warning); }
+.row-locked { background:#eff6ff !important; }
+.row-locked td:first-child { box-shadow:inset 4px 0 0 var(--primary); }
+.row-missing { background:#fef2f2 !important; }
+.row-missing td:first-child { box-shadow:inset 4px 0 0 var(--danger); }
+
+/* 状态标识 */
+.status-badge {
+    display:inline-block; padding:0.15rem 0.5rem; border-radius:999px;
+    font-size:0.75rem; font-weight:500; white-space:nowrap;
+}
+.badge-locked { background:#dbeafe; color:#1e40af; }
+.badge-incomplete { background:#fef3c7; color:#92400e; }
+.badge-ok { background:#dcfce7; color:#166534; }
+
+/* 表格 */
+.reading-table th, .reading-table td { padding:0.4rem 0.5rem; }
+.reading-table { margin:0; }
+
+/* 单价区 */
+.price-section {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius); padding:0.75rem;
+}
+.price-missing { border-color:var(--warning); background:#fffbeb; }
+.price-grid {
+    display:flex; gap:1rem; flex-wrap:wrap; align-items:flex-end;
+}
+.price-item { display:flex; flex-direction:column; gap:0.15rem; }
+.price-item label { font-size:0.75rem; color:var(--text-secondary); font-weight:500; }
+.price-input { width:100px; }
+.price-source-tag {
+    font-size:0.75rem; color:var(--primary); cursor:pointer;
+    background:#eff6ff; padding:0.15rem 0.5rem; border-radius:4px;
+    border:1px dashed var(--primary); white-space:nowrap;
+}
+.price-source-tag:hover { background:#dbeafe; }
+
+/* 数据来源 */
+.source-section {
+    background:#f8fafc; border:1px solid var(--border);
+    border-radius:var(--radius); padding:0; overflow:hidden;
+}
+.source-section summary {
+    padding:0.5rem 0.75rem; margin:0; list-style:none;
+}
+.source-section summary::-webkit-details-marker { display:none; }
+.source-section[open] summary { border-bottom:1px solid var(--border); }
+.source-list { padding:0.5rem 0.75rem; }
+.source-item {
+    display:flex; align-items:center; gap:0.5rem;
+    padding:0.25rem 0; font-size:0.8rem;
+}
+.source-file {
+    color:var(--text); overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; max-width:400px;
+}
+.source-sheet { color:var(--text-secondary); font-size:0.75rem; white-space:nowrap; }
+.source-link { color:var(--primary); cursor:pointer; border-bottom:1px dashed var(--primary); }
+.source-link:hover { border-bottom-style:solid; }
+
+/* OCR 结果样式 */
+.ocr-section { margin-bottom:1rem; }
+.ocr-section-title {
+    font-weight:600; font-size:0.85rem; color:var(--text);
+    padding:0.4rem 0; border-bottom:1px solid var(--border); margin-bottom:0.5rem;
+}
+.ocr-table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+.ocr-table td { padding:0.3rem 0.5rem; border-bottom:1px solid #f1f5f9; }
+.ocr-label { color:var(--text-secondary); white-space:nowrap; width:100px; }
+.ocr-value { font-family:'Cascadia Code','Fira Code',monospace; font-weight:500; }
+.ocr-raw-text {
+    background:#f8fafc; border:1px solid var(--border); border-radius:var(--radius);
+    padding:0.75rem; font-size:0.75rem; max-height:200px; overflow:auto;
+    white-space:pre-wrap; word-break:break-all; color:var(--text-secondary);
+    margin-top:0.5rem;
+}
+
+/* 来源预览弹窗内容 */
+.source-preview-image { max-width:100%; height:auto; display:block; margin:0 auto; }
+.source-preview-excel { padding:1rem; overflow:auto; }
+.source-preview-excel .preview-table { width:100%; border-collapse:collapse; font-size:0.8rem; }
+.source-preview-excel .preview-table td,
+.source-preview-excel .preview-table th {
+    padding:0.3rem 0.5rem; border:1px solid var(--border); text-align:left;
+    white-space:nowrap; max-width:200px; overflow:hidden; text-overflow:ellipsis;
+}
+.source-preview-excel .preview-table tr:nth-child(even) { background:#f8fafc; }
+.source-preview-error { padding:2rem; text-align:center; color:var(--text-secondary); }
+
+
+/* 弹窗 */
+.modal-overlay {
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    background:rgba(0,0,0,0.5); z-index:9998;
+    display:flex; align-items:center; justify-content:center;
+}
+.modal-box {
+    background:#fff; border-radius:var(--radius); box-shadow:var(--shadow-md);
+    max-width:800px; width:95%; max-height:85vh; display:flex; flex-direction:column;
+}
+.modal-header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:1rem 1.25rem; border-bottom:1px solid var(--border);
+}
+.modal-body { padding:1rem 1.25rem; overflow-y:auto; flex:1; }
+.modal-footer {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:0.75rem 1.25rem; border-top:1px solid var(--border); flex-wrap:wrap; gap:0.5rem;
+}
+
+/* 图片选择分组 */
+.picker-group { margin-bottom:0.5rem; }
+.picker-group summary {
+    cursor:pointer; font-weight:600; font-size:0.85rem;
+    padding:0.5rem 0.75rem; background:#f8fafc; border:1px solid var(--border);
+    border-radius:var(--radius); display:flex; align-items:center;
+    justify-content:space-between; list-style:none;
+}
+.picker-group summary::-webkit-details-marker { display:none; }
+.picker-group[open] summary { border-bottom-left-radius:0; border-bottom-right-radius:0; }
+.picker-group-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.picker-group-count { font-size:0.75rem; font-weight:400; color:var(--text-secondary); margin-left:0.5rem; white-space:nowrap; }
+
+/* 图片选择网格 */
+.image-picker-grid {
+    display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));
+    gap:0.75rem; padding:0.75rem;
+    border:1px solid var(--border); border-top:none;
+    border-radius:0 0 var(--radius) var(--radius);
+}
+.image-pick-item {
+    border:2px solid var(--border); border-radius:var(--radius);
+    overflow:hidden; cursor:pointer; transition:all 0.15s;
+}
+.image-pick-item:hover { border-color:var(--primary); box-shadow:0 0 0 2px rgba(37,99,235,0.15); }
+.image-pick-item.selected { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,0.3); }
+.image-pick-item img { width:100%; height:120px; object-fit:cover; display:block; }
+.image-pick-item .file-icon-pdf {
+    width:100%; height:120px; display:flex; align-items:center; justify-content:center;
+    background:#fef3c7; color:#92400e; font-size:1.5rem; font-weight:700;
+}
+.image-pick-item .image-pick-name {
+    padding:0.25rem 0.5rem; font-size:0.7rem; color:var(--text-secondary);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+</style>
+
+<script>
+
+/* === Tab 切换 === */
+window.switchTab = function switchTab(tabName) {
+    document.querySelectorAll('.tab-btn').forEach(function(btn) {
+        btn.classList.toggle('active', btn.getAttribute('data-tab') === tabName);
+    });
+    document.querySelectorAll('.tab-content').forEach(function(panel) {
+        panel.classList.toggle('active', panel.id === 'tab-' + tabName);
+    });
+    // 记住选中的 tab
+    try { sessionStorage.setItem('readings_tab', tabName); } catch(e) {}
+};
+// 恢复上次选中的 tab
+(function() {
+    try {
+        var saved = sessionStorage.getItem('readings_tab');
+        if (saved && document.getElementById('tab-' + saved)) switchTab(saved);
+    } catch(e) {}
+})();
+
+/* === 抄表记录月份筛选（客户端） === */
+function filterReadingsMonth() {
+    var month = document.getElementById('readingsFilterMonth').value;
+    document.querySelectorAll('#tab-readings .reading-group').forEach(function(card) {
+        var anyVisible = false;
+        card.querySelectorAll('.month-block').forEach(function(block) {
+            var blockMonth = block.getAttribute('data-month');
+            var monthMatch = !month || blockMonth === month;
+            block.style.display = monthMatch ? '' : 'none';
+            if (monthMatch) anyVisible = true;
+        });
+        card.style.display = anyVisible ? '' : 'none';
+    });
+    // 更新 URL 参数（不刷新页面）
+    var url = new URL(window.location);
+    if (month) { url.searchParams.set('month', month); }
+    else { url.searchParams.delete('month'); }
+    history.replaceState(null, '', url);
+}
+// 页面加载时应用初始月份筛选
+(function() {
+    var month = document.getElementById('readingsFilterMonth').value;
+    if (month) filterReadingsMonth();
+})();
+
+/* === 导出遮罩 === */
+function showExportLoading(text) {
+    document.getElementById('exportLoadingOverlay').style.display = 'flex';
+    document.getElementById('exportLoadingText').textContent = text || '处理中...';
+}
+function hideExportLoading() {
+    document.getElementById('exportLoadingOverlay').style.display = 'none';
+}
+
+/* === 单月电费单导出（此页面月份为原始抄表月份，传 month_is_reading=1） === */
+function exportMonthBill(userId, month, project) {
+    showExportLoading('正在生成电费单...');
+    var params = new URLSearchParams();
+    if (project) params.set('project', project);
+    if (userId) params.set('user_id', userId);
+    if (month) params.set('month', month);
+    params.set('month_is_reading', '1');
+    var url = "{{ url_for('bills_export_excel') }}?" + params.toString();
+    fetch(url)
+        .then(function(r) {
+            if (!r.ok) throw new Error('导出失败');
+            var disposition = r.headers.get('Content-Disposition') || '';
+            var match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+            var filename = match ? match[1].replace(/['"]/g, '') : '电费单.xlsx';
+            return r.blob().then(function(blob) { return { blob: blob, filename: filename }; });
+        })
+        .then(function(result) {
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(result.blob);
+            a.download = result.filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(a.href);
+        })
+        .catch(function(e) {
+            alert('导出失败: ' + e.message);
+        })
+        .finally(function() {
+            hideExportLoading();
+        });
+}
+
+/* === 批量导出 === */
+function exportSelectedBills() {
+    var checked = document.querySelectorAll('.bill-check:checked');
+    if (checked.length === 0) return;
+    showExportLoading('正在生成批量电费单...');
+    var items = [];
+    checked.forEach(function(cb) {
+        items.push({ user_id: cb.getAttribute('data-user'), month: cb.getAttribute('data-month') });
+    });
+    var formData = new FormData();
+    formData.append('items', JSON.stringify(items));
+    formData.append('month_is_reading', '1');
+    fetch("{{ url_for('bills_export_excel') }}", { method: 'POST', body: formData })
+        .then(function(r) {
+            if (!r.ok) throw new Error('导出失败');
+            var disposition = r.headers.get('Content-Disposition') || '';
+            var match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+            var filename = match ? match[1].replace(/['"]/g, '') : '批量电费单.xlsx';
+            return r.blob().then(function(blob) { return { blob: blob, filename: filename }; });
+        })
+        .then(function(result) {
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(result.blob);
+            a.download = result.filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(a.href);
+        })
+        .catch(function(e) {
+            alert('导出失败: ' + e.message);
+        })
+        .finally(function() {
+            hideExportLoading();
+        });
+}
+
+/* === 电费单筛选 === */
+function filterBills() {
+    var project = document.getElementById('billFilterProject').value;
+    var user = document.getElementById('billFilterUser').value;
+    var month = document.getElementById('billFilterMonth').value;
+
+    document.querySelectorAll('.bill-group-card').forEach(function(card) {
+        var cardProject = card.getAttribute('data-project');
+        var cardUser = card.getAttribute('data-user');
+        var projectMatch = !project || cardProject === project;
+        var userMatch = !user || cardUser === user;
+
+        if (!projectMatch || !userMatch) {
+            card.style.display = 'none';
+            return;
+        }
+
+        var anyVisible = false;
+        card.querySelectorAll('.bill-month-block').forEach(function(block) {
+            var blockMonth = block.getAttribute('data-month');
+            var monthMatch = !month || blockMonth === month;
+            block.style.display = monthMatch ? '' : 'none';
+            if (monthMatch) anyVisible = true;
+        });
+        card.style.display = anyVisible ? '' : 'none';
+    });
+    uncheckHiddenBills();
+    updateBillSelection();
+}
+
+function resetBillFilter() {
+    document.getElementById('billFilterProject').value = '';
+    document.getElementById('billFilterUser').value = '';
+    document.getElementById('billFilterMonth').value = '';
+    filterBills();
+}
+
+function uncheckHiddenBills() {
+    document.querySelectorAll('.bill-check').forEach(function(cb) {
+        var block = cb.closest('.bill-month-block');
+        var card = cb.closest('.bill-group-card');
+        if ((block && block.style.display === 'none') || (card && card.style.display === 'none')) {
+            cb.checked = false;
+        }
+    });
+}
+
+function getVisibleBillChecks() {
+    return Array.from(document.querySelectorAll('.bill-check')).filter(function(cb) {
+        var block = cb.closest('.bill-month-block');
+        var card = cb.closest('.bill-group-card');
+        return (!block || block.style.display !== 'none') && (!card || card.style.display !== 'none');
+    });
+}
+
+function toggleBillSelectAll(masterCb) {
+    var visible = getVisibleBillChecks();
+    visible.forEach(function(cb) { cb.checked = masterCb.checked; });
+    updateBillSelection();
+}
+
+function updateBillSelection() {
+    var visible = getVisibleBillChecks();
+    var checked = visible.filter(function(cb) { return cb.checked; });
+    document.getElementById('billSelectedCount').textContent = '已选 ' + checked.length + ' 项';
+    document.getElementById('billBatchExportBtn').disabled = checked.length === 0;
+    var masterCb = document.getElementById('billSelectAll');
+    masterCb.checked = visible.length > 0 && checked.length === visible.length;
+    masterCb.indeterminate = checked.length > 0 && checked.length < visible.length;
+}
+
+/* === 保存（抄表 + 单价一起保存） === */
+function saveAll(btn, userId, month) {
+    var block = btn.closest('.month-block');
+    var rows = block.querySelectorAll('tr[data-meter-id]');
+    var saves = [];
+    rows.forEach(function(row) {
+        var meterId = row.getAttribute('data-meter-id');
+        var fields = {};
+        row.querySelectorAll('input.cell-input').forEach(function(inp) {
+            var v = inp.value.trim();
+            fields[inp.name] = v === '' ? null : parseFloat(v);
+        });
+        saves.push({ meter_id: parseInt(meterId), month: month, fields: fields });
+    });
+
+    // 收集单价（第一个 .price-grid = 尖峰平谷）
+    var priceGrid = block.querySelector('.price-grid');
+    var prices = {};
+    var hasPrice = false;
+    if (priceGrid) priceGrid.querySelectorAll('.price-input').forEach(function(inp) {
+        var v = inp.value.trim();
+        prices[inp.name] = v === '' ? null : parseFloat(v);
+        if (v !== '') hasPrice = true;
+    });
+
+    // 收集结算单（第二个 .price-grid = 上网电价）
+    var settlementGrid = block.querySelector('.settlement-price-grid');
+    var settlementPrices = {};
+    var hasSettlementPrice = false;
+    if (settlementGrid) {
+        settlementGrid.querySelectorAll('.price-input').forEach(function(inp) {
+            var v = inp.value.trim();
+            settlementPrices[inp.name] = v === '' ? null : parseFloat(v);
+            if (v !== '') hasSettlementPrice = true;
+        });
+    }
+
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+
+    // 并行保存抄表和单价
+    var p1 = fetch('/api/readings/batch-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ updates: saves })
+    }).then(function(r) { return r.json(); });
+
+    var p2 = hasPrice ? fetch('/api/readings/update-price', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, month: month, prices: prices })
+    }).then(function(r) { return r.json(); }) : Promise.resolve({ ok: true });
+
+    var p3 = hasSettlementPrice ? fetch('/api/readings/update-price', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, month: month, prices: settlementPrices })
+    }).then(function(r) { return r.json(); }) : Promise.resolve({ ok: true });
+
+    Promise.all([p1, p2, p3]).then(function(results) {
+        var allOk = results.every(function(r) { return r.ok; });
+        if (allOk) {
+            btn.textContent = '已保存';
+            btn.style.background = 'var(--success)';
+            setTimeout(function() {
+                btn.textContent = '保存'; btn.disabled = false;
+                btn.style.background = '';
+            }, 1500);
+        } else {
+            var errs = results.filter(function(r) { return !r.ok; }).map(function(r) { return r.error; });
+            alert('保存失败: ' + errs.join('; '));
+            btn.textContent = '保存'; btn.disabled = false;
+        }
+    }).catch(function(e) {
+        alert('请求失败: ' + e);
+        btn.textContent = '保存'; btn.disabled = false;
+    });
+}
+
+/* === 锁定/解锁 === */
+function toggleMonthLock(userId, month, currentlyLocked) {
+    var action = currentlyLocked ? '解锁' : '锁定';
+    if (!confirm('确定' + action + '用户 ' + userId + ' 的 ' + month + ' 数据？\n\n' +
+                 (currentlyLocked ? '解锁后数据可编辑，程序也可自动更新。' : '锁定后所有数据不可编辑，程序不能自动更改。'))) {
+        return;
+    }
+    fetch('/api/readings/batch-lock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, month: month, locked: !currentlyLocked })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.ok) location.reload();
+        else alert('操作失败: ' + (data.error || '未知错误'));
+    })
+    .catch(function(e) { alert('请求失败: ' + e); });
+}
+
+function togglePriceLock(userId, month, currentlyLocked) {
+    var action = currentlyLocked ? '解锁' : '锁定';
+    if (!confirm('确定' + action + '用户 ' + userId + ' 的 ' + month + ' 单价数据？\n\n' +
+                 (currentlyLocked ? '解锁后单价可编辑，程序也可自动更新。' : '锁定后单价不可编辑，程序不能自动更改。'))) {
+        return;
+    }
+    fetch('/api/prices/lock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, month: month, locked: !currentlyLocked })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.ok) location.reload();
+        else alert('操作失败: ' + (data.error || '未知错误'));
+    })
+    .catch(function(e) { alert('请求失败: ' + e); });
+}
+
+function toggleSettlementLock(userId, month, currentlyLocked) {
+    var action = currentlyLocked ? '解锁' : '锁定';
+    if (!confirm('确定' + action + '用户 ' + userId + ' 的 ' + month + ' 结算单数据？\n\n' +
+                 (currentlyLocked ? '解锁后结算单可编辑，程序也可自动更新。' : '锁定后结算单不可编辑，程序不能自动更改。'))) {
+        return;
+    }
+    fetch('/api/settlement/lock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, month: month, locked: !currentlyLocked })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.ok) location.reload();
+        else alert('操作失败: ' + (data.error || '未知错误'));
+    })
+    .catch(function(e) { alert('请求失败: ' + e); });
+}
+
+/* === 图片选择器 === */
+var pickerState = { userId: '', month: '', target: 'price', selectedPath: '', selectedName: '', groups: [] };
+
+function openImagePicker(btn, userId, month, target) {
+    target = target || 'price';
+    var keyword = target === 'settlement' ? '电费结算单' : '微信';
+    pickerState = { userId: userId, month: month, target: target, selectedPath: '', selectedName: '', groups: [] };
+    var modal = document.getElementById('imagePickerModal');
+    modal.style.display = 'flex';
+    document.getElementById('imagePickerLoading').style.display = '';
+    document.getElementById('imagePickerContent').style.display = 'none';
+    document.getElementById('imagePickerEmpty').style.display = 'none';
+    document.getElementById('imagePickerFooter').style.display = 'none';
+    document.getElementById('imagePickerConfirm').disabled = true;
+    document.getElementById('imagePickerSelected').textContent = '';
+    document.getElementById('imagePickerSearch').value = '';
+
+    // 根据目标设置标题
+    if (target === 'settlement') {
+        document.getElementById('imagePickerTitle').textContent = '选择电费结算单来源文件';
+    } else {
+        document.getElementById('imagePickerTitle').textContent = '选择单价来源文件';
+    }
+
+    // 后端按关键词过滤，只返回匹配的文件
+    fetch('/api/files/images?q=' + encodeURIComponent(keyword))
+        .then(function(r) {
+            if (!r.ok) throw new Error('服务器返回 ' + r.status);
+            return r.json();
+        })
+        .then(function(data) {
+            document.getElementById('imagePickerLoading').style.display = 'none';
+            if (!data.groups || data.groups.length === 0) {
+                document.getElementById('imagePickerEmpty').style.display = '';
+                document.getElementById('imagePickerEmpty').textContent = '没有找到包含"' + keyword + '"的文件';
+                return;
+            }
+            pickerState.groups = data.groups;
+            renderPickerGroups(data.groups);
+        })
+        .catch(function(e) {
+            document.getElementById('imagePickerLoading').textContent = '加载失败: ' + e;
+        });
+}
+
+function renderPickerGroups(groups) {
+    var container = document.getElementById('imagePickerContent');
+    container.innerHTML = '';
+    container.style.display = '';
+    document.getElementById('imagePickerFooter').style.display = '';
+    var hasAny = false;
+
+    groups.forEach(function(group, gi) {
+        var visibleImages = group.files ? group.files.filter(function(f) { return !f._hidden; })
+                                        : (group.images || []).filter(function(f) { return !f._hidden; });
+        if (visibleImages.length === 0) return;
+        hasAny = true;
+
+        var details = document.createElement('details');
+        details.className = 'picker-group';
+        if (gi === 0) details.open = true;
+
+        var summary = document.createElement('summary');
+        summary.innerHTML = '<span class="picker-group-name">' + escapeHtml(group.name) + '</span>' +
+            '<span class="picker-group-count">' + visibleImages.length + ' 个文件</span>';
+        details.appendChild(summary);
+
+        var grid = document.createElement('div');
+        grid.className = 'image-picker-grid';
+        visibleImages.forEach(function(f) {
+            var item = document.createElement('div');
+            item.className = 'image-pick-item';
+            if (f.path === pickerState.selectedPath) item.className += ' selected';
+            item.setAttribute('data-path', f.path);
+            item.setAttribute('data-name', f.filename);
+            if (f.file_type === 'pdf') {
+                item.innerHTML = '<div class="file-icon-pdf">PDF</div>' +
+                    '<div class="image-pick-name" title="' + escapeHtml(f.filename) + '">' + escapeHtml(f.filename) + '</div>';
+            } else {
+                item.innerHTML = '<img src="' + f.url + '" alt="' + escapeHtml(f.filename) + '" loading="lazy">' +
+                    '<div class="image-pick-name" title="' + escapeHtml(f.filename) + '">' + escapeHtml(f.filename) + '</div>';
+            }
+            item.onclick = function() { selectImage(this); };
+            grid.appendChild(item);
+        });
+        details.appendChild(grid);
+        container.appendChild(details);
+    });
+
+    if (!hasAny) {
+        container.style.display = 'none';
+        document.getElementById('imagePickerEmpty').style.display = '';
+        document.getElementById('imagePickerEmpty').textContent = '没有匹配的文件';
+    } else {
+        document.getElementById('imagePickerEmpty').style.display = 'none';
+    }
+}
+
+function filterPickerImages() {
+    var keyword = (document.getElementById('imagePickerSearch').value || '').toLowerCase().trim();
+    pickerState.groups.forEach(function(group) {
+        var items = group.files || group.images || [];
+        items.forEach(function(f) {
+            f._hidden = keyword && f.filename.toLowerCase().indexOf(keyword) === -1
+                        && group.name.toLowerCase().indexOf(keyword) === -1;
+        });
+    });
+    renderPickerGroups(pickerState.groups);
+}
+
+function selectImage(el) {
+    document.querySelectorAll('.image-pick-item.selected').forEach(function(x) { x.classList.remove('selected'); });
+    el.classList.add('selected');
+    pickerState.selectedPath = el.getAttribute('data-path');
+    pickerState.selectedName = el.getAttribute('data-name');
+    document.getElementById('imagePickerSelected').textContent = '已选: ' + pickerState.selectedName;
+    document.getElementById('imagePickerConfirm').disabled = false;
+}
+
+var ocrResultData = null; // 保存OCR结果数据
+
+function confirmImagePick() {
+    if (!pickerState.selectedPath) return;
+    var btn = document.getElementById('imagePickerConfirm');
+    btn.disabled = true;
+    btn.textContent = 'OCR 识别中...';
+
+    var isSettlement = pickerState.target === 'settlement';
+
+    fetch('/api/readings/ocr-extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            image_path: pickerState.selectedPath,
+            user_id: pickerState.userId,
+            month: pickerState.month,
+            target: pickerState.target
+        })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        btn.textContent = isSettlement ? 'OCR 提取结算单' : 'OCR 提取单价';
+        btn.disabled = false;
+        if (data.ok) {
+            closeImagePicker();
+            ocrResultData = data;
+            showOcrResult(data);
+        } else {
+            if (data.raw_text) {
+                closeImagePicker();
+                ocrResultData = null;
+                showOcrResult(data);
+            } else {
+                alert('OCR 提取失败: ' + (data.error || '未知错误'));
+            }
+        }
+    })
+    .catch(function(e) {
+        alert('请求失败: ' + e);
+        btn.textContent = isSettlement ? 'OCR 提取结算单' : 'OCR 提取单价';
+        btn.disabled = false;
+    });
+}
+
+function showOcrResult(data) {
+    var html = '';
+    var priceLabels = {
+        sharp_peak_price: '尖峰单价',
+        peak_price: '峰单价',
+        flat_price: '平单价',
+        valley_price: '谷单价',
+    };
+
+    // 基本信息
+    html += '<div class="ocr-section">';
+    html += '<div class="ocr-section-title">基本信息</div>';
+    html += '<table class="ocr-table"><tbody>';
+    html += '<tr><td class="ocr-label">来源文件</td><td>' + escapeHtml(data.source_file || '-') + '</td></tr>';
+    if (data.ocr_user_id) {
+        var mismatch = data.ocr_user_id !== pickerState.userId;
+        html += '<tr><td class="ocr-label">识别用户编号</td><td>' + escapeHtml(data.ocr_user_id) +
+            (mismatch ? ' <span style="color:var(--danger);font-size:0.8rem;">（与当前用户 ' + escapeHtml(pickerState.userId) + ' 不同）</span>' : ' <span style="color:var(--success);">✓</span>') +
+            '</td></tr>';
+    }
+    if (data.reading_month) {
+        html += '<tr><td class="ocr-label">识别月份</td><td>' + escapeHtml(data.reading_month) + '</td></tr>';
+    }
+    html += '</tbody></table></div>';
+
+    // 结算单价
+    if (data.target === 'settlement' && data.settlement_price != null) {
+        html += '<div class="ocr-section">';
+        html += '<div class="ocr-section-title">结算单价</div>';
+        html += '<table class="ocr-table"><tbody>';
+        html += '<tr><td class="ocr-label">上网电价</td><td class="ocr-value">' +
+            data.settlement_price.toFixed(8) + ' 元/kWh</td></tr>';
+        html += '</tbody></table></div>';
+    }
+
+    // 单价数据
+    if (data.prices && data.target !== 'settlement') {
+        var hasAnyPrice = Object.keys(data.prices).some(function(k) { return data.prices[k] != null; });
+        html += '<div class="ocr-section">';
+        html += '<div class="ocr-section-title">单价数据' + (data.has_prices ? '' : ' <span style="color:var(--text-secondary);font-size:0.8rem;">（未识别到）</span>') + '</div>';
+        if (hasAnyPrice) {
+            html += '<table class="ocr-table"><tbody>';
+            Object.keys(priceLabels).forEach(function(k) {
+                if (data.prices[k] != null) {
+                    html += '<tr><td class="ocr-label">' + priceLabels[k] + '</td><td class="ocr-value">' +
+                        data.prices[k].toFixed(8) + ' 元/kWh</td></tr>';
+                }
+            });
+            html += '</tbody></table>';
+        } else {
+            html += '<div style="color:var(--text-secondary); font-size:0.85rem; padding:0.5rem 0;">未提取到单价</div>';
+        }
+        html += '</div>';
+    }
+
+    // 电表记录
+    if (data.meter_records && data.meter_records.length > 0) {
+        html += '<div class="ocr-section">';
+        html += '<div class="ocr-section-title">电表记录（' + data.meter_records.length + ' 条）</div>';
+        data.meter_records.forEach(function(rec, i) {
+            html += '<table class="ocr-table" style="margin-bottom:0.5rem;"><tbody>';
+            if (rec.meter_number) html += '<tr><td class="ocr-label">电表号</td><td>' + escapeHtml(rec.meter_number) + '</td></tr>';
+            if (rec.project_name) html += '<tr><td class="ocr-label">项目</td><td>' + escapeHtml(rec.project_name) + '</td></tr>';
+            var readingFields = [
+                ['sharp_peak', '尖峰读数'], ['peak', '峰读数'], ['flat', '平读数'],
+                ['valley', '谷读数']
+            ];
+            readingFields.forEach(function(f) {
+                if (rec[f[0]] != null) {
+                    html += '<tr><td class="ocr-label">' + f[1] + '</td><td class="ocr-value">' + rec[f[0]] + '</td></tr>';
+                }
+            });
+            html += '</tbody></table>';
+        });
+        html += '</div>';
+    }
+
+    // OCR 原始文本
+    if (data.raw_text) {
+        html += '<div class="ocr-section">';
+        html += '<details><summary class="ocr-section-title" style="cursor:pointer;">OCR 原始文本</summary>';
+        html += '<pre class="ocr-raw-text">' + escapeHtml(data.raw_text) + '</pre>';
+        html += '</details></div>';
+    }
+
+    document.getElementById('ocrResultContent').innerHTML = html;
+
+    // 应用按钮
+    var applyBtn = document.getElementById('ocrApplyBtn');
+    if (data.target === 'settlement' && data.settlement_price != null) {
+        applyBtn.style.display = '';
+        applyBtn.textContent = '应用结算单价';
+        document.getElementById('ocrResultNote').textContent = '结算单价已保存，点击"应用结算单价"填充到表格。';
+    } else if (data.ok && data.has_prices) {
+        applyBtn.style.display = '';
+        applyBtn.textContent = '应用单价数据';
+        document.getElementById('ocrResultNote').textContent = '单价数据已保存，点击"应用单价数据"填充到表格。';
+    } else {
+        applyBtn.style.display = 'none';
+        document.getElementById('ocrResultNote').textContent = data.ok ? '未识别到单价，其他数据仅供参考。' : ('提取失败: ' + (data.error || ''));
+    }
+
+    document.getElementById('ocrResultModal').style.display = 'flex';
+}
+
+function applyOcrPrices() {
+    if (!ocrResultData) return;
+    var block = document.querySelector('.month-block[data-user-id="' + pickerState.userId + '"][data-month="' + pickerState.month + '"]');
+    if (!block) { closeOcrResult(); return; }
+
+    if (ocrResultData.target === 'settlement') {
+        // 结算单：填充上网电价
+        var sg = block.querySelector('.settlement-price-grid');
+        if (sg && ocrResultData.settlement_price != null) {
+            var inp = sg.querySelector('[name="grid_average_price"]');
+            if (inp) inp.value = ocrResultData.settlement_price.toFixed(8);
+        }
+    } else if (ocrResultData.prices) {
+        // 单价：填充尖峰平谷
+        var pg = block.querySelector('.price-grid');
+        if (pg) {
+            Object.keys(ocrResultData.prices).forEach(function(k) {
+                var inp = pg.querySelector('[name="' + k + '"]');
+                if (inp && ocrResultData.prices[k] != null) {
+                    inp.value = ocrResultData.prices[k].toFixed(8);
+                }
+            });
+            var sec = block.querySelector('.price-section');
+            if (sec) sec.classList.remove('price-missing');
+        }
+    }
+    closeOcrResult();
+}
+
+function closeOcrResult() {
+    document.getElementById('ocrResultModal').style.display = 'none';
+    ocrResultData = null;
+}
+
+function closeImagePicker() {
+    document.getElementById('imagePickerModal').style.display = 'none';
+}
+
+/* === 来源文件预览（支持图片/Excel/PDF） === */
+function showSourcePreview(filename) {
+    if (!filename || filename === '-') return;
+    var modal = document.getElementById('sourcePreviewModal');
+    var loading = document.getElementById('sourcePreviewLoading');
+    var content = document.getElementById('sourcePreviewContent');
+    var dlBtn = document.getElementById('sourcePreviewDownload');
+    document.getElementById('sourcePreviewTitle').textContent = filename.split('/').pop() || filename;
+    loading.style.display = '';
+    loading.textContent = '加载中...';
+    content.style.display = 'none';
+    content.innerHTML = '';
+    dlBtn.style.display = 'none';
+    modal.style.display = 'flex';
+
+    fetch('/api/archive/preview?filename=' + encodeURIComponent(filename))
+        .then(function(r) {
+            if (!r.ok) throw new Error('服务器返回 ' + r.status);
+            return r.json();
+        })
+        .then(function(data) {
+            loading.style.display = 'none';
+            if (!data.found) {
+                /* 精确文件名未找到时，尝试用 find-image API 做模糊搜索 */
+                return fetch('/api/files/find-image/' + encodeURIComponent(filename.split('/').pop()))
+                    .then(function(r2) { return r2.ok ? r2.json() : null; })
+                    .then(function(d2) {
+                        if (d2 && d2.found) {
+                            content.innerHTML = '<img src="' + d2.url + '" class="source-preview-image" alt="' + escapeHtml(filename) + '">';
+                        } else {
+                            content.innerHTML = '<div class="source-preview-error">未找到文件: ' + escapeHtml(filename) + '</div>';
+                        }
+                        content.style.display = '';
+                    });
+            }
+            if (data.download_url) {
+                dlBtn.href = data.download_url;
+                dlBtn.style.display = '';
+            }
+            if (data.type === 'image') {
+                content.innerHTML = '<img src="' + data.url + '" class="source-preview-image" alt="' + escapeHtml(data.filename) + '">';
+            } else if (data.type === 'excel') {
+                content.innerHTML = '<div class="source-preview-excel">' + data.html + '</div>';
+            } else if (data.type === 'pdf') {
+                content.innerHTML = '<iframe src="' + data.url + '" style="width:100%;height:70vh;border:none;"></iframe>';
+            } else if (data.type === 'error') {
+                content.innerHTML = '<div class="source-preview-error">' + escapeHtml(data.message) + '</div>';
+            } else {
+                content.innerHTML = '<div class="source-preview-error">不支持预览此类型文件</div>';
+            }
+            content.style.display = '';
+        })
+        .catch(function(e) {
+            loading.textContent = '加载失败: ' + e;
+            /* 作为兜底，尝试直接显示 find-image 搜索到的图片 */
+            fetch('/api/files/find-image/' + encodeURIComponent(filename.split('/').pop()))
+                .then(function(r) { return r.ok ? r.json() : null; })
+                .then(function(d) {
+                    if (d && d.found) {
+                        loading.style.display = 'none';
+                        content.innerHTML = '<img src="' + d.url + '" class="source-preview-image" alt="' + escapeHtml(filename) + '">';
+                        content.style.display = '';
+                    }
+                })
+                .catch(function() {});
+        });
+}
+
+function closeSourcePreview() {
+    document.getElementById('sourcePreviewModal').style.display = 'none';
+}
+
+/* === 来源图片预览（旧版） === */
+function showPriceImage(sourceFile) {
+    if (!sourceFile || sourceFile === '-') return;
+    var modal = document.getElementById('priceImageModal');
+    var img = document.getElementById('priceImageImg');
+    var loading = document.getElementById('priceImageLoading');
+    modal.style.display = 'block';
+    img.style.display = 'none';
+    loading.style.display = '';
+    document.body.style.overflow = 'hidden';
+
+    fetch('/api/files/find-image/' + encodeURIComponent(sourceFile))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            loading.style.display = 'none';
+            if (data.found) {
+                img.src = data.url;
+                img.style.display = 'block';
+            } else {
+                loading.style.display = '';
+                loading.textContent = '未找到图片: ' + sourceFile;
+            }
+        })
+        .catch(function() {
+            loading.textContent = '加载失败';
+        });
+}
+
+function closePriceImage() {
+    document.getElementById('priceImageModal').style.display = 'none';
+    document.body.style.overflow = '';
+}
+
+function escapeHtml(s) {
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        closePriceImage();
+        closeImagePicker();
+    }
+});
+
+
+/* === 数据提取更新 === */
+var taskLabels = { readings: '抄表提取', prices: '单价提取', settlement: '电费结算单', all: '全部' };
+
+function startDataUpdate(mode, taskType) {
+    var label = taskLabels[taskType] || taskType;
+    if (mode === 'full') {
+        var warns = {
+            readings: '将清空所有抄表记录（monthly_readings），然后重新提取。',
+            prices:   '将清空所有单价记录（price_records），然后重新提取。',
+        };
+        if (!confirm(label + '全量提取\n\n' + (warns[taskType] || '') + '\n\n电表档案不受影响。确定继续？')) return;
+    }
+    var urlMap = {
+        'incremental_readings': '/api/bills/readings/incremental',
+        'full_readings':        '/api/bills/readings/full',
+        'incremental_prices':   '/api/bills/prices/incremental',
+        'full_prices':          '/api/bills/prices/full',
+        'incremental_settlement': '/api/bills/settlement/incremental',
+        'full_settlement':        '/api/bills/settlement/full',
+    };
+    var url = urlMap[mode + '_' + taskType];
+    if (!url) return;
+
+    document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = true; });
+    var panel = document.getElementById('updatePanel');
+    var progress = document.getElementById('updateProgress');
+    var logsDiv = document.getElementById('updateLogs');
+    var spinner = document.getElementById('updateSpinner');
+    panel.style.display = '';
+    spinner.style.display = '';
+    progress.textContent = '正在启动' + label + (mode === 'full' ? '全量' : '增量') + '提取…';
+    logsDiv.innerHTML = '';
+
+    fetch(url, { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                progress.textContent = '错误: ' + data.error;
+                spinner.style.display = 'none';
+                document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+                return;
+            }
+            startUpdatePolling();
+        })
+        .catch(function(e) {
+            progress.textContent = '请求失败: ' + e;
+            spinner.style.display = 'none';
+            document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+        });
+}
+
+var updatePollTimer = null;
+function startUpdatePolling() {
+    if (updatePollTimer) return;
+    updatePollTimer = setInterval(pollUpdateStatus, 1000);
+}
+
+function pollUpdateStatus() {
+    fetch('/api/bill-refresh-status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var progress = document.getElementById('updateProgress');
+            var logsDiv = document.getElementById('updateLogs');
+            var spinner = document.getElementById('updateSpinner');
+            if (data.logs && data.logs.length) {
+                logsDiv.innerHTML = data.logs.map(function(l) { return '<div>' + escapeHtml(l) + '</div>'; }).join('');
+                logsDiv.scrollTop = logsDiv.scrollHeight;
+            }
+            if (data.running) {
+                progress.textContent = data.progress || '处理中…';
+            } else {
+                spinner.style.display = 'none';
+                progress.textContent = data.progress || '完成';
+                clearInterval(updatePollTimer);
+                updatePollTimer = null;
+                document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+                setTimeout(function() { location.reload(); }, 2000);
+            }
+        })
+        .catch(function() {});
+}
+
+var settlementPickerUserId = '';
+var settlementPickerMonth = '';
+function openSettlementPicker(userId, month) {
+    settlementPickerUserId = userId || '';
+    settlementPickerMonth = month || '';
+    settlementMode = 'selected';
+    document.getElementById('settlementModal').style.display = 'flex';
+    document.getElementById('settlementLoading').style.display = '';
+    document.getElementById('settlementCandidates').style.display = 'none';
+    document.getElementById('settlementCandidates').innerHTML = '';
+    document.getElementById('settlementCount').textContent = '';
+    document.getElementById('settlementConfirmBtn').disabled = true;
+    var title = '选择电费结算单文件';
+    if (userId) title += ' — 用户 ' + userId;
+    if (month) title += ' ' + month;
+    document.getElementById('settlementModalTitle').textContent = title;
+
+    fetch('/api/bills/settlement/candidates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            user_id: settlementPickerUserId,
+            reading_month: settlementPickerMonth,
+        }),
+    })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            document.getElementById('settlementLoading').style.display = 'none';
+            var container = document.getElementById('settlementCandidates');
+            container.style.display = '';
+            if (!data.candidates || data.candidates.length === 0) {
+                container.innerHTML = '<div style="text-align:center;padding:2rem;color:#999;">未找到符合条件的电费结算单文件</div>';
+                return;
+            }
+            var html = '<div style="margin-bottom:0.5rem;font-size:0.85rem;color:#666;">共找到 ' + data.total + ' 个候选文件</div>';
+            html += '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">';
+            html += '<thead><tr style="background:#f8f9fa;">';
+            html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dee2e6;"><input type="checkbox" id="selAll" onchange="toggleAll(this)"></th>';
+            html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dee2e6;">文件名</th>';
+            html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dee2e6;">用户编号</th>';
+            html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dee2e6;">月份</th>';
+            html += '<th style="padding:6px 8px;text-align:right;border-bottom:1px solid #dee2e6;">结算电价</th>';
+            html += '</tr></thead><tbody>';
+            data.candidates.forEach(function(c, i) {
+                html += '<tr>';
+                html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;"><input type="checkbox" class="selFile" value="' + i + '" onchange="updateSettlementCount()"></td>';
+                html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(c.filename) + '">' + escapeHtml(c.filename) + '</td>';
+                html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;">' + escapeHtml(c.user_id) + '</td>';
+                html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;">' + escapeHtml(c.reading_month) + '</td>';
+                html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">' + (c.settlement_price ? c.settlement_price.toFixed(8) : '-') + '</td>';
+                html += '</tr>';
+            });
+            html += '</tbody></table>';
+            container.innerHTML = html;
+            // Store candidates data for later use
+            container._candidates = data.candidates;
+            container._filepaths = data.candidates.map(function(c) { return c.filepath; });
+            updateSettlementCount();
+        })
+        .catch(function(e) {
+            document.getElementById('settlementLoading').textContent = '加载失败: ' + e;
+        });
+}
+
+function closeSettlementPicker() {
+    document.getElementById('settlementModal').style.display = 'none';
+}
+
+function toggleAll(cb) {
+    document.querySelectorAll('.selFile').forEach(function(c) { c.checked = cb.checked; });
+    updateSettlementCount();
+}
+
+function updateSettlementCount() {
+    var checked = document.querySelectorAll('.selFile:checked').length;
+    document.getElementById('settlementCount').textContent = '已选择 ' + checked + ' 个文件';
+    document.getElementById('settlementConfirmBtn').disabled = checked === 0;
+}
+
+function confirmSettlementExtract() {
+    var container = document.getElementById('settlementCandidates');
+    var filepaths = container._filepaths || [];
+    var indices = [];
+    document.querySelectorAll('.selFile:checked').forEach(function(cb) {
+        indices.push(parseInt(cb.value));
+    });
+    var selected = indices.map(function(i) { return filepaths[i]; });
+    if (selected.length === 0) return;
+
+    closeSettlementPicker();
+
+    // 按列挑选模式：只处理选中的文件，结果写入对应用户/月份
+    if (settlementPickerUserId || settlementPickerMonth) {
+        document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = true; });
+        var logsDiv = document.getElementById('updateLogs');
+        var progress = document.getElementById('updateProgress');
+        var spinner = document.getElementById('updateSpinner');
+        var panel = document.getElementById('updatePanel');
+        panel.style.display = '';
+        spinner.style.display = '';
+        progress.textContent = '正在提取 ' + selected.length + ' 个电费结算单文件…';
+        logsDiv.innerHTML = '';
+        fetch('/api/bills/settlement/extract-selected', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                files: selected,
+                user_id: settlementPickerUserId,
+                reading_month: settlementPickerMonth,
+            }),
+        })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.error) {
+                    progress.textContent = '错误: ' + data.error;
+                } else {
+                    progress.textContent = '处理完成：成功 ' + data.processed + '，跳过 ' + data.skipped + '，失败 ' + data.failed;
+                    logsDiv.innerHTML = '<div>' + (data.detail || '') + '</div>';
+                }
+                spinner.style.display = 'none';
+                document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+                setTimeout(function() { location.reload(); }, 1500);
+            })
+            .catch(function(e) {
+                progress.textContent = '请求失败: ' + e;
+                spinner.style.display = 'none';
+                document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+            });
+        return;
+    }
+
+    // 批处理模式（原逻辑，不再使用）
+    var label = settlementMode === 'full' ? '全量' : '增量';
+    document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = true; });
+    var panel = document.getElementById('updatePanel');
+    var progress = document.getElementById('updateProgress');
+    var logsDiv = document.getElementById('updateLogs');
+    var spinner = document.getElementById('updateSpinner');
+    panel.style.display = '';
+    spinner.style.display = '';
+    progress.textContent = '正在提取 ' + selected.length + ' 个电费结算单文件…';
+    logsDiv.innerHTML = '';
+
+    fetch('/api/bills/settlement/extract-selected', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: selected, clear_first: settlementMode === 'full' }),
+    })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                progress.textContent = '错误: ' + data.error;
+            } else {
+                var msg = '处理完成：成功 ' + data.processed + '，跳过 ' + data.skipped + '，失败 ' + data.failed;
+                progress.textContent = msg;
+                logsDiv.innerHTML = '<div>' + msg + '</div>';
+            }
+            spinner.style.display = 'none';
+            document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+            setTimeout(function() { location.reload(); }, 2000);
+        })
+        .catch(function(e) {
+            progress.textContent = '请求失败: ' + e;
+            spinner.style.display = 'none';
+            document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = false; });
+        });
+}
+
+// 页面加载时检查是否有正在运行的更新任务
+(function() {
+    fetch('/api/bill-refresh-status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.running) {
+                document.getElementById('updatePanel').style.display = '';
+                document.getElementById('updateProgress').textContent = data.progress || '处理中…';
+                document.querySelectorAll('.update-btn').forEach(function(b) { b.disabled = true; });
+                if (data.logs && data.logs.length) {
+                    document.getElementById('updateLogs').innerHTML = data.logs.map(function(l) {
+                        return '<div>' + escapeHtml(l) + '</div>';
+                    }).join('');
+                }
+                startUpdatePolling();
+            }
+        })
+        .catch(function() {});
+})();
+</script>
+
+<!-- 电费结算单文件选择弹窗 -->
+<div id="settlementModal" class="modal" style="display:none; position:fixed; inset:0; z-index:1000;
+     background:rgba(0,0,0,0.5); align-items:center; justify-content:center;">
+    <div style="background:#fff; border-radius:8px; width:90%; max-width:800px; max-height:80vh;
+                display:flex; flex-direction:column; box-shadow:0 4px 24px rgba(0,0,0,0.2);">
+        <div style="padding:1rem 1.25rem; border-bottom:1px solid #dee2e6; display:flex;
+                    align-items:center; justify-content:space-between;">
+            <h3 style="margin:0;" id="settlementModalTitle">选择电费结算单文件</h3>
+            <button type="button" onclick="closeSettlementPicker()"
+                    style="background:none; border:none; font-size:1.5rem; cursor:pointer; color:#666;">&times;</button>
+        </div>
+        <div style="flex:1; overflow-y:auto; padding:0.75rem 1.25rem;">
+            <div id="settlementLoading" style="text-align:center; padding:2rem; color:#666;">扫描候选文件中…</div>
+            <div id="settlementCandidates" style="display:none;"></div>
+        </div>
+        <div style="padding:0.75rem 1.25rem; border-top:1px solid #dee2e6; display:flex;
+                    align-items:center; justify-content:space-between;">
+            <span id="settlementCount" style="font-size:0.85rem; color:#666;"></span>
+            <div style="display:flex; gap:0.5rem;">
+                <button type="button" onclick="closeSettlementPicker()"
+                        class="btn" style="background:#f0f0f0;">取消</button>
+                <button type="button" id="settlementConfirmBtn" class="btn btn-primary"
+                        onclick="confirmSettlementExtract()" disabled>确认提取</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# 全局导出遮罩 #}
+<div id="exportLoadingOverlay" style="display:none;position:fixed;inset:0;z-index:99999;
+     background:rgba(0,0,0,0.5);flex-direction:column;align-items:center;justify-content:center;">
+  <div style="border:4px solid #f3f3f3;border-top:4px solid #3498db;border-radius:50%;
+              width:48px;height:48px;animation:spin 0.8s linear infinite;"></div>
+  <div id="exportLoadingText" style="color:#fff;font-size:18px;margin-top:16px;">处理中...</div>
+</div>
+<style>
+@keyframes spin { 0%{transform:rotate(0deg)} 100%{transform:rotate(360deg)} }
+</style>
+{% endblock %}
