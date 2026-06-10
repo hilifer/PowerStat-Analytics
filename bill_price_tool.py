@@ -310,9 +310,15 @@ class BillPriceTool:
                     print(f"[{fi}/{total}] OCR {fname} → ✗ 未提取到单价，跳过")
                 continue
 
-            # 计算购电月（统计月 - 1）
+            # 已知 OCR 用户编号修正
+            _KNOWN_UID_FIXES = {
+                "0950000088022175": "0950000880022175",
+            }
+            if ocr_result.user_id in _KNOWN_UID_FIXES:
+                ocr_result.user_id = _KNOWN_UID_FIXES[ocr_result.user_id]
+
             reading_month = ocr_result.reading_month
-            purchase_month = self._month_minus_one(reading_month) if reading_month else None
+            purchase_month = reading_month  # 购电月 = 统计月（不做加减）
 
             rec = PriceRecord(
                 user_id=ocr_result.user_id,
@@ -350,13 +356,16 @@ class BillPriceTool:
         return records
 
     @staticmethod
-    def _month_minus_one(ym: str) -> Optional[str]:
-        """统计月 → 购电月（-1 个月）。"""
+    def _month_plus_one(ym: str) -> Optional[str]:
+        """YYYY-MM → 下个月（+1 个月）。"""
         try:
             parts = ym.split("-")
             y, m = int(parts[0]), int(parts[1])
-            d = datetime(y, m, 1) - timedelta(days=1)
-            return d.strftime("%Y-%m")
+            mo = m + 1
+            if mo > 12:
+                mo = 1
+                y += 1
+            return f"{y}-{str(mo).zfill(2)}"
         except (IndexError, ValueError):
             return None
 
@@ -392,9 +401,10 @@ class BillPriceTool:
             if cur_uid is None or month_val is None:
                 continue
 
-            purchase_month = cls._excel_serial_to_month(month_val)
-            if purchase_month is None:
+            base_month = cls._excel_serial_to_month(month_val)
+            if base_month is None:
                 continue
+            purchase_month = cls._month_plus_one(base_month) or base_month
 
             rows.append(ExcelRow(
                 user_id=cur_uid,
@@ -471,16 +481,25 @@ class BillPriceTool:
         )
 
     @staticmethod
+    def _float_eq(a: Optional[float], b: Optional[float]) -> bool:
+        """严格浮点相等比较。"""
+        if a is None and b is None:
+            return True
+        if a is None or b is None:
+            return False
+        return a == b
+
+    @staticmethod
     def _make_detail(row: ExcelRow, rec: Optional[PriceRecord], full_match: bool) -> RowDetail:
         if rec is None:
             return RowDetail(row, None, False, False, False, False, False, False,
                              "未提取到对应记录")
         id_ok = (rec.user_id or "").strip() == row.user_id.strip()
         month_ok = (rec.purchase_month or "") == row.purchase_month
-        sp_ok = rec.sharp_peak_price == row.sharp_peak_price
-        p_ok = rec.peak_price == row.peak_price
-        f_ok = rec.flat_price == row.flat_price
-        v_ok = rec.valley_price == row.valley_price
+        sp_ok = BillPriceTool._float_eq(rec.sharp_peak_price, row.sharp_peak_price)
+        p_ok = BillPriceTool._float_eq(rec.peak_price, row.peak_price)
+        f_ok = BillPriceTool._float_eq(rec.flat_price, row.flat_price)
+        v_ok = BillPriceTool._float_eq(rec.valley_price, row.valley_price)
         src = os.path.basename(rec.source_file) if rec.source_file else ""
         bt = f"类型{rec.bill_type}" if rec.bill_type else ""
         src_extra = f"{bt} {src}" if bt else src
@@ -490,6 +509,21 @@ class BillPriceTool:
 # ----------------------------------------------------------------------------- #
 # 命令行入口
 # ----------------------------------------------------------------------------- #
+
+class _Tee:
+    """同时写入两个文件对象。"""
+    def __init__(self, f1, f2):
+        self.f1 = f1
+        self.f2 = f2
+    def write(self, text):
+        self.f1.write(text)
+        self.f2.write(text)
+        self.flush()
+    def flush(self):
+        self.f1.flush()
+        self.f2.flush()
+    def isatty(self):
+        return self.f1.isatty()
 
 def _main(argv: List[str]) -> int:
     flags = set()
@@ -516,6 +550,8 @@ def _main(argv: List[str]) -> int:
         print("  --detail       逐项输出比对明细（默认只输出汇总）")
         print("  --fail-only    只打印未匹配的行")
         print("  --save <json>  保存提取结果到 JSON 文件")
+        print("  --load <json>  从先前保存的 JSON 加载结果（跳过 OCR）")
+        print("  --log <file>   同时将输出写入日志文件")
         return 1
 
     verbose = "--verbose" in flags
@@ -526,6 +562,23 @@ def _main(argv: List[str]) -> int:
         idx = argv.index("--save")
         if idx + 1 < len(argv):
             save_path = argv[idx + 1]
+    load_path = None
+    if "--load" in flags:
+        idx = argv.index("--load")
+        if idx + 1 < len(argv):
+            load_path = argv[idx + 1]
+    log_path = None
+    if "--log" in flags:
+        idx = argv.index("--log")
+        if idx + 1 < len(argv):
+            log_path = argv[idx + 1]
+
+    # 日志文件
+    log_fp = None
+    if log_path:
+        os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+        log_fp = open(log_path, "w", encoding="utf-8")
+        sys.stdout = _Tee(sys.stdout, log_fp)
 
     if not os.path.exists(xlsx_path):
         print(f"错误: 对比文件不存在 {xlsx_path}")
@@ -533,18 +586,42 @@ def _main(argv: List[str]) -> int:
 
     tool = BillPriceTool()
 
-    # 步骤 1：收集文件
-    print("[方法1] 收集文件（按内容去重）…")
-    files = tool.collect_images(positional, verbose=verbose)
-    if not files:
-        print("没有可处理的文件")
-        return 1
-    print(f"[方法1] 共 {len(files)} 个文件\n")
+    if load_path:
+        # 从 JSON 加载
+        if not os.path.exists(load_path):
+            print(f"错误: 加载文件不存在 {load_path}")
+            return 1
+        print(f"[方法] 从 {load_path} 加载先前提取结果（跳过 OCR）…")
+        with open(load_path, "r") as f:
+            raw = json.load(f)
+        records = []
+        for item in raw:
+            records.append(PriceRecord(
+                user_id=item.get("user_id"),
+                reading_month=item.get("reading_month"),
+                purchase_month=item.get("purchase_month"),
+                sharp_peak_price=item.get("sharp_peak_price"),
+                peak_price=item.get("peak_price"),
+                flat_price=item.get("flat_price"),
+                valley_price=item.get("valley_price"),
+                average_price=item.get("average_price"),
+                bill_type=item.get("bill_type", 0),
+                source_file=item.get("source", ""),
+            ))
+        print(f"[方法] 加载 {len(records)} 条记录\n")
+    else:
+        # 步骤 1：收集文件
+        print("[方法1] 收集文件（按内容去重）…")
+        files = tool.collect_images(positional, verbose=verbose)
+        if not files:
+            print("没有可处理的文件")
+            return 1
+        print(f"[方法1] 共 {len(files)} 个文件\n")
 
-    # 步骤 2：提取尖峰平谷
-    print(f"[方法2] OCR 提取尖峰平谷（只保留含\"{BillPriceTool.FILTER_KEYWORD}\"的图片）…")
-    records = tool.extract_prices(files, verbose=verbose or show_detail)
-    print(f"[方法2] 有效结果 {len(records)} 条\n")
+        # 步骤 2：提取尖峰平谷
+        print(f"[方法2] OCR 提取尖峰平谷（只保留含\"{BillPriceTool.FILTER_KEYWORD}\"的图片）…")
+        records = tool.extract_prices(files, verbose=verbose or show_detail)
+        print(f"[方法2] 有效结果 {len(records)} 条\n")
 
     # 保存结果
     if save_path and records:
@@ -569,6 +646,9 @@ def _main(argv: List[str]) -> int:
     print(f"[方法3] 与 {os.path.basename(xlsx_path)} 精确比对…")
     result = tool.match_with_excel(records, xlsx_path)
     print(result.detail_report(only_fail=fail_only))
+
+    if log_fp:
+        log_fp.close()
     return 0 if result.success else 2
 
 

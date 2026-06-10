@@ -533,6 +533,21 @@ class OCREngine:
             prices["sharp_peak_price"] = prices["peak_price"]
             log.info("  尖峰期价格为空，使用峰期价格: %s", prices["peak_price"])
 
+        # 尖峰价低于峰价时（如尖电量为0导致组件求和偏低），取峰价
+        sp = prices.get("sharp_peak_price")
+        pk = prices.get("peak_price")
+        if sp is not None and pk is not None and sp < pk * 0.95:
+            prices["sharp_peak_price"] = pk
+            log.info("  尖峰价格(%.4f)低于峰价(%.4f)，使用峰期价格", sp, pk)
+
+        # 尖/峰都为空时，取平期价格（账单可能只有平/谷两段）
+        if not prices.get("sharp_peak_price") and prices.get("flat_price"):
+            prices["sharp_peak_price"] = prices["flat_price"]
+            log.info("  尖峰价格为空，使用平期价格: %s", prices["flat_price"])
+        if not prices.get("peak_price") and prices.get("flat_price"):
+            prices["peak_price"] = prices["flat_price"]
+            log.info("  峰价格为空，使用平期价格: %s", prices["flat_price"])
+
         # 补充平均电价
         if "average_price" not in prices:
             avg = self._extract_average_price(text)
@@ -704,8 +719,8 @@ class OCREngine:
                                 break
                             combined_text += " " + next_line
 
-                        # 提取合并文本中的所有数字
-                        nums = re.findall(r'(\d+\.?\d*)', combined_text)
+                        # 提取合并文本中的所有数字（只取有至少2位小数的，避免"尖期电费1"误读为1.0）
+                        nums = re.findall(r'(\d+\.\d{2,8})', combined_text)
                         float_nums = []
                         for n in nums:
                             try:
@@ -779,18 +794,21 @@ class OCREngine:
                                 bool(re.search(r'[尖峰平谷]\s*期', line_clean))
 
             if is_flat_fee and not has_period_marker:
-                # 当前行无数字时，查找后续行中的单价
+                # 查找后续行中的基金附加费单价（搜索 30 行，直到找到 0.02~0.05 区间的值）
                 combined = line_clean
-                for j in range(i + 1, min(i + 4, len(lines))):
+                for j in range(i + 1, min(i + 30, len(lines))):
                     nl = lines[j].strip()
-                    if nl and not any(kw in nl for kw in component_keywords):
-                        combined += " " + nl
-                    else:
+                    if not nl:
+                        continue
+                    if any(kw in nl for kw in component_keywords) and \
+                       "基金及附加" not in nl and "基金附加" not in nl:
                         break
+                    combined += " " + nl
                 nums = re.findall(r'(\d+\.\d{2,8})', combined)
                 for n in nums:
                     val = float(n)
-                    if 0.001 <= val <= 1.0:
+                    # 基金附加费单价通常在 0.02~0.04 范围
+                    if 0.02 <= val <= 0.05:
                         flat_fee_price = val
                         break
                 continue
@@ -1209,32 +1227,65 @@ class OCREngine:
         return 0.1 <= val <= 3.0
 
     def _infer_month(self, text: str, source_info: dict, filename: str) -> Optional[str]:
-        """推断月份。"""
-        # 从 OCR 文本中提取
+        """推断月份（只用文件内容中的日期，优先用电期间/抄表日期）。"""
+        lines = text.split("\n")
+
+        # 策略0：找 用电开始时间/用电结束时间（广东电网特旺格式，YYYYMMDD无分隔符）→ 取开始月 +1
+        for i, line in enumerate(lines):
+            if "用电开始时间" in line or "用电结束时间" in line:
+                context = "\n".join(lines[i:min(i + 5, len(lines))])
+                m = re.findall(r'(\d{4})(\d{2})\d{2}', context)
+                if m:
+                    y, mo = int(m[0][0]), int(m[0][1])
+                    mo += 1
+                    if mo > 12:
+                        mo = 1
+                        y += 1
+                    if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                        return f"{y}-{str(mo).zfill(2)}"
+
+        # 策略1：找 用电期间 → 取开始月 +1（与抄表日期保持一致）
+        for i, line in enumerate(lines):
+            if "用电期间" in line or "Period" in line:
+                context = "\n".join(lines[i:min(i + 5, len(lines))])
+                m = re.findall(r'(\d{4})[-/.](\d{1,2})[-/.]\d{1,2}', context)
+                if len(m) >= 2:
+                    y, mo = int(m[0][0]), int(m[0][1])  # 取开始月
+                    mo += 1
+                    if mo > 12:
+                        mo = 1
+                        y += 1
+                    if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                        return f"{y}-{str(mo).zfill(2)}"
+
+        # 策略2：找 抄表日期 / MRDate 的值（仅当无用电期间时使用）
+        for i, line in enumerate(lines):
+            if "抄表日期" in line or "MRDate" in line or "MeterReading" in line:
+                for j in range(i, min(i + 4, len(lines))):
+                    m = re.search(r'(\d{4})[-/.](\d{1,2})[-/.]\d{1,2}', lines[j])
+                    if m:
+                        y, mo = int(m.group(1)), int(m.group(2))
+                        if 2015 <= y <= 2035 and 1 <= mo <= 12:
+                            return f"{y}-{str(mo).zfill(2)}"
+
+        # 策略3：通用日期匹配（全文第一个合理日期，排除打印日期）
+        skip_keywords = ["打印日期", "PrintDate", "温馨提示", "违约金"]
         month_patterns = [
             r'(\d{4})[-/年](\d{1,2})[-/月]',
-            r'(\d{4})(\d{2})(?:月|期)',
             r'(\d{4})[-/.](\d{1,2})',
+            r'(\d{4})(\d{2})(?:月|期)',
             r'(\d{4})\s*年\s*(\d{1,2})\s*月',
         ]
         for pattern in month_patterns:
-            match = re.search(pattern, text)
-            if match:
-                year, month = int(match.group(1)), int(match.group(2))
+            for m in re.finditer(pattern, text):
+                line_start = text.rfind("\n", 0, m.start()) + 1
+                line_end = text.find("\n", m.end())
+                line_ctx = text[line_start:line_end] if line_end > line_start else ""
+                if any(kw in line_ctx for kw in skip_keywords):
+                    continue
+                year, month = int(m.group(1)), int(m.group(2))
                 if 2015 <= year <= 2035 and 1 <= month <= 12:
                     return f"{year}-{str(month).zfill(2)}"
-
-        # 从文件名推断
-        for match in re.finditer(r'(\d{4})[-_年.]?(\d{1,2})', filename):
-            year, month = int(match.group(1)), int(match.group(2))
-            if 2015 <= year <= 2035 and 1 <= month <= 12:
-                return f"{year}-{str(month).zfill(2)}"
-
-        # 从邮件日期
-        if source_info and source_info.get("email_date"):
-            d = source_info["email_date"]
-            if hasattr(d, "strftime"):
-                return d.strftime("%Y-%m")
 
         return None
 
